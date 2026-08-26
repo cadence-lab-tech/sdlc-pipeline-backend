@@ -296,10 +296,18 @@ BEGIN
     INSERT INTO task_links (from_task_id, to_task_id, rel, note, created_by)
     VALUES (t_be, t_fe, 'blocks', 'Фронтенд ждёт стабильного контракта API', sys);
 
-    INSERT INTO task_events (task_id, type, actor_id, payload)
-    VALUES (t_be,    'task.created', sys, '{"source":"seed"}'),
-           (t_fe,    'task.created', sys, '{"source":"seed"}'),
-           (t_multi, 'task.created', sys, '{"source":"seed","multi_repo":true}');
+    -- Попытка прохождения статуса заводится сразу вместе с задачей: движок
+    -- исходит из того, что у задачи на текущем статусе всегда есть активный
+    -- stage_run — к нему привязываются артефакты и результаты гейтов.
+    -- У статуса 'new' исполнителя нет, поэтому роль пустая.
+    INSERT INTO stage_runs (task_id, status_id, attempt, state)
+    VALUES (t_be, st_new, 1, 'pending'),
+           (t_fe, st_new, 1, 'pending'),
+           (t_multi, st_new, 1, 'pending');
+
+    INSERT INTO task_events (task_id, stage_run_id, type, actor_id, payload)
+    SELECT sr.task_id, sr.id, 'task.created', sys, '{"source":"seed"}'
+    FROM stage_runs sr WHERE sr.task_id IN (t_be, t_fe, t_multi);
 
 END
 $seed$;

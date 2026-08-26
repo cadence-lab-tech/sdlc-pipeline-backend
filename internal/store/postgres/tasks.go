@@ -1,0 +1,367 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+)
+
+const taskSelect = `
+	SELECT t.id, t.project_id, p.key, t.epic_id, t.key, t.seq, t.title, t.description,
+	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id,
+	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at
+	FROM tasks t
+	JOIN projects p ON p.id = t.project_id
+	JOIN workflow_statuses ws ON ws.id = t.status_id`
+
+func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
+	var t domain.Task
+	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.EpicID, &t.Key, &t.Seq,
+		&t.Title, &t.Description, &t.WorkflowID, &t.StatusID, &t.StatusKey, &t.StatusName,
+		&t.Priority, &t.AssigneeID, &t.ExternalRef, &t.Labels, &t.Properties,
+		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt)
+	return t, err
+}
+
+type ListTasksFilter struct {
+	StatusKey string
+	EpicKey   string
+	Limit     int
+}
+
+func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := q.Query(ctx, taskSelect+`
+		LEFT JOIN epics e ON e.id = t.epic_id
+		WHERE t.project_id = $1
+		  AND ($2 = '' OR ws.key = $2)
+		  AND ($3 = '' OR e.key = $3)
+		ORDER BY ws.position, t.seq
+		LIMIT $4`, projectID, f.StatusKey, f.EpicKey, limit)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	tasks := []domain.Task{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, translate(err)
+	}
+
+	for i := range tasks {
+		if tasks[i].Repositories, err = s.TaskRepositories(ctx, q, tasks[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return tasks, nil
+}
+
+// GetTaskByKey ищет задачу по человекочитаемому ключу SDLC-42. Ключ уникален
+// внутри проекта, поэтому проект вычисляется из префикса самого ключа.
+func (s *Store) GetTaskByKey(ctx context.Context, q Querier, taskKey string) (domain.Task, error) {
+	projectKey, err := splitTaskKey(taskKey)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	t, err := scanTask(q.QueryRow(ctx, taskSelect+`
+		WHERE p.key = $1 AND t.key = $2`, projectKey, taskKey))
+	if err != nil {
+		return t, notFound(err, "задача %q не найдена", taskKey)
+	}
+	if t.Repositories, err = s.TaskRepositories(ctx, q, t.ID); err != nil {
+		return t, err
+	}
+	return t, nil
+}
+
+// LockTaskByKey читает задачу под FOR UPDATE. Переход обязан идти под
+// блокировкой строки: без неё два одновременных запроса прогонят гейты на
+// одном и том же состоянии и оба переведут задачу дальше.
+func (s *Store) LockTaskByKey(ctx context.Context, tx pgx.Tx, taskKey string) (domain.Task, error) {
+	projectKey, err := splitTaskKey(taskKey)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	var id uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT t.id FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		WHERE p.key = $1 AND t.key = $2
+		FOR UPDATE OF t`, projectKey, taskKey).Scan(&id)
+	if err != nil {
+		return domain.Task{}, notFound(err, "задача %q не найдена", taskKey)
+	}
+
+	t, err := scanTask(tx.QueryRow(ctx, taskSelect+` WHERE t.id = $1`, id))
+	if err != nil {
+		return t, translate(err)
+	}
+	if t.Repositories, err = s.TaskRepositories(ctx, tx, t.ID); err != nil {
+		return t, err
+	}
+	return t, nil
+}
+
+func (s *Store) TaskRepositories(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.TaskRepository, error) {
+	rows, err := q.Query(ctx, `
+		SELECT tr.repository_id, r.owner, r.name, r.role_hint, tr.is_primary
+		FROM task_repositories tr
+		JOIN repositories r ON r.id = tr.repository_id
+		WHERE tr.task_id = $1
+		ORDER BY tr.is_primary DESC, r.owner, r.name`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.TaskRepository{}
+	for rows.Next() {
+		var tr domain.TaskRepository
+		if err := rows.Scan(&tr.RepositoryID, &tr.Owner, &tr.Name, &tr.RoleHint, &tr.IsPrimary); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, tr)
+	}
+	return out, translate(rows.Err())
+}
+
+type CreateTaskInput struct {
+	ProjectID   uuid.UUID
+	EpicKey     string
+	Title       string
+	Description *string
+	Priority    string
+	Labels      []string
+	Properties  json.RawMessage
+	// Ссылки на репозитории: owner/name, просто name или role_hint.
+	// Область задачи — не украшение: на ней стоит гейт repo_scope и по ней
+	// детектор дрейфа понимает, за какими репозиториями следить.
+	Repositories []string
+	CreatedBy    uuid.UUID
+}
+
+// CreateTask заводит задачу и сразу ставит её на начальный статус цикла.
+//
+// Счётчик ключей живёт в projects.task_counter и берётся под FOR UPDATE:
+// последовательность в отдельном объекте дала бы дыры в нумерации при откате
+// транзакции, а ключи задач читают люди.
+func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (domain.Task, error) {
+	var projectKey string
+	var seq int
+	if err := tx.QueryRow(ctx, `
+		UPDATE projects SET task_counter = task_counter + 1, updated_at = now()
+		WHERE id = $1 RETURNING key, task_counter`, in.ProjectID,
+	).Scan(&projectKey, &seq); err != nil {
+		return domain.Task{}, notFound(err, "проект не найден")
+	}
+
+	wf, err := s.GetActiveWorkflow(ctx, tx, in.ProjectID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	initial, err := s.InitialStatus(ctx, tx, wf.ID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+
+	var epicID *uuid.UUID
+	if in.EpicKey != "" {
+		var id uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM epics WHERE project_id = $1 AND key = $2`,
+			in.ProjectID, in.EpicKey).Scan(&id); err != nil {
+			return domain.Task{}, notFound(err, "эпик %q не найден", in.EpicKey)
+		}
+		epicID = &id
+	}
+
+	priority := in.Priority
+	if priority == "" {
+		priority = "normal"
+	}
+	props := in.Properties
+	if len(props) == 0 {
+		props = json.RawMessage(`{}`)
+	}
+	labels := in.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+
+	var taskID uuid.UUID
+	key := fmt.Sprintf("%s-%d", projectKey, seq)
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO tasks (project_id, epic_id, key, seq, title, description,
+		                   workflow_id, status_id, priority, labels, properties, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id`,
+		in.ProjectID, epicID, key, seq, in.Title, in.Description,
+		wf.ID, initial.ID, priority, labels, props, in.CreatedBy,
+	).Scan(&taskID); err != nil {
+		return domain.Task{}, translate(err)
+	}
+
+	for i, ref := range in.Repositories {
+		repo, err := s.FindRepository(ctx, tx, in.ProjectID, ref)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO task_repositories (project_id, task_id, repository_id, is_primary, added_by)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (task_id, repository_id) DO NOTHING`,
+			in.ProjectID, taskID, repo.ID, i == 0, in.CreatedBy); err != nil {
+			return domain.Task{}, translate(err)
+		}
+	}
+
+	if _, err := s.EnterStatus(ctx, tx, taskID, initial.ID, nil); err != nil {
+		return domain.Task{}, err
+	}
+
+	t, err := scanTask(tx.QueryRow(ctx, taskSelect+` WHERE t.id = $1`, taskID))
+	if err != nil {
+		return t, translate(err)
+	}
+	if t.Repositories, err = s.TaskRepositories(ctx, tx, taskID); err != nil {
+		return t, err
+	}
+	return t, nil
+}
+
+// EnterStatus открывает новую попытку прохождения статуса.
+//
+// attempt считается от уже существующих попыток на этой паре (задача, статус):
+// повторный заход после отката — это новый stage_run, а не переписанный старый,
+// поэтому история "аналитика делалась дважды" остаётся целой (решение 0003).
+func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, rejectedFrom *uuid.UUID) (domain.StageRun, error) {
+	roleID, roleVersionID, err := s.PrimaryRole(ctx, tx, statusID)
+	if err != nil {
+		return domain.StageRun{}, err
+	}
+
+	var run domain.StageRun
+	err = tx.QueryRow(ctx, `
+		INSERT INTO stage_runs (task_id, status_id, role_id, role_version_id, attempt,
+		                        state, rejected_from_run_id)
+		SELECT $1, $2, $3, $4,
+		       coalesce(max(attempt), 0) + 1, 'pending', $5
+		FROM stage_runs WHERE task_id = $1 AND status_id = $2
+		RETURNING id, task_id, status_id, role_id, role_version_id, attempt, state,
+		          claimed_by, claimed_at, lease_expires_at, entered_at, finished_at, outcome, summary`,
+		taskID, statusID, roleID, roleVersionID, rejectedFrom,
+	).Scan(&run.ID, &run.TaskID, &run.StatusID, &run.RoleID, &run.RoleVersionID,
+		&run.Attempt, &run.State, &run.ClaimedBy, &run.ClaimedAt, &run.LeaseExpires,
+		&run.EnteredAt, &run.FinishedAt, &run.Outcome, &run.Summary)
+	if err != nil {
+		return run, translate(err)
+	}
+	return run, nil
+}
+
+const stageRunSelect = `
+	SELECT sr.id, sr.task_id, sr.status_id, ws.key, sr.role_id, sr.role_version_id,
+	       sr.attempt, sr.state, sr.claimed_by, sr.claimed_at, sr.lease_expires_at,
+	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary
+	FROM stage_runs sr
+	JOIN workflow_statuses ws ON ws.id = sr.status_id`
+
+func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) {
+	var r domain.StageRun
+	err := row.Scan(&r.ID, &r.TaskID, &r.StatusID, &r.StatusKey, &r.RoleID, &r.RoleVersionID,
+		&r.Attempt, &r.State, &r.ClaimedBy, &r.ClaimedAt, &r.LeaseExpires,
+		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary)
+	return r, err
+}
+
+// CurrentStageRun — активная попытка на текущем статусе задачи.
+// Внутри задачи всегда ровно одна (решение 0007), поэтому выбор без
+// неоднозначности: последняя попытка на статусе, где задача стоит сейчас.
+func (s *Store) CurrentStageRun(ctx context.Context, q Querier, taskID, statusID uuid.UUID) (domain.StageRun, error) {
+	r, err := scanStageRun(q.QueryRow(ctx, stageRunSelect+`
+		WHERE sr.task_id = $1 AND sr.status_id = $2
+		ORDER BY sr.attempt DESC LIMIT 1`, taskID, statusID))
+	if err != nil {
+		return r, notFound(err, "у задачи нет активной попытки на текущем статусе")
+	}
+	return r, nil
+}
+
+func (s *Store) ListStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.StageRun, error) {
+	rows, err := q.Query(ctx, stageRunSelect+`
+		WHERE sr.task_id = $1 ORDER BY sr.entered_at`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.StageRun{}
+	for rows.Next() {
+		r, err := scanStageRun(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, r)
+	}
+	return out, translate(rows.Err())
+}
+
+func (s *Store) FinishStageRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, state, outcome string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE stage_runs
+		SET state = $2, outcome = $3, finished_at = now(), lease_expires_at = NULL
+		WHERE id = $1`, runID, state, outcome)
+	return translate(err)
+}
+
+func (s *Store) SetTaskStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, terminal bool) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE tasks
+		SET status_id = $2,
+		    updated_at = now(),
+		    closed_at = CASE WHEN $3 THEN now() ELSE NULL END
+		WHERE id = $1`, taskID, statusID, terminal)
+	return translate(err)
+}
+
+// UpdateTaskProperties пишет свойства задачи целиком.
+//
+// Проверку "multi_repo выключили, а в области два репозитория" делает не этот
+// метод, а отложенный триггер enforce_task_repo_scope() — он сработает на
+// коммите и увидит согласованное состояние, даже если флаг и репозитории
+// меняются одной транзакцией.
+func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, props json.RawMessage) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE tasks SET properties = $2, updated_at = now() WHERE id = $1`, taskID, props)
+	return translate(err)
+}
+
+func (s *Store) AddTaskRepository(ctx context.Context, tx pgx.Tx, t domain.Task, repoID uuid.UUID, stageRunID *uuid.UUID, actor uuid.UUID, note string) error {
+	if !t.MultiRepo() && len(t.Repositories) > 0 {
+		return apperr.New(apperr.CodeOutOfTaskScope,
+			"задача %s однорепозиторная: включите свойство multi_repo, чтобы расширить область", t.Key)
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO task_repositories (project_id, task_id, repository_id, is_primary,
+		                               added_in_stage_run_id, added_by, note)
+		VALUES ($1, $2, $3, $4, $5, $6, nullif($7, ''))
+		ON CONFLICT (task_id, repository_id) DO NOTHING`,
+		t.ProjectID, t.ID, repoID, len(t.Repositories) == 0, stageRunID, actor, note)
+	return translate(err)
+}

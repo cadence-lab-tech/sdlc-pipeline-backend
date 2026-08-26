@@ -1,0 +1,12 @@
+.git/
+.github/
+bin/
+tmp/
+dev/
+docs/
+*.md
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/

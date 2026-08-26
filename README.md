@@ -18,26 +18,79 @@ MCP-сервер для локальных агентов, воркеры инд
 
 ## Стек
 
-Go 1.23, Gin, pgx, PostgreSQL 17 + pgvector, эмбеддинги Voyage (`voyage-code-3`, 1024).
+Go 1.23, Gin, pgx (без ORM), PostgreSQL 17 + pgvector, эмбеддинги Voyage
+(`voyage-code-3`, 1024).
 
-## Локальный запуск базы
+## Запуск
 
 ```bash
-docker compose up -d
-for f in migrations/*.up.sql; do
-  docker exec -i sdlc-postgres psql -v ON_ERROR_STOP=1 -U sdlc -d sdlc < "$f"
-done
-docker exec -i sdlc-postgres psql -U sdlc -d sdlc < migrations/seed/default_workflow.sql
+make up      # база + приложение в контейнерах
+make logs
+make reset   # снести вместе с данными
 ```
 
-Postgres поднимается на `localhost:55432`, база `sdlc`, пользователь/пароль `sdlc`.
-Сид разворачивает демонстрационный проект: полный цикл из семи статусов, пять
-ролей с инструкциями и контрактами, гейты на каждом переходе и эпик с двумя
-связанными задачами.
+Подробности — [dev/README.md](dev/README.md). API поднимается на
+`localhost:8088`, Postgres на `localhost:55432`.
 
-Дополнительно `migrations/seed/drift_demo.sql` разворачивает сценарий для
-проверки детектора дрейфа: две задачи в полёте, движение main и ожидаемые сигналы.
+Схему приложение накатывает само: миграции встроены в бинарник, поэтому образ
+самодостаточен и отдельный шаг с миграциями в compose не нужен. На пустой базе
+дополнительно применяется сид с демонстрационным проектом.
+
+Без контейнеров:
+
+```bash
+export SDLC_DATABASE_URL='postgres://sdlc:sdlc@localhost:55432/sdlc?sslmode=disable'
+export SDLC_SEED=default_workflow
+make build && ./bin/api
+```
+
+## API
+
+Аутентификации нет ([решение 0010](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0010-auth-deferred.md)):
+действующее лицо приезжает заголовком `X-SDLC-Actor` и заводится в `principals`
+при первом обращении.
+
+| Метод | Путь | Что делает |
+|---|---|---|
+| `GET` | `/healthz`, `/readyz` | пробы; `readyz` проверяет базу |
+| `GET`/`POST` | `/v1/projects` | список и создание проектов |
+| `GET` | `/v1/projects/{key}` | проект, репозитории, определения свойств задач |
+| `GET` | `/v1/projects/{key}/workflow` | активный цикл: статусы с ролями, переходы с гейтами |
+| `GET`/`POST` | `/v1/projects/{key}/tasks` | список и создание задач |
+| `GET` | `/v1/tasks/{key}` | карточка: задача, попытки этапов, артефакты, вердикт гейтов |
+| `GET` | `/v1/tasks/{key}/timeline` | лента событий |
+| `PATCH` | `/v1/tasks/{key}/scope` | свойства и область задачи по репозиториям |
+| `GET`/`POST` | `/v1/tasks/{key}/artifacts` | артефакты текущей попытки этапа |
+| `GET` | `/v1/tasks/{key}/transitions` | доступные переходы с прогоном гейтов |
+| `POST` | `/v1/tasks/{key}/transitions/{transition}` | выполнить переход |
+| `POST` | `.../transitions/{transition}/gates/{gate}/decision` | решение по гейту |
+| `GET`/`POST` | `/v1/artifacts/{id}/content`, `/approve` | содержимое и апрув артефакта |
+
+Заблокированный гейтами переход — это `409` с разбором по каждому гейту: что
+именно не сдано и что с этим делать.
+
+## Структура
+
+```
+cmd/api/            HTTP-сервер; в фазе 2 сюда встанет MCP
+internal/
+  config/           настройки из окружения
+  apperr/           ошибки домена с кодом, общим для REST и MCP
+  domain/           сущности схемы в Go
+  workflow/         движок: переходы, прогон гейтов, артефакты, область задачи
+  store/postgres/   запросы, миграции, контент-адресуемые blobs
+  httpapi/          роутер Gin, middleware, хендлеры
+migrations/         схема и сиды, встроены в бинарник через embed.go
+dev/                docker-compose для локального запуска
+docs/               референсы реализации
+```
 
 ## Статус
 
-Фаза 0: зафиксированы модель домена, схема БД и контракт агента. Кода ещё нет.
+Фаза 1: работает ядро цикла — проекты, задачи, артефакты, движок переходов с
+гейтами `artifacts_required`, `checklist`, `human_approval`, `repo_ref_required`,
+`repo_scope`, `drift_clear`.
+
+Дальше: MCP-сервер и аренды (фаза 2), индексация репозиториев и детектор дрейфа
+(фаза 3). Гейты `agent_review`, `schema_validation` и `external_check` до тех
+пор держатся флагом `SDLC_STRICT_GATES`.

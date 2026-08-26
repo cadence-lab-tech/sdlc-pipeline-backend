@@ -1,0 +1,86 @@
+# Локальный запуск бэкенда целиком: база, приложение, инструменты.
+#
+#   make up      — поднять всё
+#   make logs    — логи приложения
+#   make reset   — снести вместе с данными (сиды применяются на пустой базе)
+#
+# Порты вынесены в переменные и читаются из dev/.env, если он есть;
+# без него берутся значения по умолчанию — файл заводить не обязательно.
+
+name: sdlc-pipeline
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: sdlc-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdlc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdlc}
+      POSTGRES_DB: ${POSTGRES_DB:-sdlc}
+    ports:
+      # 55432, а не 5432: у разработчика обычно уже занят локальным Postgres.
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdlc} -d ${POSTGRES_DB:-sdlc}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      # Контекст — корень репозитория: в образ должны попасть migrations/,
+      # они встраиваются в бинарник.
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    container_name: sdlc-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SDLC_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD:-sdlc}@postgres:5432/${POSTGRES_DB:-sdlc}?sslmode=disable
+      SDLC_HTTP_ADDR: ":8080"
+      SDLC_ENV: development
+      SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
+      # Схема накатывается самим приложением на старте.
+      SDLC_AUTO_MIGRATE: "true"
+      # Демонстрационный проект: цикл из восьми статусов, пять ролей, гейты,
+      # эпик с тремя задачами. Применяется только на пустой базе.
+      SDLC_SEED: ${SDLC_SEED:-default_workflow}
+      # Гейты типов, которые появятся в фазах 2-3 (agent_review,
+      # schema_validation, external_check), переход не держат. Для продакшена
+      # значение обратное — иначе цикл проходится мимо непроверенных условий.
+      SDLC_STRICT_GATES: ${SDLC_STRICT_GATES:-false}
+      SDLC_DEFAULT_ACTOR: ${SDLC_DEFAULT_ACTOR:-local-dev}
+    ports:
+      # 8088, а не 8080: восьмидесятый на машине разработчика обычно занят.
+      - "${API_PORT:-8088}:8080"
+    healthcheck:
+      # В образе нет shell и curl — пробу делает сам бинарник.
+      test: ["CMD", "/api", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # Просмотр базы руками: docker compose --profile tools up -d
+  adminer:
+    image: adminer:4
+    container_name: sdlc-adminer
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "${ADMINER_PORT:-8089}:8080"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
