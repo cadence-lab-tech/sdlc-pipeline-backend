@@ -4,11 +4,17 @@ Go-сервис, ведущий задачи по настраиваемому �
 MCP-сервер для локальных агентов, воркеры индексации репозиториев и детектора
 дрейфа.
 
-- [Архитектура](docs/ARCHITECTURE.md) — модель домена, принятые решения, схема БД, план по фазам
-- [Контракт агента](docs/MCP_CONTRACT.md) — MCP-тулы для локального агента
-- [Детектор дрейфа](docs/drift_detection.sql) — референсные запросы
+Документация по домену вынесена в отдельный репозиторий
+[sdlc-pipeline-docs](https://github.com/stepaKaziatko/sdlc-pipeline-docs):
 
-Фронтенд живёт отдельно: [sdlc-pipeline-frontend](https://github.com/stepaKaziatko/sdlc-pipeline-frontend).
+- [Архитектура](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/ARCHITECTURE.md) — модель домена, гейты, дрейф, схема БД, план по фазам
+- [Контракт агента](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md) — MCP-тулы для локального агента
+- [Принятые решения](https://github.com/stepaKaziatko/sdlc-pipeline-docs/tree/main/decisions) — почему устроено именно так
+
+Здесь остаются референсы реализации: [drift_detection.sql](docs/drift_detection.sql) —
+запросы детектора дрейфа, которые исполняет воркер.
+
+Фронтенд: [sdlc-pipeline-frontend](https://github.com/stepaKaziatko/sdlc-pipeline-frontend).
 
 ## Стек
 
