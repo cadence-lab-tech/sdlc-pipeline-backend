@@ -1,4 +1,7 @@
-ALTER TABLE gates DROP CONSTRAINT gates_type_check;
+-- Гейты отменяемых типов удаляются вместе с их результатами (FK ON DELETE CASCADE),
+-- иначе сужение CHECK не проходит валидацию.
+DELETE FROM gates WHERE type IN ('repo_ref_required', 'drift_clear');
+ALTER TABLE gates DROP CONSTRAINT IF EXISTS gates_type_check;
 ALTER TABLE gates ADD CONSTRAINT gates_type_check CHECK (type IN (
     'artifacts_required', 'schema_validation', 'checklist',
     'human_approval', 'agent_review', 'external_check'));

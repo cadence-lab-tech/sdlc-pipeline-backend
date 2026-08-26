@@ -10,7 +10,8 @@ DECLARE
     st_rev     uuid; st_qa  uuid; st_done uuid; st_cancel uuid;
     r_analyst  uuid; r_architect uuid; r_developer uuid; r_reviewer uuid; r_qa uuid;
     ep         uuid;
-    t_be       uuid; t_fe uuid;
+    repo_be    uuid; repo_fe uuid;
+    t_be       uuid; t_fe uuid; t_multi uuid;
 BEGIN
     SELECT id INTO sys FROM principals WHERE handle = 'system';
 
@@ -18,9 +19,30 @@ BEGIN
     VALUES ('SDLC', 'SDLC Pipeline', 'Сам себя разрабатывающий пайплайн', sys)
     RETURNING id INTO proj;
 
-    INSERT INTO repositories (project_id, owner, name, clone_url, role_hint)
-    VALUES (proj, 'stepankaziatko', 'sdlc-pipeline',
-            'https://github.com/stepankaziatko/sdlc-pipeline.git', 'monorepo');
+    INSERT INTO repositories (project_id, owner, name, clone_url, role_hint) VALUES
+        (proj, 'stepaKaziatko', 'sdlc-pipeline-backend',
+         'https://github.com/stepaKaziatko/sdlc-pipeline-backend.git', 'backend'),
+        (proj, 'stepaKaziatko', 'sdlc-pipeline-frontend',
+         'https://github.com/stepaKaziatko/sdlc-pipeline-frontend.git', 'frontend'),
+        (proj, 'stepaKaziatko', 'sdlc-pipeline-docs',
+         'https://github.com/stepaKaziatko/sdlc-pipeline-docs.git', 'docs');
+
+    SELECT id INTO repo_be FROM repositories WHERE project_id = proj AND name = 'sdlc-pipeline-backend';
+    SELECT id INTO repo_fe FROM repositories WHERE project_id = proj AND name = 'sdlc-pipeline-frontend';
+
+    -- Свойства задач. multi_repo системное: его поведение зашито в движок,
+    -- проект может поменять только значение по умолчанию.
+    INSERT INTO task_property_defs
+        (project_id, key, name, description, value_type, default_value, is_system, position)
+    VALUES
+        (proj, 'multi_repo', 'Мультирепозиторная задача',
+         'Разрешает задаче охватывать несколько репозиториев: аналитика и '
+         'архитектурное решение делаются сразу по всей области. Выключено — '
+         'задача живёт в одном репозитории.',
+         'boolean', 'false'::jsonb, true, 1),
+        (proj, 'needs_migration', 'Требует миграции БД',
+         'Подсказка ролям архитектора и разработчика.',
+         'boolean', 'false'::jsonb, false, 2);
 
     INSERT INTO workflows (project_id, name, version, state, created_by)
     VALUES (proj, 'Default SDLC', 1, 'active', sys)
@@ -184,7 +206,7 @@ BEGIN
 
     INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
     SELECT id, 'pull_request', 'PR привязан к задаче', 'repo_ref_required',
-           '{"ref_type":"pull_request","min_count":1,"require_open":true}', true, 2
+           '{"ref_type":"pull_request","min_count":1,"require_open":true,"per_repository":true}', true, 2
     FROM workflow_transitions WHERE workflow_id = wf AND key = 'dev_done';
 
     INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
@@ -207,6 +229,15 @@ BEGIN
            '{"min_approvals":1}', true, 2
     FROM workflow_transitions WHERE workflow_id = wf AND key = 'qa_passed';
 
+
+    -- Область задачи: артефакты этапа не вышли за объявленные репозитории.
+    -- Для однорепозиторной задачи это блокирует расползание, для
+    -- мультирепозиторной — расширение области без явного решения.
+    INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
+    SELECT id, 'repo_scope', 'Артефакты не вышли за область задачи', 'repo_scope',
+           '{"allow_expansion_when_multi_repo":true}', true, 5
+    FROM workflow_transitions
+    WHERE workflow_id = wf AND key IN ('analysis_done', 'architecture_done', 'dev_done');
 
     -- Дрейф базовой линии. Порог тем строже, чем ближе этап к коду:
     -- аналитику двигают только серьёзные расхождения, разработку — любые.
@@ -232,30 +263,43 @@ BEGIN
     FROM workflow_transitions
     WHERE workflow_id = wf AND kind = 'reject';
 
-    -- Демонстрационные задачи: одна бизнес-фича разложена на бэкенд и фронтенд
-    -- как две задачи одного эпика, внутри задачи параллельных этапов нет.
+    -- Демонстрационные задачи. Первые две однорепозиторные, третья охватывает
+    -- бэкенд и фронтенд сразу — ровно тот случай, ради которого заведён multi_repo.
     INSERT INTO epics (project_id, key, title, description, created_by)
     VALUES (proj, 'SDLC-E1', 'Скелет системы', 'Первый сквозной проход цикла', sys)
     RETURNING id INTO ep;
 
-    UPDATE projects SET task_counter = task_counter + 2 WHERE id = proj;
+    UPDATE projects SET task_counter = task_counter + 3 WHERE id = proj;
 
-    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, created_by)
+    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
     VALUES (proj, ep, 'SDLC-1', 1, 'REST API проектов и задач',
-            'Поднять Gin, миграции и CRUD.', wf, st_new, sys)
+            'Поднять Gin, миграции и CRUD.', wf, st_new, '{"multi_repo": false}', sys)
     RETURNING id INTO t_be;
 
-    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, created_by)
+    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
     VALUES (proj, ep, 'SDLC-2', 2, 'Доска задач и карточка',
-            'Vite + React 19 + Astryx поверх REST.', wf, st_new, sys)
+            'Vite + React 19 + Astryx поверх REST.', wf, st_new, '{"multi_repo": false}', sys)
     RETURNING id INTO t_fe;
+
+    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    VALUES (proj, ep, 'SDLC-3', 3, 'Признак мультирепозиторности в карточке задачи',
+            'Добавить поле в ручку задачи на бэкенде и отобразить его в карточке на фронте.',
+            wf, st_new, '{"multi_repo": true, "needs_migration": true}', sys)
+    RETURNING id INTO t_multi;
+
+    INSERT INTO task_repositories (project_id, task_id, repository_id, is_primary, added_by) VALUES
+        (proj, t_be,    repo_be, true,  sys),
+        (proj, t_fe,    repo_fe, true,  sys),
+        (proj, t_multi, repo_be, true,  sys),
+        (proj, t_multi, repo_fe, false, sys);
 
     INSERT INTO task_links (from_task_id, to_task_id, rel, note, created_by)
     VALUES (t_be, t_fe, 'blocks', 'Фронтенд ждёт стабильного контракта API', sys);
 
     INSERT INTO task_events (task_id, type, actor_id, payload)
-    VALUES (t_be, 'task.created', sys, '{"source":"seed"}'),
-           (t_fe, 'task.created', sys, '{"source":"seed"}');
+    VALUES (t_be,    'task.created', sys, '{"source":"seed"}'),
+           (t_fe,    'task.created', sys, '{"source":"seed"}'),
+           (t_multi, 'task.created', sys, '{"source":"seed","multi_repo":true}');
 
 END
 $seed$;

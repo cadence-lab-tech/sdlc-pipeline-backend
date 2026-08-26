@@ -12,7 +12,7 @@ DECLARE
 BEGIN
     SELECT id INTO sys  FROM principals WHERE handle = 'system';
     SELECT id INTO proj FROM projects   WHERE key = 'SDLC';
-    SELECT id INTO repo FROM repositories WHERE project_id = proj LIMIT 1;
+    SELECT id INTO repo FROM repositories WHERE project_id = proj AND name = 'sdlc-pipeline-backend';
     SELECT id INTO wf   FROM workflows  WHERE project_id = proj AND state = 'active';
     SELECT id INTO st_ana FROM workflow_statuses WHERE workflow_id = wf AND key = 'analysis';
     SELECT id INTO st_dev FROM workflow_statuses WHERE workflow_id = wf AND key = 'development';
@@ -20,6 +20,12 @@ BEGIN
     SELECT id INTO t_fe FROM tasks WHERE project_id = proj AND key = 'SDLC-2';
     SELECT id INTO r_analyst FROM roles WHERE project_id = proj AND key = 'analyst';
     SELECT id INTO rv_analyst FROM role_versions WHERE role_id = r_analyst AND version = 1;
+
+    -- SDLC-2 однорепозиторная и живёт во фронтенде; для сценария дрейфа по
+    -- бэкенду переводим её в мультирепозиторную и расширяем область.
+    UPDATE tasks SET properties = properties || '{"multi_repo": true}' WHERE id = t_fe;
+    INSERT INTO task_repositories (project_id, task_id, repository_id, added_by)
+    VALUES (proj, t_fe, repo, sys) ON CONFLICT DO NOTHING;
 
     -- обе задачи в полёте
     UPDATE tasks SET status_id = st_ana WHERE id = t_be;
