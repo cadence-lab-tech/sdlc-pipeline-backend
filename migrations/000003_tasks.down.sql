@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS task_events;
+DROP TABLE IF EXISTS task_repo_refs;
+DROP TABLE IF EXISTS gate_results;
+DROP TABLE IF EXISTS stage_runs;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS epics;

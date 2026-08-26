@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS project_documents;
+DROP TABLE IF EXISTS repositories;
+DROP TABLE IF EXISTS blobs;
+DROP TABLE IF EXISTS agent_tokens;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS principals;
