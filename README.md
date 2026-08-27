@@ -56,6 +56,18 @@ make build && ./bin/api
 | `GET`/`POST` | `/v1/projects` | список и создание проектов |
 | `GET` | `/v1/projects/{key}` | проект, репозитории, определения свойств задач |
 | `GET` | `/v1/projects/{key}/workflow` | активный цикл: статусы с ролями, переходы с гейтами |
+| `GET`/`POST` | `/v1/projects/{key}/roles` | роли проекта; создание вместе с первой версией |
+| `GET`/`PATCH`/`DELETE` | `/v1/projects/{key}/roles/{role}` | роль, вывеска, архивирование |
+| `GET`/`POST` | `.../roles/{role}/versions` | версии инструкции; правка — новая версия |
+| `GET`/`POST` | `/v1/projects/{key}/workflows` | версии цикла; создание черновика копией активного |
+| `GET`/`DELETE` | `/v1/workflows/{id}` | версия цикла целиком; удаление — только черновика |
+| `GET` | `/v1/workflows/{id}/validation` | проверка цикла как графа, без изменений |
+| `POST` | `/v1/workflows/{id}/activate` | сделать черновик действующим циклом |
+| `POST`/`PUT` | `/v1/workflows/{id}/statuses` | добавить статус; `PUT` — порядок колонок целиком |
+| `PATCH`/`DELETE` | `/v1/workflows/{id}/statuses/{status}` | правка и удаление статуса черновика |
+| `PUT` | `.../statuses/{status}/roles` | исполнитель статуса и проверяющие |
+| `POST`/`PATCH`/`DELETE` | `.../transitions[/{transition}]` | переходы черновика |
+| `POST`/`PATCH`/`DELETE` | `.../transitions/{transition}/gates[/{gate}]` | гейты черновика |
 | `GET`/`POST` | `/v1/projects/{key}/tasks` | список и создание задач |
 | `GET` | `/v1/tasks/{key}` | карточка: задача, попытки этапов, артефакты, вердикт гейтов |
 | `GET` | `/v1/tasks/{key}/timeline` | лента событий |
@@ -69,6 +81,10 @@ make build && ./bin/api
 Заблокированный гейтами переход — это `409` с разбором по каждому гейту: что
 именно не сдано и что с этим делать.
 
+Роли и цикл правятся версиями, а не на месте: версия роли иммутабельна, а
+редактируется только черновик цикла ([решение 0016](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0016-workflow-versions-immutable.md)).
+Попытка изменить активный цикл — `409`.
+
 ## Структура
 
 ```
@@ -77,7 +93,8 @@ internal/
   config/           настройки из окружения
   apperr/           ошибки домена с кодом, общим для REST и MCP
   domain/           сущности схемы в Go
-  workflow/         движок: переходы, прогон гейтов, артефакты, область задачи
+  workflow/         движок: переходы, прогон гейтов, артефакты, область задачи;
+                    отдельно authoring — сборка ролей и версий цикла
   store/postgres/   запросы, миграции, контент-адресуемые blobs
   httpapi/          роутер Gin, middleware, хендлеры
 migrations/         схема и сиды, встроены в бинарник через embed.go
@@ -87,9 +104,9 @@ docs/               референсы реализации
 
 ## Статус
 
-Фаза 1: работает ядро цикла — проекты, задачи, артефакты, движок переходов с
+Фаза 1 на бэкенде закрыта: проекты, задачи, артефакты, движок переходов с
 гейтами `artifacts_required`, `checklist`, `human_approval`, `repo_ref_required`,
-`repo_scope`, `drift_clear`.
+`repo_scope`, `drift_clear`, редактор ролей и цикла.
 
 Дальше: MCP-сервер и аренды (фаза 2), индексация репозиториев и детектор дрейфа
 (фаза 3). Гейты `agent_review`, `schema_validation` и `external_check` до тех

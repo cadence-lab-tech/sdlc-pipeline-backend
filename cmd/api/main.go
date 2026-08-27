@@ -69,6 +69,7 @@ func run() error {
 
 	store := postgres.New(pool)
 	engine := workflow.NewEngine(store, log, cfg.StrictGates)
+	authoring := workflow.NewAuthoring(store, log, engine)
 	if !cfg.StrictGates {
 		log.Warn("SDLC_STRICT_GATES выключен: гейты нереализованных типов " +
 			"пропускают переход — режим отладки цикла, не для продакшена")
@@ -76,7 +77,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, log, store, engine).Handler(),
+		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,

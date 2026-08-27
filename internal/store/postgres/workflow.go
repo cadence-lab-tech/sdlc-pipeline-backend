@@ -226,13 +226,8 @@ func (s *Store) PrimaryRole(ctx context.Context, q Querier, statusID uuid.UUID) 
 }
 
 func (s *Store) GetRoleVersion(ctx context.Context, q Querier, id uuid.UUID) (domain.RoleVersion, error) {
-	var rv domain.RoleVersion
-	err := q.QueryRow(ctx, `
-		SELECT id, role_id, version, instructions, input_kinds, output_contract,
-		       tool_policy, model_hint, repo_scope, context_budget
-		FROM role_versions WHERE id = $1`, id,
-	).Scan(&rv.ID, &rv.RoleID, &rv.Version, &rv.Instructions, &rv.InputKinds,
-		&rv.OutputContract, &rv.ToolPolicy, &rv.ModelHint, &rv.RepoScope, &rv.ContextBudget)
+	rv, err := scanRoleVersion(q.QueryRow(ctx,
+		`SELECT `+roleVersionCols+` FROM role_versions WHERE id = $1`, id))
 	if err != nil {
 		return rv, notFound(err, "версия роли не найдена")
 	}

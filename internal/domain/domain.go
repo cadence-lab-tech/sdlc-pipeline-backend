@@ -54,6 +54,14 @@ type Repository struct {
 	RoleHint      *string   `json:"role_hint,omitempty"`
 }
 
+// Состояния версии цикла. Редактируется только черновик; активная версия
+// иммутабельна, потому что по ней прямо сейчас идут задачи.
+const (
+	WorkflowDraft   = "draft"
+	WorkflowActive  = "active"
+	WorkflowRetired = "retired"
+)
+
 // Workflow — версия цикла целиком. Активная ровно одна на проект.
 type Workflow struct {
 	ID          uuid.UUID    `json:"id"`
@@ -133,6 +141,12 @@ type Role struct {
 	Key       string    `json:"key"`
 	Name      string    `json:"name"`
 	Summary   *string   `json:"summary,omitempty"`
+	// Роль не удаляется, а архивируется: на её версии ссылаются пройденные
+	// этапы, и удаление переписало бы историю.
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	// Номер последней версии; заполняется в списках, чтобы UI не ходил
+	// за версиями отдельным запросом на каждую роль.
+	LatestVersion *int `json:"latest_version,omitempty"`
 }
 
 type RoleVersion struct {
@@ -146,6 +160,8 @@ type RoleVersion struct {
 	ModelHint      *string         `json:"model_hint,omitempty"`
 	RepoScope      []string        `json:"repo_scope"`
 	ContextBudget  json.RawMessage `json:"context_budget"`
+	Changelog      *string         `json:"changelog,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 type Task struct {
