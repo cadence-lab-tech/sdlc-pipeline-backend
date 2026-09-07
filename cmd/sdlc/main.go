@@ -63,7 +63,7 @@ func commands() []command {
 		{"project", "проекты: список, создание, команды и доступ к GitHub", "sdlc project list | sdlc project create ACME --name \"Проект\" [--team platform] | sdlc project teams | sdlc project github --installation 42 | sdlc project github --check", cmdProject},
 
 		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "sdlc export [--project SDLC] > bundle.json", cmdExport},
-		{"import", "применить связку к проекту", "sdlc import --file bundle.json [--dry-run]", cmdImport},
+		{"import", "применить связку к проекту или раздать её нескольким", "sdlc import --file bundle.json [--dry-run] | sdlc import --from SDLC --to ACME,WEB", cmdImport},
 		{"import-guide", "инструкция агенту по переносу правил команды", "sdlc import-guide", cmdImportGuide},
 		{"repo", "привязать репозиторий к проекту", "sdlc repo add acme/api [--hint backend] [--branch main]", cmdRepo},
 		{"role", "показать роль или завести версию инструкции", "sdlc role show analyst | sdlc role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},

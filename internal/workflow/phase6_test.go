@@ -532,3 +532,87 @@ func TestWebhookRoutesByInstallation(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// ── квоты по стоимости ──────────────────────────────────────────────────────
+
+func TestExceededBudgetStopsNewClaims(t *testing.T) {
+	ctx := context.Background()
+	store, engine, _, auth, system := setupPhase4(t, AuthToken)
+	admin := adminIdentity(t, ctx, auth)
+
+	if _, err := auth.CreateTeam(ctx, admin, CreateTeamInput{Key: "platform", Name: "Платформа"}); err != nil {
+		t.Fatal(err)
+	}
+	team, err := store.GetTeamByKey(ctx, store.DB(), "platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Демонстрационный проект отдаётся команде: расход считается по проектам,
+	// которыми она владеет.
+	if _, err := store.DB().Exec(ctx,
+		`UPDATE projects SET owner_team_id = $1 WHERE key = 'SDLC'`, team.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.SetTeamBudget(ctx, admin, "platform", "month", 10); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := engine.CreateTask(ctx, "SDLC", system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{Title: "Работа в кредит"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := engine.Execute(ctx, task.Key, "start", system.ID, "")
+	if err != nil || res.Blocked {
+		t.Fatalf("отдать в работу: %v %+v", err, res.Gates)
+	}
+	claimed, err := engine.Claim(ctx, task.Key, system.ID, "первый")
+	if err != nil {
+		t.Fatalf("захват в пределах бюджета: %v", err)
+	}
+
+	// Прогон отчитался о расходе выше предела.
+	cost := 12.5
+	if _, err := engine.ReportUsage(ctx, task.Key, system.ID, ReportUsageInput{
+		Model: "claude-opus-5", CostUSD: &cost,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Начатый прогон не обрывается: агент продолжает держать аренду и
+	// доводит этап.
+	if _, err := engine.Heartbeat(ctx, claimed.StageRunID, system.ID); err != nil {
+		t.Fatalf("начатый прогон оборван перерасходом: %v", err)
+	}
+	if err := engine.Release(ctx, claimed.StageRunID, system.ID, "перерыв"); err != nil {
+		t.Fatal(err)
+	}
+
+	// А новый захват закрыт, и в отказе сказано, чей это предел.
+	_, err = engine.Claim(ctx, task.Key, system.ID, "второй")
+	if apperr.As(err).Code != apperr.CodeForbidden {
+		t.Fatalf("захват при исчерпанном бюджете: %v", err)
+	}
+	if !strings.Contains(err.Error(), "platform") || !strings.Contains(err.Error(), "12.50") {
+		t.Fatalf("в отказе не видно, чей предел исчерпан: %v", err)
+	}
+
+	// Расход виден вместе с пределом: предел без расхода ничего не говорит.
+	budgets, err := auth.TeamBudgets(ctx, admin, "platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(budgets.Budgets) != 1 || budgets.Budgets[0].SpentUSD < 12 {
+		t.Fatalf("расход команды: %+v", budgets.Budgets)
+	}
+
+	// Поднятый предел снова открывает захват: квота — это предел, а не
+	// блокировка команды.
+	if _, err := auth.SetTeamBudget(ctx, admin, "platform", "month", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Claim(ctx, task.Key, system.ID, "третий"); err != nil {
+		t.Fatalf("захват после повышения предела: %v", err)
+	}
+}

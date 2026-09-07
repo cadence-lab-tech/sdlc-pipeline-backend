@@ -131,6 +131,29 @@ const (
 	TokenSession = "session"
 )
 
+// TeamBudget — предел стоимости команды за окно (решение 0027). Расход —
+// стоимость прогонов в проектах, которыми команда владеет.
+type TeamBudget struct {
+	TeamID uuid.UUID `json:"team_id"`
+	// day, week или month: окно календарное, а не скользящее.
+	Period    string    `json:"period"`
+	LimitUSD  float64   `json:"limit_usd"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BudgetState — предел вместе с текущим расходом. Пустой Period означает, что
+// предела нет или он не превышен.
+type BudgetState struct {
+	TeamKey  string  `json:"team_key,omitempty"`
+	Period   string  `json:"period,omitempty"`
+	LimitUSD float64 `json:"limit_usd,omitempty"`
+	SpentUSD float64 `json:"spent_usd"`
+}
+
+// Exceeded — исчерпан ли предел.
+func (b BudgetState) Exceeded() bool { return b.Period != "" && b.SpentUSD >= b.LimitUSD }
+
 // AccessToken — предъявляемый токен. Сам токен в базе не хранится, только
 // его хеш; целиком он показывается один раз при выдаче.
 type AccessToken struct {

@@ -184,38 +184,73 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 	return print(out)
 }
 
+// cmdImport применяет связку к проекту, а с --to — к нескольким сразу: связка
+// и есть способ раздать цикл и роли командам (решение 0022). Источником может
+// быть файл или проект-шаблон (--from) — тогда экспорт делается на месте, без
+// файла посередине.
+//
+// Отчёт остаётся по проектам: `unchanged` против `new_version` показывает, где
+// команда ушла от шаблона. Сливать её правки с обновлением шаблона система не
+// берётся — это решение человека, и правила у него пока нет (§13).
 func cmdImport(ctx context.Context, c *Client, args []string) error {
-	var projectFlag, file string
+	var projectFlag, file, from, to string
 	var dryRun bool
 	fs, err := flags("import", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&file, "file", "", "связка JSON; - читает stdin")
+		fs.StringVar(&from, "from", "", "взять связку из проекта-шаблона вместо файла")
+		fs.StringVar(&to, "to", "", "применить к нескольким проектам через запятую")
 		fs.BoolVar(&dryRun, "dry-run", false, "только отчёт, без изменений")
 	})
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
-	if err != nil {
-		return err
+
+	targets := splitCSV(to)
+	if len(targets) == 0 {
+		key, err := project(fs, projectFlag)
+		if err != nil {
+			return err
+		}
+		targets = []string{key}
 	}
-	body, err := readContent(file, "")
-	if err != nil {
-		return err
-	}
+
 	var bundle json.RawMessage
-	if err := json.Unmarshal(body, &bundle); err != nil {
-		return fmt.Errorf("связка не разбирается как JSON: %w", err)
+	switch {
+	case from != "":
+		if err := c.get(ctx, "/projects/"+url.PathEscape(from)+"/export", nil, &bundle); err != nil {
+			return err
+		}
+	default:
+		body, err := readContent(file, "")
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(body, &bundle); err != nil {
+			return fmt.Errorf("связка не разбирается как JSON: %w", err)
+		}
 	}
-	path := "/projects/" + key + "/import"
-	if dryRun {
-		path += "?dry_run=true"
+
+	reports := make([]map[string]any, 0, len(targets))
+	for _, key := range targets {
+		path := "/projects/" + url.PathEscape(key) + "/import"
+		if dryRun {
+			path += "?dry_run=true"
+		}
+		var out map[string]any
+		if err := c.post(ctx, path, bundle, &out); err != nil {
+			// Один проект не должен обрывать раздачу шаблона по остальным:
+			// у команды могло не хватить прав или разъехаться цикл.
+			reports = append(reports, map[string]any{"project": key, "error": err.Error()})
+			continue
+		}
+		out["project"] = key
+		reports = append(reports, out)
 	}
-	var out any
-	if err := c.post(ctx, path, bundle, &out); err != nil {
-		return err
+	if len(reports) == 1 {
+		return print(reports[0])
 	}
-	return print(out)
+	return print(map[string]any{"imports": reports})
 }
 
 func cmdImportGuide(_ context.Context, _ *Client, _ []string) error {

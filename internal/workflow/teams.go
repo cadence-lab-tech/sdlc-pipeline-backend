@@ -319,6 +319,97 @@ func (a *Auth) BootstrapTeam(ctx context.Context, adminHandle, key, name string)
 	})
 }
 
+// ── квоты по стоимости ──────────────────────────────────────────────────────
+
+// budgetAllows отбивает захват этапа, когда команда-владелец проекта
+// исчерпала предел. Живёт в движке, а не в транспорте: захват идёт и через
+// REST, и через MCP-тул, и правило у них одно.
+func (e *Engine) budgetAllows(ctx context.Context, q postgres.Querier, projectID uuid.UUID) error {
+	state, err := e.store.ExceededBudget(ctx, q, projectID)
+	if err != nil {
+		return err
+	}
+	if !state.Exceeded() {
+		return nil
+	}
+	return apperr.Forbidden(
+		"команда %s исчерпала предел на %s: потрачено %.2f из %.2f USD; начатые прогоны доходят, новые этапы не забираются",
+		state.TeamKey, periodName(state.Period), state.SpentUSD, state.LimitUSD)
+}
+
+func periodName(period string) string {
+	switch period {
+	case "day":
+		return "день"
+	case "week":
+		return "неделю"
+	case "month":
+		return "месяц"
+	}
+	return period
+}
+
+// TeamBudgets — пределы команды вместе с текущим расходом: без расхода предел
+// ничего не говорит.
+type TeamBudgets struct {
+	Team    domain.Team          `json:"team"`
+	Budgets []domain.BudgetState `json:"budgets"`
+}
+
+func (a *Auth) TeamBudgets(ctx context.Context, id Identity, key string) (TeamBudgets, error) {
+	q := a.store.DB()
+	team, err := a.store.GetTeamByKey(ctx, q, key)
+	if err != nil {
+		return TeamBudgets{}, err
+	}
+	if _, err := a.teamRole(ctx, q, id, team.ID, false); err != nil {
+		return TeamBudgets{}, err
+	}
+	limits, err := a.store.ListTeamBudgets(ctx, q, team.ID)
+	if err != nil {
+		return TeamBudgets{}, err
+	}
+	out := TeamBudgets{Team: team, Budgets: []domain.BudgetState{}}
+	for _, b := range limits {
+		spent, err := a.store.TeamSpend(ctx, q, team.ID, b.Period)
+		if err != nil {
+			return TeamBudgets{}, err
+		}
+		out.Budgets = append(out.Budgets, domain.BudgetState{
+			TeamKey: team.Key, Period: b.Period, LimitUSD: b.LimitUSD, SpentUSD: spent,
+		})
+	}
+	return out, nil
+}
+
+// SetTeamBudget ставит или снимает предел. Право — у администратора системы:
+// команда, назначающая себе бюджет сама, — это не бюджет.
+func (a *Auth) SetTeamBudget(ctx context.Context, id Identity, key, period string, limitUSD float64) (TeamBudgets, error) {
+	if err := a.RequireAdmin(id); err != nil {
+		return TeamBudgets{}, err
+	}
+	switch period {
+	case "day", "week", "month":
+	default:
+		return TeamBudgets{}, apperr.InvalidInput("окно бюджета: day, week или month, а не %q", period)
+	}
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		team, err := a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if limitUSD <= 0 {
+			return a.store.DeleteTeamBudget(ctx, tx, team.ID, period)
+		}
+		_, err = a.store.SetTeamBudget(ctx, tx, team.ID, period, limitUSD, id.Principal.ID)
+		return err
+	})
+	if err != nil {
+		return TeamBudgets{}, err
+	}
+	return a.TeamBudgets(ctx, id, key)
+}
+
 // ── общее ───────────────────────────────────────────────────────────────────
 
 // teamRole проверяет доступ к команде и отдаёт роль актора в ней. lead —

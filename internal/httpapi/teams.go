@@ -141,6 +141,39 @@ func (s *Server) removeTeamMember(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// ── квоты по стоимости ──────────────────────────────────────────────────────
+
+func (s *Server) teamBudgets(c *gin.Context) {
+	out, err := s.auth.TeamBudgets(c.Request.Context(), identity(c), c.Param("teamKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+type setTeamBudgetRequest struct {
+	Period string `json:"period" binding:"required"`
+	// Ноль снимает предел: «без ограничения» и «ограничение в ноль долларов»
+	// — разные вещи, и вторая означала бы остановку команды.
+	LimitUSD float64 `json:"limit_usd"`
+}
+
+func (s *Server) setTeamBudget(c *gin.Context) {
+	var req setTeamBudgetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	out, err := s.auth.SetTeamBudget(c.Request.Context(), identity(c), c.Param("teamKey"),
+		req.Period, req.LimitUSD)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 // ── команды в проекте ───────────────────────────────────────────────────────
 
 func (s *Server) listProjectTeams(c *gin.Context) {

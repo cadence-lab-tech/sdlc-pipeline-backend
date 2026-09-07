@@ -179,6 +179,35 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 
+	case "budget":
+		key, tail := popTask(rest)
+		var period string
+		var limit float64
+		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
+			fs.StringVar(&period, "period", "", "окно: day, week или month")
+			fs.Float64Var(&limit, "limit", 0, "предел в долларах; 0 снимает предел")
+		})
+		if err != nil {
+			return err
+		}
+		if key == "" {
+			fs.Usage()
+			return fmt.Errorf("sdlc team budget <команда> [--period month --limit 500]")
+		}
+		if period == "" {
+			var out any
+			if err := c.get(ctx, "/teams/"+url.PathEscape(key)+"/budgets", nil, &out); err != nil {
+				return err
+			}
+			return print(out)
+		}
+		var out any
+		if err := c.do(ctx, "PUT", "/teams/"+url.PathEscape(key)+"/budgets",
+			map[string]any{"period": period, "limit_usd": limit}, &out); err != nil {
+			return err
+		}
+		return print(out)
+
 	case "grant":
 		key, tail := popTask(rest)
 		var projectFlag, level string
@@ -228,7 +257,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		return print(map[string]any{"revoked": key, "project": projectKey})
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, update, archive, add, remove, groups, grant, revoke", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, update, archive, add, remove, groups, budget, grant, revoke", sub)
 	}
 }
 

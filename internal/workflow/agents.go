@@ -198,6 +198,12 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		if err := roleAllowed(run, opts.AllowedRoles); err != nil {
 			return err
 		}
+		// Исчерпанный бюджет команды закрывает новые захваты, но не трогает
+		// начатые прогоны (решение 0027): оборванный посреди работы этап
+		// стоил бы дороже, чем перерасход, который его вызвал.
+		if err := e.budgetAllows(ctx, tx, task.ProjectID); err != nil {
+			return err
+		}
 
 		expires := time.Now().Add(e.leaseTTL)
 		run, err = e.store.ClaimStageRun(ctx, tx, run.ID, actor, sessionRef, expires)

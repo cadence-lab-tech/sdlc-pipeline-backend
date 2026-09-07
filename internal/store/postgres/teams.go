@@ -319,3 +319,105 @@ func (s *Store) EffectiveRole(ctx context.Context, q Querier, projectID, princip
 	}
 	return domain.MemberRole(*role), nil
 }
+
+// ── квоты по стоимости ──────────────────────────────────────────────────────
+
+// Расход команды — это стоимость прогонов в проектах, которыми она владеет
+// (`projects.owner_team_id`). Проект, где команда просто участвует, платит его
+// владелец: иначе один и тот же доллар считался бы дважды.
+const teamSpendQuery = `
+	SELECT coalesce(sum(u.cost_usd), 0)::float8
+	FROM stage_run_usage u
+	JOIN stage_runs sr ON sr.id = u.run_id
+	JOIN tasks t ON t.id = sr.task_id
+	JOIN projects p ON p.id = t.project_id
+	WHERE p.owner_team_id = $1 AND u.reported_at >= date_trunc($2, now())`
+
+// TeamSpend — сколько команда потратила с начала окна.
+func (s *Store) TeamSpend(ctx context.Context, q Querier, teamID uuid.UUID, period string) (float64, error) {
+	var spent float64
+	err := q.QueryRow(ctx, teamSpendQuery, teamID, period).Scan(&spent)
+	return spent, translate(err)
+}
+
+// ListTeamBudgets — пределы команды по окнам.
+func (s *Store) ListTeamBudgets(ctx context.Context, q Querier, teamID uuid.UUID) ([]domain.TeamBudget, error) {
+	rows, err := q.Query(ctx, `
+		SELECT team_id, period, cost_usd_limit::float8, created_at, updated_at
+		FROM team_budgets WHERE team_id = $1 ORDER BY period`, teamID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.TeamBudget{}
+	for rows.Next() {
+		var b domain.TeamBudget
+		if err := rows.Scan(&b.TeamID, &b.Period, &b.LimitUSD, &b.CreatedAt, &b.UpdatedAt); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, b)
+	}
+	return out, translate(rows.Err())
+}
+
+func (s *Store) SetTeamBudget(ctx context.Context, q Querier, teamID uuid.UUID, period string, limit float64, actor uuid.UUID) (domain.TeamBudget, error) {
+	var b domain.TeamBudget
+	err := q.QueryRow(ctx, `
+		INSERT INTO team_budgets (team_id, period, cost_usd_limit, created_by)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (team_id, period) DO UPDATE
+			SET cost_usd_limit = EXCLUDED.cost_usd_limit, updated_at = now()
+		RETURNING team_id, period, cost_usd_limit::float8, created_at, updated_at`,
+		teamID, period, limit, actor,
+	).Scan(&b.TeamID, &b.Period, &b.LimitUSD, &b.CreatedAt, &b.UpdatedAt)
+	return b, translate(err)
+}
+
+func (s *Store) DeleteTeamBudget(ctx context.Context, q Querier, teamID uuid.UUID, period string) error {
+	tag, err := q.Exec(ctx, `DELETE FROM team_budgets WHERE team_id = $1 AND period = $2`,
+		teamID, period)
+	if err != nil {
+		return translate(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.NotFound("у команды нет предела на это окно")
+	}
+	return nil
+}
+
+// ExceededBudget отдаёт превышенный предел команды-владельца проекта; пустой
+// Period означает, что превышения нет.
+//
+// Одним запросом: проверка стоит на пути каждого захвата этапа, и три похода
+// в базу там дороже, чем выглядят.
+func (s *Store) ExceededBudget(ctx context.Context, q Querier, projectID uuid.UUID) (domain.BudgetState, error) {
+	var out domain.BudgetState
+	err := q.QueryRow(ctx, `
+		WITH owner AS (
+			SELECT t.id AS team_id, t.key
+			FROM projects p JOIN teams t ON t.id = p.owner_team_id
+			WHERE p.id = $1
+		), spend AS (
+			SELECT o.key, b.period, b.cost_usd_limit::float8 AS lim,
+			       coalesce((
+			           SELECT sum(u.cost_usd)
+			           FROM stage_run_usage u
+			           JOIN stage_runs sr ON sr.id = u.run_id
+			           JOIN tasks t ON t.id = sr.task_id
+			           JOIN projects p ON p.id = t.project_id
+			           WHERE p.owner_team_id = o.team_id
+			             AND u.reported_at >= date_trunc(b.period, now())
+			       ), 0)::float8 AS spent
+			FROM owner o
+			JOIN team_budgets b ON b.team_id = o.team_id
+		)
+		SELECT key, period, lim, spent FROM spend
+		WHERE spent >= lim
+		ORDER BY spent - lim DESC
+		LIMIT 1`, projectID).Scan(&out.TeamKey, &out.Period, &out.LimitUSD, &out.SpentUSD)
+	if isNoRows(err) {
+		return domain.BudgetState{}, nil
+	}
+	return out, translate(err)
+}

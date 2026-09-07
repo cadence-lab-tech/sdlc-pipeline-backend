@@ -89,6 +89,10 @@ func (s *Server) Handler() http.Handler {
 		v1.PUT("/teams/:teamKey/members", s.setTeamMember)
 		v1.DELETE("/teams/:teamKey/members/:handle", s.removeTeamMember)
 		v1.PUT("/teams/:teamKey/idp-groups", s.setTeamIdPGroups)
+		// Квоты по стоимости: предел ставит администратор системы, расход
+		// видят участники команды.
+		v1.GET("/teams/:teamKey/budgets", s.teamBudgets)
+		v1.PUT("/teams/:teamKey/budgets", s.setTeamBudget)
 
 		v1.GET("/projects", s.listProjects)
 		// Проект заводит администратор системы или лид команды с правом на
