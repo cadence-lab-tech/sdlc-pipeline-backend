@@ -34,6 +34,10 @@ type Options struct {
 	// Векторизация запросов поиска. nil — поиск остаётся полнотекстовым:
 	// без провайдера эмбеддингов система обязана работать, просто хуже.
 	Embedder embed.Embedder
+	// Проверка доступа к репозиториям учётными данными проекта (решение
+	// 0028). nil — приложение не настроено: привязка репозитория проверяется
+	// только на формат, как в фазах 1-5.
+	GitHub GitHubAccess
 }
 
 const (
@@ -49,6 +53,10 @@ type Engine struct {
 	heartbeat  time.Duration
 	embedder   embed.Embedder
 	evaluators map[string]evaluator
+	// Проверка доступа к репозиториям учётными данными проекта (решение
+	// 0028). nil — приложение не настроено, и привязка репозитория ничем
+	// не ограничена, как в фазах 1-5.
+	github GitHubAccess
 }
 
 func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {
@@ -61,7 +69,7 @@ func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {
 	e := &Engine{
 		store: store, log: log, strict: opts.StrictGates,
 		leaseTTL: opts.LeaseTTL, heartbeat: opts.HeartbeatInterval,
-		embedder: opts.Embedder,
+		embedder: opts.Embedder, github: opts.GitHub,
 	}
 	e.registerEvaluators()
 	return e

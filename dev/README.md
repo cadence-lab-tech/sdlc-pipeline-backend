@@ -245,6 +245,9 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 | `SDLC_OIDC_CLIENT_ID` | пусто | идентификатор приложения у провайдера; им же проверяется аудитория ID-токена |
 | `SDLC_OIDC_GROUPS_CLAIM` | `groups` | клейм с группами: по нему синхронизируется состав команд |
 | `SDLC_SESSION_TTL` | `12h` | срок жизни сессии, выданной входом через провайдера |
+| `SDLC_GITHUB_APP_ID` | пусто | идентификатор GitHub App; без него доступ идёт общим токеном |
+| `SDLC_GITHUB_APP_KEY_FILE` | пусто | файл с приватным ключом приложения — единственный секрет доступа к GitHub |
+| `SDLC_GITHUB_TOKEN_<NAME>` | пусто | токен для запасного пути: имя `<NAME>` лежит в `projects.github_credential_ref` или `repositories.credential_ref` |
 | `SDLC_DEFAULT_ACTOR` | `anonymous` | актор без заголовка (режим `header`) |
 | `SDLC_BLOB_DIR` | пусто | каталог для вынесенного содержимого; пусто — всё inline |
 | `SDLC_BLOB_INLINE_MAX_BYTES` | `262144` | до этого размера содержимое лежит в базе |

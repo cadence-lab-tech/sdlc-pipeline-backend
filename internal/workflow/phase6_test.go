@@ -8,12 +8,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/testdb"
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
@@ -418,3 +422,113 @@ func TestOIDCRejectsForeignTokens(t *testing.T) {
 		t.Fatalf("токен с чужой подписью принят: %v", err)
 	}
 }
+
+// ── доступ к GitHub на уровне проекта ───────────────────────────────────────
+
+// fakeGitHub отвечает за провайдера: проверяется правило движка, а не поход в
+// сеть — сам поход проверен в internal/github.
+type fakeGitHub struct {
+	allowed        map[string]bool
+	installationID *int64
+}
+
+func (f *fakeGitHub) AppConfigured() bool { return true }
+
+func (f *fakeGitHub) CheckRepo(_ context.Context, installationID *int64, _, owner, name string) error {
+	f.installationID = installationID
+	if f.allowed[owner+"/"+name] {
+		return nil
+	}
+	return errors.New("404 Not Found")
+}
+
+func TestRepositoryOutsideInstallationIsRejected(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, _, _ := setupPhase4(t, AuthHeader)
+	gh := &fakeGitHub{allowed: map[string]bool{"acme/api": true}}
+	engine := NewEngine(store, testdb.Logger(), Options{StrictGates: true, GitHub: gh})
+
+	// Проект не объявил своих учётных данных — провайдера не спрашиваем вовсе:
+	// иначе привязка репозитория зависела бы от доступности GitHub.
+	if _, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/web"}); err != nil {
+		t.Fatalf("проект без установки: %v", err)
+	}
+	if gh.installationID != nil {
+		t.Fatal("провайдера спросили у проекта без учётных данных")
+	}
+
+	installation := int64(42)
+	project, err := engine.SetProjectGitHub(ctx, "SDLC", SetGitHubInput{InstallationID: &installation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installation {
+		t.Fatalf("установка не сохранилась: %+v", project)
+	}
+
+	_, _, err = engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/secrets"})
+	if apperr.As(err).Code != apperr.CodeInvalidInput {
+		t.Fatalf("репозиторий вне установки привязался: %v", err)
+	}
+	if gh.installationID == nil || *gh.installationID != installation {
+		t.Fatalf("проверка пошла не с установкой проекта: %v", gh.installationID)
+	}
+	if _, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/api"}); err != nil {
+		t.Fatalf("репозиторий внутри установки: %v", err)
+	}
+
+	// Настройки проекта показывают доступ по каждому репозиторию области.
+	status, err := engine.CheckGitHubAccess(ctx, "SDLC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRepo := map[string]bool{}
+	for _, r := range status.Repositories {
+		byRepo[r.Repository] = r.OK
+	}
+	if !byRepo["acme/api"] {
+		t.Fatalf("доступный репозиторий показан недоступным: %+v", status.Repositories)
+	}
+	if byRepo["acme/web"] {
+		t.Fatalf("недоступный репозиторий показан доступным: %+v", status.Repositories)
+	}
+}
+
+func TestWebhookRoutesByInstallation(t *testing.T) {
+	ctx := context.Background()
+	store, engine, _, _, _ := setupPhase4(t, AuthHeader)
+
+	push := func(installationID int64, delivery string) WebhookOutcome {
+		t.Helper()
+		body := fmt.Sprintf(`{
+			"ref": "refs/heads/main", "after": "%s", "deleted": false,
+			"repository": {"name": "sdlc-pipeline-backend", "owner": {"login": "stepaKaziatko"}},
+			"installation": {"id": %d}
+		}`, strings.Repeat("a", 40), installationID)
+		out, err := engine.HandleGitHubEvent(ctx, "push", delivery, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	if _, err := engine.SetProjectGitHub(ctx, "SDLC", SetGitHubInput{InstallationID: ptr(int64(42))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Событие чужой установки до проекта не доходит: приложение приносит
+	// события всех своих установок разом.
+	if out := push(7, "delivery-foreign"); out.Queued != 0 {
+		t.Fatalf("прогон поставлен по событию чужой установки: %+v", out)
+	}
+	if out := push(42, "delivery-own"); out.Queued == 0 {
+		t.Fatalf("событие своей установки не поставило прогон: %+v", out)
+	}
+	// Вебхук, настроенный руками, установки не несёт и фильтром не режется.
+	if out := push(0, "delivery-manual"); out.Duplicate {
+		t.Fatalf("доставка сочтена повтором: %+v", out)
+	}
+	_ = store
+}
+
+func ptr[T any](v T) *T { return &v }

@@ -46,6 +46,27 @@ type WebhookOutcome struct {
 	Ignored    string `json:"ignored,omitempty"`
 }
 
+// ghInstallation — установка приложения, приславшая событие. Ноль означает
+// вебхук, настроенный на репозитории руками, а не приложением.
+type ghInstallation struct {
+	ID int64 `json:"id"`
+}
+
+// installationTargets оставляет репозитории тех проектов, которым событие
+// адресовано. Установка ноль (вебхук настроен руками) не фильтрует ничего.
+func installationTargets(targets []postgres.IndexTarget, installationID int64) []postgres.IndexTarget {
+	if installationID == 0 {
+		return targets
+	}
+	matched := make([]postgres.IndexTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.InstallationID == nil || *t.InstallationID == installationID {
+			matched = append(matched, t)
+		}
+	}
+	return matched
+}
+
 type ghRepo struct {
 	Name  string `json:"name"`
 	Owner struct {
@@ -89,10 +110,11 @@ func (e *Engine) HandleGitHubEvent(ctx context.Context, event, deliveryID string
 
 func (e *Engine) githubPush(ctx context.Context, tx pgx.Tx, body []byte, out *WebhookOutcome) error {
 	var p struct {
-		Ref        string `json:"ref"`
-		After      string `json:"after"`
-		Deleted    bool   `json:"deleted"`
-		Repository ghRepo `json:"repository"`
+		Ref          string         `json:"ref"`
+		After        string         `json:"after"`
+		Deleted      bool           `json:"deleted"`
+		Repository   ghRepo         `json:"repository"`
+		Installation ghInstallation `json:"installation"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
 		return apperr.InvalidInput("тело push не разбирается: %v", err)
@@ -109,6 +131,11 @@ func (e *Engine) githubPush(ctx context.Context, tx pgx.Tx, body []byte, out *We
 	if err != nil {
 		return err
 	}
+	// Приложение приносит события всех своих установок, и доставка несёт
+	// installation.id (решение 0028). Если репозиторий с теми же координатами
+	// привязан к нескольким проектам, событие принадлежит тому, чья установка
+	// его прислала; проекты без установки остаются на прежнем пути.
+	targets = installationTargets(targets, p.Installation.ID)
 	for _, t := range targets {
 		watched := false
 		for _, b := range t.Branches {

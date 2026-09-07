@@ -43,7 +43,12 @@ type Config struct {
 	// Чтение GitHub. Система работает с репозиториями только на чтение
 	// (repositories.access_mode), поэтому токену достаточно прав на чтение.
 	GitHubAPIURL string
-	GitHubToken  string
+	// GitHub App: один на инстанс, приватный ключ — единственный секрет
+	// (решение 0028). Без них доступ идёт общим токеном и именованными
+	// секретами, как в фазах 3-5.
+	GitHubAppID      string
+	GitHubAppKeyFile string
+	GitHubToken      string
 
 	// Индексация репозиториев. Кодовая база под задачами двигается непрерывно,
 	// поэтому прогон наследует у предыдущего всё, что не изменилось, и
@@ -130,6 +135,8 @@ func Load() (Config, error) {
 		LeaseSweepInterval:  time.Minute,
 		MCPEnabled:          true,
 		GitHubAPIURL:        env("SDLC_GITHUB_API_URL", "https://api.github.com"),
+		GitHubAppID:         env("SDLC_GITHUB_APP_ID", ""),
+		GitHubAppKeyFile:    env("SDLC_GITHUB_APP_KEY_FILE", ""),
 		GitHubToken:         env("SDLC_GITHUB_TOKEN", ""),
 		IndexEnabled:        true,
 		IndexInterval:       5 * time.Minute,

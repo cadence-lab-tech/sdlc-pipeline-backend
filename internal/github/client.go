@@ -99,6 +99,22 @@ type TreeEntry struct {
 	Mode string `json:"mode"`
 }
 
+// Repository — то, что провайдер знает о репозитории. Нужно проверке доступа
+// из настроек проекта.
+type Repository struct {
+	DefaultBranch string `json:"default_branch"`
+	Private       bool   `json:"private"`
+	Archived      bool   `json:"archived"`
+}
+
+// Repo отдаёт сведения о репозитории. Это же и есть проверка доступа: если
+// учётные данные до него не достают, провайдер отвечает 404.
+func (c *Client) Repo(ctx context.Context, repo Repo) (Repository, error) {
+	var out Repository
+	err := c.get(ctx, "/repos/"+repo.Owner+"/"+repo.Name, "", &out)
+	return out, err
+}
+
 // Tree отдаёт полный листинг файлов коммита.
 //
 // truncated=true означает, что репозиторий больше, чем провайдер согласен

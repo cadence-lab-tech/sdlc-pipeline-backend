@@ -13,12 +13,14 @@ import (
 // подставляется и в RETURNING, где джойна нет.
 const projectCols = `id, key, name, description, settings, owner_team_id,
 	(SELECT t.key FROM teams t WHERE t.id = projects.owner_team_id) AS owner_team_key,
+	github_installation_id, github_credential_ref,
 	created_at, updated_at, archived_at`
 
 func scanProject(row interface{ Scan(...any) error }) (domain.Project, error) {
 	var p domain.Project
 	err := row.Scan(&p.ID, &p.Key, &p.Name, &p.Description, &p.Settings,
-		&p.OwnerTeamID, &p.OwnerTeamKey, &p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt)
+		&p.OwnerTeamID, &p.OwnerTeamKey, &p.GitHubInstallationID, &p.GitHubCredentialRef,
+		&p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt)
 	return p, err
 }
 
@@ -68,6 +70,34 @@ func (s *Store) CreateProject(ctx context.Context, q Querier, in CreateProjectIn
 		in.Key, in.Name, in.Description, in.CreatedBy, in.OwnerTeamID))
 	if err != nil {
 		return p, translate(err)
+	}
+	return p, nil
+}
+
+// SetProjectGitHub привязывает проект к установке приложения либо к
+// именованному секрету. nil-поля не меняются, пустая строка в ref снимает
+// привязку.
+func (s *Store) SetProjectGitHub(ctx context.Context, q Querier, projectID uuid.UUID, installationID *int64, credentialRef *string) (domain.Project, error) {
+	p, err := scanProject(q.QueryRow(ctx, `
+		UPDATE projects SET
+			github_installation_id = coalesce($2, github_installation_id),
+			github_credential_ref = coalesce(nullif($3, ''), github_credential_ref),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING `+projectCols, projectID, installationID, credentialRef))
+	if err != nil {
+		return p, notFound(err, "проект не найден")
+	}
+	return p, nil
+}
+
+// ProjectByInstallation — проект, привязанный к установке приложения. Нужно
+// маршрутизации вебхуков: доставка несёт installation.id.
+func (s *Store) ProjectByInstallation(ctx context.Context, q Querier, installationID int64) (domain.Project, error) {
+	p, err := scanProject(q.QueryRow(ctx, `SELECT `+projectCols+`
+		FROM projects WHERE github_installation_id = $1`, installationID))
+	if err != nil {
+		return p, notFound(err, "установка %d не привязана ни к одному проекту", installationID)
 	}
 	return p, nil
 }

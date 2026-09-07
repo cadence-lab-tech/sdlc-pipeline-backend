@@ -272,6 +272,46 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 
+	case "github":
+		var projectFlag, credentialRef string
+		var installation int64
+		var check bool
+		fs, err := flags("project", rest, func(fs *flag.FlagSet) {
+			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+			fs.Int64Var(&installation, "installation", 0, "идентификатор установки приложения в организации")
+			fs.StringVar(&credentialRef, "credential-ref", "", "имя секрета с токеном: запасной путь без приложения")
+			fs.BoolVar(&check, "check", false, "проверить доступ к репозиториям проекта")
+		})
+		if err != nil {
+			return err
+		}
+		projectKey, err := project(fs, projectFlag)
+		if err != nil {
+			return err
+		}
+		if installation == 0 && credentialRef == "" {
+			check = true
+		}
+		if !check {
+			body := map[string]any{}
+			if installation != 0 {
+				body["installation_id"] = installation
+			}
+			if credentialRef != "" {
+				body["credential_ref"] = credentialRef
+			}
+			var out any
+			if err := c.do(ctx, "PUT", "/projects/"+url.PathEscape(projectKey)+"/github", body, &out); err != nil {
+				return err
+			}
+			return print(out)
+		}
+		var out any
+		if err := c.get(ctx, "/projects/"+url.PathEscape(projectKey)+"/github/check", nil, &out); err != nil {
+			return err
+		}
+		return print(out)
+
 	case "teams":
 		var projectFlag string
 		fs, err := flags("project", rest, func(fs *flag.FlagSet) {
@@ -291,6 +331,6 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		return print(out)
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, create, teams", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, create, teams, github", sub)
 	}
 }

@@ -23,6 +23,9 @@ type IndexTarget struct {
 	Branches      []string
 	ExcludeGlobs  []string
 	CredentialRef *string
+	// Учётные данные проекта, к которому привязан репозиторий.
+	InstallationID       *int64
+	ProjectCredentialRef *string
 }
 
 func (t IndexTarget) Repository() string { return t.Owner + "/" + t.Name }
@@ -53,6 +56,10 @@ type IndexRun struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	ExcludeGlobs   []string   `json:"-"`
 	CredentialRef  *string    `json:"-"`
+	// Учётные данные проекта: установка приложения и имя секрета (решение
+	// 0028). Секрет репозитория, если он задан, частнее и побеждает.
+	InstallationID       *int64  `json:"-"`
+	ProjectCredentialRef *string `json:"-"`
 }
 
 const indexRunSelect = `
@@ -62,9 +69,11 @@ const indexRunSelect = `
 	       ir.files_indexed, ir.files_reused, ir.chunks_indexed,
 	       ir.chunks_reused, ir.chunks_embedded,
 	       ir.started_at, ir.finished_at, ir.error, ir.created_at,
-	       r.exclude_globs, r.credential_ref
+	       r.exclude_globs, r.credential_ref,
+	       p.github_installation_id, p.github_credential_ref
 	FROM repo_index_runs ir
-	JOIN repositories r ON r.id = ir.repository_id`
+	JOIN repositories r ON r.id = ir.repository_id
+	JOIN projects p ON p.id = r.project_id`
 
 func scanIndexRun(row interface{ Scan(...any) error }) (IndexRun, error) {
 	var r IndexRun
@@ -74,7 +83,7 @@ func scanIndexRun(row interface{ Scan(...any) error }) (IndexRun, error) {
 		&r.FilesIndexed, &r.FilesReused, &r.ChunksIndexed,
 		&r.ChunksReused, &r.ChunksEmbedded,
 		&r.StartedAt, &r.FinishedAt, &r.Error, &r.CreatedAt,
-		&r.ExcludeGlobs, &r.CredentialRef)
+		&r.ExcludeGlobs, &r.CredentialRef, &r.InstallationID, &r.ProjectCredentialRef)
 	return r, err
 }
 
@@ -84,7 +93,8 @@ func scanIndexRun(row interface{ Scan(...any) error }) (IndexRun, error) {
 func (s *Store) IndexTargets(ctx context.Context, q Querier) ([]IndexTarget, error) {
 	rows, err := q.Query(ctx, `
 		SELECT r.id, r.project_id, p.key, r.owner, r.name,
-		       r.watch_branches, r.exclude_globs, r.credential_ref
+		       r.watch_branches, r.exclude_globs, r.credential_ref,
+		       p.github_installation_id, p.github_credential_ref
 		FROM repositories r
 		JOIN projects p ON p.id = r.project_id
 		WHERE r.index_enabled
@@ -98,7 +108,8 @@ func (s *Store) IndexTargets(ctx context.Context, q Querier) ([]IndexTarget, err
 	for rows.Next() {
 		var t IndexTarget
 		if err := rows.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
-			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef); err != nil {
+			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
+			&t.InstallationID, &t.ProjectCredentialRef); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, t)

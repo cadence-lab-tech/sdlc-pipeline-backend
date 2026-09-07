@@ -14,27 +14,34 @@ import (
 // провайдера к индексации отношения не имеет.
 type gitHubSource struct {
 	client *github.Client
-	// secret переводит repositories.credential_ref в токен: в базе лежит имя
-	// секрета, а не сам токен.
-	secret func(ref string) string
+	// provider выбирает учётные данные: установку приложения у проекта или
+	// именованный секрет. В базе лежат ссылки, значения — в окружении и в
+	// памяти процесса (решение 0028).
+	provider *github.Provider
 }
 
-func NewGitHubSource(client *github.Client, secret func(ref string) string) Source {
-	if secret == nil {
-		secret = func(string) string { return "" }
+func NewGitHubSource(provider *github.Provider) Source {
+	client, err := provider.Client(context.Background(), github.Credentials{})
+	if err != nil {
+		// Общий клиент без учётных данных провайдер отдаёт всегда: ошибка
+		// здесь означала бы сломанный конструктор, а не конфигурацию.
+		panic(err)
 	}
-	return gitHubSource{client: client, secret: secret}
+	return gitHubSource{client: client, provider: provider}
 }
 
-func (s gitHubSource) ForRepository(credentialRef string) Source {
-	if credentialRef == "" {
-		return s
+func (s gitHubSource) ForRepository(ctx context.Context, creds Credentials) (Source, error) {
+	ref := creds.RepositoryRef
+	if ref == "" {
+		ref = creds.ProjectRef
 	}
-	token := s.secret(credentialRef)
-	if token == "" {
-		return s
+	client, err := s.provider.Client(ctx, github.Credentials{
+		InstallationID: creds.InstallationID, SecretRef: ref,
+	})
+	if err != nil {
+		return nil, err
 	}
-	return gitHubSource{client: s.client.WithToken(token), secret: s.secret}
+	return gitHubSource{client: client, provider: s.provider}, nil
 }
 
 func (s gitHubSource) Head(ctx context.Context, repo Repo, branch string) (string, error) {

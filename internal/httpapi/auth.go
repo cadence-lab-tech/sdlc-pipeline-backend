@@ -120,6 +120,43 @@ func (s *Server) logout(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// ── доступ к GitHub у проекта ───────────────────────────────────────────────
+
+type setProjectGitHubRequest struct {
+	// Идентификатор установки приложения в организации: ссылка, а не секрет
+	// (решение 0028).
+	InstallationID *int64 `json:"installation_id"`
+	// Имя секрета для запасного пути; значение живёт в окружении.
+	CredentialRef *string `json:"credential_ref"`
+}
+
+func (s *Server) setProjectGitHub(c *gin.Context) {
+	var req setProjectGitHubRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	project, err := s.engine.SetProjectGitHub(c.Request.Context(), c.Param("projectKey"),
+		workflow.SetGitHubInput{InstallationID: req.InstallationID, CredentialRef: req.CredentialRef})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, project)
+}
+
+// checkProjectGitHub ходит в провайдера по каждому репозиторию проекта.
+// Ручка по кнопке из настроек: это единственное место, где система спрашивает
+// провайдера о доступе не по делу, а чтобы показать человеку результат.
+func (s *Server) checkProjectGitHub(c *gin.Context) {
+	status, err := s.engine.CheckGitHubAccess(c.Request.Context(), c.Param("projectKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
 // ── участники ───────────────────────────────────────────────────────────────
 
 func (s *Server) listMembers(c *gin.Context) {

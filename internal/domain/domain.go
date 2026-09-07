@@ -166,9 +166,15 @@ type Project struct {
 	// Пусто у проектов, заведённых глобальным администратором.
 	OwnerTeamID  *uuid.UUID `json:"owner_team_id,omitempty"`
 	OwnerTeamKey *string    `json:"owner_team_key,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
+	// Установка GitHub App в организации проекта: ссылка, а не секрет
+	// (решение 0028). Пусто — доступ идёт запасным путём.
+	GitHubInstallationID *int64 `json:"github_installation_id,omitempty"`
+	// Имя секрета с токеном GitHub для запасного пути; в базе имя, значение
+	// приезжает из окружения.
+	GitHubCredentialRef *string    `json:"github_credential_ref,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	ArchivedAt          *time.Time `json:"archived_at,omitempty"`
 }
 
 type Repository struct {

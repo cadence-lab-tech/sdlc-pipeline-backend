@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -82,8 +81,16 @@ func run() error {
 		return err
 	}
 
+	// Учётные данные выбираются по проекту: установка приложения либо
+	// именованный секрет (решение 0028). Без приложения остаётся общий токен.
+	app, err := github.LoadApp(cfg.GitHubAPIURL, cfg.GitHubAppID, cfg.GitHubAppKeyFile)
+	if err != nil {
+		return err
+	}
+	provider := github.NewProvider(github.New(cfg.GitHubAPIURL, cfg.GitHubToken), app, github.SecretFromEnv)
+
 	ix := indexer.New(store,
-		indexer.NewGitHubSource(github.New(cfg.GitHubAPIURL, cfg.GitHubToken), secretFromEnv),
+		indexer.NewGitHubSource(provider),
 		embedder, log, indexer.Options{
 			MaxFileBytes: cfg.IndexMaxFileBytes,
 			MaxFiles:     cfg.IndexMaxFiles,
@@ -186,18 +193,6 @@ func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
 	default:
 		return nil
 	}
-}
-
-// secretFromEnv переводит repositories.credential_ref в токен. В базе лежит
-// имя секрета, а не сам токен: класть секреты в БД нельзя.
-func secretFromEnv(ref string) string {
-	name := strings.Map(func(r rune) rune {
-		if r == '-' || r == '.' || r == '/' {
-			return '_'
-		}
-		return r
-	}, strings.ToUpper(ref))
-	return os.Getenv(name)
 }
 
 // indexPass — полный проход по всему, что приезжает из провайдера и уезжает

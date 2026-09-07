@@ -112,7 +112,8 @@ func (s *Store) RepositorySettings(ctx context.Context, q Querier, id uuid.UUID)
 func (s *Store) RepositoriesByCoordinates(ctx context.Context, q Querier, provider, owner, name string) ([]IndexTarget, error) {
 	rows, err := q.Query(ctx, `
 		SELECT r.id, r.project_id, p.key, r.owner, r.name,
-		       r.watch_branches, r.exclude_globs, r.credential_ref
+		       r.watch_branches, r.exclude_globs, r.credential_ref,
+		       p.github_installation_id, p.github_credential_ref
 		FROM repositories r
 		JOIN projects p ON p.id = r.project_id
 		WHERE r.provider = $1 AND lower(r.owner) = lower($2) AND lower(r.name) = lower($3)
@@ -126,7 +127,8 @@ func (s *Store) RepositoriesByCoordinates(ctx context.Context, q Querier, provid
 	for rows.Next() {
 		var t IndexTarget
 		if err := rows.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
-			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef); err != nil {
+			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
+			&t.InstallationID, &t.ProjectCredentialRef); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, t)

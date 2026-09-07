@@ -105,6 +105,11 @@ func (s *Server) Handler() http.Handler {
 		v1.PUT("/projects/:projectKey/teams", maintainer, s.setProjectTeam)
 		v1.DELETE("/projects/:projectKey/teams/:teamKey", maintainer, s.removeProjectTeam)
 
+		// Доступ к GitHub у проекта: установка приложения либо именованный
+		// секрет (решение 0028).
+		v1.PUT("/projects/:projectKey/github", maintainer, s.setProjectGitHub)
+		v1.GET("/projects/:projectKey/github/check", maintainer, s.checkProjectGitHub)
+
 		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
 		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)
 		v1.DELETE("/projects/:projectKey/members/:handle", maintainer, s.removeMember)

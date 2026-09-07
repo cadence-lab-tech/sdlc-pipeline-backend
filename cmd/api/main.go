@@ -17,6 +17,7 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
@@ -73,6 +74,19 @@ func run() error {
 	if err := useBlobStore(cfg, store, log); err != nil {
 		return err
 	}
+	// Учётные данные GitHub выбираются по проекту: установка приложения либо
+	// именованный секрет (решение 0028). Ключ приложения — единственный
+	// секрет; без него остаётся общий токен инстанса.
+	app, err := github.LoadApp(cfg.GitHubAPIURL, cfg.GitHubAppID, cfg.GitHubAppKeyFile)
+	if err != nil {
+		return err
+	}
+	gh := githubAccess{github.NewProvider(
+		github.New(cfg.GitHubAPIURL, cfg.GitHubToken), app, github.SecretFromEnv)}
+	if app != nil {
+		log.Info("доступ к GitHub через приложение", "app_id", cfg.GitHubAppID)
+	}
+
 	engine := workflow.NewEngine(store, log, workflow.Options{
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
@@ -80,6 +94,7 @@ func run() error {
 		// Индексацию ведёт воркер, но вектор поискового запроса считается
 		// здесь: поиск синхронный, и ждать фонового прохода ему нечего.
 		Embedder: newEmbedder(cfg, log),
+		GitHub:   gh,
 	})
 	authoring := workflow.NewAuthoring(store, log, engine)
 	if !cfg.StrictGates {
@@ -231,4 +246,22 @@ func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
 	default:
 		return nil
 	}
+}
+
+// githubAccess — доступ к репозиторию учётными данными проекта. Движок знает
+// про интерфейс, транспорт до провайдера живёт здесь: правило «репозиторий вне
+// установки не привязывается» — доменное, а поход в сеть — нет.
+type githubAccess struct{ provider *github.Provider }
+
+func (g githubAccess) AppConfigured() bool { return g.provider.HasApp() }
+
+func (g githubAccess) CheckRepo(ctx context.Context, installationID *int64, secretRef, owner, name string) error {
+	client, err := g.provider.Client(ctx, github.Credentials{
+		InstallationID: installationID, SecretRef: secretRef,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = client.Repo(ctx, github.Repo{Owner: owner, Name: name})
+	return err
 }

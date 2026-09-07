@@ -74,13 +74,21 @@ func (e *Engine) AddRepository(ctx context.Context, projectKey string, in AddRep
 	if err != nil {
 		return domain.Repository{}, false, err
 	}
+	// Доступ проверяется до транзакции: это поход в сеть, и держать на нём
+	// открытой транзакцию незачем. Репозиторий, до которого проект не
+	// достаёт, привязывать нельзя — иначе прогон индексации будет падать
+	// молча, а человек узнает об этом из счётчиков (решение 0028).
+	project, err := e.store.GetProjectByKey(ctx, e.store.DB(), projectKey)
+	if err != nil {
+		return domain.Repository{}, false, err
+	}
+	if err := e.checkRepoAccess(ctx, project, owner, name); err != nil {
+		return domain.Repository{}, false, err
+	}
+
 	var out domain.Repository
 	var created bool
 	err = e.store.InTx(ctx, func(tx pgx.Tx) error {
-		project, err := e.store.GetProjectByKey(ctx, tx, projectKey)
-		if err != nil {
-			return err
-		}
 		out, created, err = e.store.UpsertRepository(ctx, tx, postgres.RepositoryInput{
 			ProjectID: project.ID, Owner: owner, Name: name,
 			DefaultBranch: in.DefaultBranch, CloneURL: in.CloneURL, Visibility: in.Visibility,

@@ -31,7 +31,7 @@ type fakeSource struct {
 	commits map[string]map[string]string
 }
 
-func (f *fakeSource) ForRepository(string) Source { return f }
+func (f *fakeSource) ForRepository(context.Context, Credentials) (Source, error) { return f, nil }
 
 func (f *fakeSource) Head(_ context.Context, repo Repo, _ string) (string, error) {
 	if repo.Name != f.repo {
