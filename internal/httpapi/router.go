@@ -57,6 +57,12 @@ func (s *Server) Handler() http.Handler {
 	// Вебхуки провайдера: подпись вместо токена.
 	r.POST("/webhooks/github", s.githubWebhook)
 
+	// Вход через корпоративный IdP — вне группы с аутентификацией: у того,
+	// кто входит, токена ещё нет (решение 0027). Доказательством служит
+	// ID-токен провайдера, а не свой.
+	r.GET("/v1/auth/oidc", s.oidcSettings)
+	r.POST("/v1/auth/oidc/login", s.oidcLogin)
+
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)
 	maintainer := s.guard(domain.MemberMaintainer)
@@ -69,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/auth/tokens", s.listTokens)
 		v1.POST("/auth/tokens", s.issueToken)
 		v1.DELETE("/auth/tokens/:tokenID", s.revokeToken)
+		// Выход отзывает предъявленную сессию; выданный руками токен так не
+		// отзывается — он отзывается по имени из списка.
+		v1.POST("/auth/logout", s.logout)
 
 		// Команды: группы принципалов с правами на проекты (решение 0027).
 		// Права разные у каждой ручки — их проверяет сам сервис.
@@ -79,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 		v1.DELETE("/teams/:teamKey", s.archiveTeam)
 		v1.PUT("/teams/:teamKey/members", s.setTeamMember)
 		v1.DELETE("/teams/:teamKey/members/:handle", s.removeTeamMember)
+		v1.PUT("/teams/:teamKey/idp-groups", s.setTeamIdPGroups)
 
 		v1.GET("/projects", s.listProjects)
 		// Проект заводит администратор системы или лид команды с правом на

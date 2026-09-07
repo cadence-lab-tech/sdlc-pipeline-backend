@@ -125,6 +125,12 @@ type ProjectTeam struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
+// Виды токенов.
+const (
+	TokenAPI     = "api"
+	TokenSession = "session"
+)
+
 // AccessToken — предъявляемый токен. Сам токен в базе не хранится, только
 // его хеш; целиком он показывается один раз при выдаче.
 type AccessToken struct {
@@ -132,6 +138,10 @@ type AccessToken struct {
 	PrincipalID uuid.UUID     `json:"principal_id"`
 	Handle      string        `json:"handle"`
 	Kind        PrincipalKind `json:"kind"`
+	// Вид токена: api выдан руками и живёт долго, session выдан входом через
+	// провайдера и живёт часы (решение 0027). Проверка прав от вида не
+	// зависит — иначе в Auth появилась бы вторая ветка.
+	TokenKind string `json:"token_kind"`
 	// Токен, привязанный к проекту, вне него недействителен.
 	ProjectID  *uuid.UUID `json:"project_id,omitempty"`
 	ProjectKey *string    `json:"project_key,omitempty"`

@@ -2,7 +2,18 @@ package workflow
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
@@ -233,5 +244,177 @@ func TestBootstrapTeamIsIdempotent(t *testing.T) {
 	if len(detail.Members) != 1 || detail.Members[0].Handle != "admin" ||
 		detail.Members[0].Role != domain.TeamRoleLead {
 		t.Fatalf("состав первой команды: %+v", detail.Members)
+	}
+}
+
+// ── вход через корпоративный провайдер ──────────────────────────────────────
+
+// fakeIdP поднимает провайдера, отвечающего дискавери и ключами, и отдаёт
+// функцию подписи ID-токена. Проверять разбор JWT на заглушке бессмысленно:
+// смысл кода в том, что подпись сходится с ключом провайдера.
+func fakeIdP(t *testing.T) (issuer string, sign func(claims map[string]any) string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 srv.URL,
+			"authorization_endpoint": srv.URL + "/authorize",
+			"token_endpoint":         srv.URL + "/token",
+			"jwks_uri":               srv.URL + "/jwks",
+		})
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{{
+			"kty": "RSA", "use": "sig", "kid": "test",
+			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1}),
+		}}})
+	})
+
+	sign = func(claims map[string]any) string {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
+		body, err := json.Marshal(claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signing := header + "." + base64.RawURLEncoding.EncodeToString(body)
+		digest := sha256.Sum256([]byte(signing))
+		sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signing + "." + base64.RawURLEncoding.EncodeToString(sig)
+	}
+	return srv.URL, sign
+}
+
+func TestOIDCLoginIssuesSessionAndSyncsTeams(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, auth, _ := setupPhase4(t, AuthToken)
+	admin := adminIdentity(t, ctx, auth)
+	issuer, sign := fakeIdP(t)
+	auth.UseOIDC(oidc.New(oidc.Config{Issuer: issuer, ClientID: "sdlc-ui"}), time.Hour)
+
+	if _, err := auth.CreateTeam(ctx, admin, CreateTeamInput{Key: "platform", Name: "Платформа"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.SetTeamIdPGroups(ctx, admin, "platform", []string{"sdlc-platform"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.SetProjectTeam(ctx, admin, "SDLC", "platform", domain.MemberMaintainer); err != nil {
+		t.Fatal(err)
+	}
+
+	claims := func(extra map[string]any) map[string]any {
+		out := map[string]any{
+			"iss": issuer, "aud": "sdlc-ui", "sub": "idp-42",
+			"exp":   time.Now().Add(time.Hour).Unix(),
+			"email": "Alice.Ivanova@acme.example", "name": "Алиса",
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+
+	session, err := auth.Login(ctx, sign(claims(map[string]any{"groups": []string{"sdlc-platform"}})))
+	if err != nil {
+		t.Fatalf("вход: %v", err)
+	}
+	// Хэндл выводится из почты: в задачах и аудите человека зовут именем, а
+	// не идентификатором провайдера.
+	if session.Principal.Handle != "alice.ivanova" {
+		t.Fatalf("хэндл %q", session.Principal.Handle)
+	}
+	if session.Record.TokenKind != domain.TokenSession {
+		t.Fatalf("вид токена %q вместо session", session.Record.TokenKind)
+	}
+
+	// Сессия — обычный токен: тот же резолв, те же права, ничего своего.
+	id, err := auth.Authenticate(ctx, session.Token)
+	if err != nil {
+		t.Fatalf("сессия не аутентифицирует: %v", err)
+	}
+	if err := auth.Require(ctx, id, projectID(t, store), domain.MemberMaintainer); err != nil {
+		t.Fatalf("уровень команды не дошёл до вошедшего: %v", err)
+	}
+
+	// Второй вход тем же `sub` не заводит второго принципала, даже если у
+	// провайдера сменилось имя.
+	again, err := auth.Login(ctx, sign(claims(map[string]any{
+		"groups": []string{"sdlc-platform"}, "name": "Алиса Иванова",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Principal.ID != session.Principal.ID {
+		t.Fatal("второй вход завёл нового принципала")
+	}
+
+	// Группа ушла — ушло и участие в команде: состав ведёт провайдер.
+	if _, err := auth.Login(ctx, sign(claims(nil))); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.Require(ctx, id, projectID(t, store), domain.MemberViewer); apperr.As(err).Code != apperr.CodeForbidden {
+		t.Fatalf("доступ остался после ухода из группы провайдера: %v", err)
+	}
+
+	// Выход отзывает сессию, и она перестаёт работать сразу.
+	if err := auth.Logout(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.Authenticate(ctx, session.Token); apperr.As(err).Code != apperr.CodeUnauthenticated {
+		t.Fatalf("отозванная сессия жива: %v", err)
+	}
+}
+
+func TestOIDCRejectsForeignTokens(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, auth, _ := setupPhase4(t, AuthToken)
+	issuer, sign := fakeIdP(t)
+	other, signOther := fakeIdP(t)
+	auth.UseOIDC(oidc.New(oidc.Config{Issuer: issuer, ClientID: "sdlc-ui"}), time.Hour)
+
+	base := map[string]any{
+		"iss": issuer, "aud": "sdlc-ui", "sub": "idp-1",
+		"exp": time.Now().Add(time.Hour).Unix(), "email": "bob@acme.example",
+	}
+	with := func(extra map[string]any) string {
+		out := map[string]any{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return sign(out)
+	}
+
+	cases := map[string]string{
+		// Токен соседнего приложения того же провайдера сюда не пускают.
+		"чужая аудитория": with(map[string]any{"aud": "grafana"}),
+		"истёк":           with(map[string]any{"exp": time.Now().Add(-5 * time.Minute).Unix()}),
+		"чужой издатель":  with(map[string]any{"iss": other}),
+	}
+	for name, token := range cases {
+		if _, err := auth.Login(ctx, token); apperr.As(err).Code != apperr.CodeUnauthenticated {
+			t.Fatalf("%s: вход прошёл (%v)", name, err)
+		}
+	}
+
+	// Подпись чужим ключом: заголовок и тело сходятся, ключ — нет.
+	foreign := signOther(map[string]any{
+		"iss": issuer, "aud": "sdlc-ui", "sub": "idp-1",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if _, err := auth.Login(ctx, foreign); apperr.As(err).Code != apperr.CodeUnauthenticated {
+		t.Fatalf("токен с чужой подписью принят: %v", err)
 	}
 }

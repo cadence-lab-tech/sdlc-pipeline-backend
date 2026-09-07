@@ -83,6 +83,14 @@ type Config struct {
 	// заводит администратор системы.
 	BootstrapTeam     string
 	BootstrapTeamName string
+	// Вход людей через корпоративный IdP (решение 0027). Без Issuer и
+	// ClientID вход работает по выданным токенам, как в фазе 4.
+	OIDCIssuer      string
+	OIDCClientID    string
+	OIDCGroupsClaim string
+	// Срок жизни сессии: она отзывается выходом, но и сама протухает —
+	// вкладку, забытую открытой на неделю, входом заново не считают.
+	SessionTTL time.Duration
 	// Актор по умолчанию в режиме header, если заголовка нет.
 	DefaultActor string
 
@@ -139,6 +147,10 @@ func Load() (Config, error) {
 		AdminToken:          env("SDLC_ADMIN_TOKEN", ""),
 		BootstrapTeam:       env("SDLC_BOOTSTRAP_TEAM", ""),
 		BootstrapTeamName:   env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
+		OIDCIssuer:          env("SDLC_OIDC_ISSUER", ""),
+		OIDCClientID:        env("SDLC_OIDC_CLIENT_ID", ""),
+		OIDCGroupsClaim:     env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
+		SessionTTL:          12 * time.Hour,
 		DefaultActor:        env("SDLC_DEFAULT_ACTOR", "anonymous"),
 		BlobDir:             env("SDLC_BLOB_DIR", ""),
 		BlobInlineMaxBytes:  256 << 10,
@@ -162,6 +174,9 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.MCPEnabled, err = envBool("SDLC_MCP_ENABLED", c.MCPEnabled); err != nil {
+		return c, err
+	}
+	if c.SessionTTL, err = envDuration("SDLC_SESSION_TTL", c.SessionTTL); err != nil {
 		return c, err
 	}
 	if c.LeaseTTL, err = envDuration("SDLC_LEASE_TTL", c.LeaseTTL); err != nil {

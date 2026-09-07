@@ -48,7 +48,7 @@ func (s *Store) SetAdmin(ctx context.Context, q Querier, id uuid.UUID, admin boo
 // ── токены ──────────────────────────────────────────────────────────────────
 
 const tokenSelect = `
-	SELECT t.id, t.principal_id, p.handle, p.kind, t.project_id, pr.key,
+	SELECT t.id, t.principal_id, p.handle, p.kind, t.kind, t.project_id, pr.key,
 	       t.name, t.token_prefix, t.role_keys, t.created_at,
 	       t.expires_at, t.last_used_at, t.revoked_at
 	FROM agent_tokens t
@@ -57,7 +57,7 @@ const tokenSelect = `
 
 func scanToken(row interface{ Scan(...any) error }) (domain.AccessToken, error) {
 	var t domain.AccessToken
-	err := row.Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.ProjectID, &t.ProjectKey,
+	err := row.Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.TokenKind, &t.ProjectID, &t.ProjectKey,
 		&t.Name, &t.Prefix, &t.RoleKeys, &t.CreatedAt,
 		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt)
 	if t.RoleKeys == nil {
@@ -70,25 +70,31 @@ type CreateTokenInput struct {
 	PrincipalID uuid.UUID
 	ProjectID   *uuid.UUID
 	Name        string
-	TokenHash   string
-	Prefix      string
-	RoleKeys    []string
-	ExpiresAt   *time.Time
-	CreatedBy   uuid.UUID
+	// Вид токена: api (выдан руками) или session (вход через провайдера).
+	// Пусто — api.
+	Kind      string
+	TokenHash string
+	Prefix    string
+	RoleKeys  []string
+	ExpiresAt *time.Time
+	CreatedBy uuid.UUID
 }
 
 func (s *Store) CreateToken(ctx context.Context, q Querier, in CreateTokenInput) (domain.AccessToken, error) {
 	if in.RoleKeys == nil {
 		in.RoleKeys = []string{}
 	}
+	if in.Kind == "" {
+		in.Kind = domain.TokenAPI
+	}
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `
 		INSERT INTO agent_tokens (principal_id, project_id, name, token_hash, token_prefix,
-		                          role_keys, expires_at, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		                          role_keys, expires_at, created_by, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id`,
 		in.PrincipalID, in.ProjectID, in.Name, in.TokenHash, in.Prefix,
-		in.RoleKeys, in.ExpiresAt, in.CreatedBy).Scan(&id)
+		in.RoleKeys, in.ExpiresAt, in.CreatedBy, in.Kind).Scan(&id)
 	if err != nil {
 		return domain.AccessToken{}, translate(err)
 	}
@@ -109,7 +115,7 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 	var t domain.AccessToken
 	var p domain.Principal
 	err := q.QueryRow(ctx, `
-		SELECT t.id, t.principal_id, p.handle, p.kind, t.project_id, pr.key,
+		SELECT t.id, t.principal_id, p.handle, p.kind, t.kind, t.project_id, pr.key,
 		       t.name, t.token_prefix, t.role_keys, t.created_at,
 		       t.expires_at, t.last_used_at, t.revoked_at,
 		       p.id, p.kind, p.handle, p.display_name, p.email, p.is_admin, p.created_at
@@ -120,7 +126,7 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 		  AND t.revoked_at IS NULL
 		  AND (t.expires_at IS NULL OR t.expires_at > now())
 		  AND p.disabled_at IS NULL`, hash,
-	).Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.ProjectID, &t.ProjectKey,
+	).Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.TokenKind, &t.ProjectID, &t.ProjectKey,
 		&t.Name, &t.Prefix, &t.RoleKeys, &t.CreatedAt,
 		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt,
 		&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.IsAdmin, &p.CreatedAt)

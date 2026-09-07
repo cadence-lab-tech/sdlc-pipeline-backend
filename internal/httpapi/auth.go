@@ -79,6 +79,47 @@ func (s *Server) revokeToken(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// ── вход через корпоративный провайдер ──────────────────────────────────────
+
+// oidcSettings отдаёт фронтенду адреса провайдера. Ручка открытая: её
+// спрашивает страница входа, у которой токена ещё нет.
+func (s *Server) oidcSettings(c *gin.Context) {
+	settings, err := s.auth.OIDCSettings(c.Request.Context())
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, settings)
+}
+
+type oidcLoginRequest struct {
+	IDToken string `json:"id_token" binding:"required"`
+}
+
+// oidcLogin принимает ID-токен, полученный фронтендом у провайдера, и меняет
+// его на сессию — обычный токен с коротким сроком.
+func (s *Server) oidcLogin(c *gin.Context) {
+	var req oidcLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	session, err := s.auth.Login(c.Request.Context(), req.IDToken)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, session)
+}
+
+func (s *Server) logout(c *gin.Context) {
+	if err := s.auth.Logout(c.Request.Context(), identity(c)); err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // ── участники ───────────────────────────────────────────────────────────────
 
 func (s *Server) listMembers(c *gin.Context) {

@@ -153,6 +153,32 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(map[string]any{"removed": principal})
 
+	case "groups":
+		key, tail := popTask(rest)
+		var set string
+		var clear bool
+		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
+			fs.StringVar(&set, "set", "", "группы провайдера через запятую: состав команды синхронизируется при входе")
+			fs.BoolVar(&clear, "clear", false, "убрать сопоставление: состав снова ведётся руками")
+		})
+		if err != nil {
+			return err
+		}
+		if key == "" || (set == "" && !clear) {
+			fs.Usage()
+			return fmt.Errorf("sdlc team groups <команда> --set sdlc-platform,sdlc-core")
+		}
+		groups := []string{}
+		if !clear {
+			groups = splitCSV(set)
+		}
+		var out any
+		if err := c.do(ctx, "PUT", "/teams/"+url.PathEscape(key)+"/idp-groups",
+			map[string]any{"groups": groups}, &out); err != nil {
+			return err
+		}
+		return print(out)
+
 	case "grant":
 		key, tail := popTask(rest)
 		var projectFlag, level string
@@ -202,7 +228,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		return print(map[string]any{"revoked": key, "project": projectKey})
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, update, archive, add, remove, grant, revoke", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, update, archive, add, remove, groups, grant, revoke", sub)
 	}
 }
 

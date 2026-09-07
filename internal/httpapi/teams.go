@@ -112,6 +112,26 @@ func (s *Server) setTeamMember(c *gin.Context) {
 	c.JSON(http.StatusOK, m)
 }
 
+// setTeamIdPGroups задаёт группы провайдера, ведущие в команду: состав такой
+// команды синхронизируется при каждом входе (решение 0027).
+type setTeamGroupsRequest struct {
+	Groups []string `json:"groups"`
+}
+
+func (s *Server) setTeamIdPGroups(c *gin.Context) {
+	var req setTeamGroupsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	groups, err := s.auth.SetTeamIdPGroups(c.Request.Context(), identity(c), c.Param("teamKey"), req.Groups)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"groups": groups})
+}
+
 func (s *Server) removeTeamMember(c *gin.Context) {
 	if err := s.auth.RemoveTeamMember(c.Request.Context(), identity(c), c.Param("teamKey"),
 		c.Param("handle")); err != nil {

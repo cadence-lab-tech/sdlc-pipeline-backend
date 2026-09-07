@@ -23,6 +23,7 @@ import (
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 )
 
@@ -61,6 +62,10 @@ type Auth struct {
 	store *postgres.Store
 	log   *slog.Logger
 	mode  string
+	// Вход через корпоративный провайдер (решение 0027). nil — вход только
+	// по выданным токенам, как в фазе 4.
+	oidc       *oidc.Verifier
+	sessionTTL time.Duration
 }
 
 func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {

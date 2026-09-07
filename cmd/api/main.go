@@ -19,6 +19,7 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
 )
@@ -92,6 +93,14 @@ func run() error {
 	}
 	if err := auth.BootstrapTeam(ctx, cfg.AdminHandle, cfg.BootstrapTeam, cfg.BootstrapTeamName); err != nil {
 		return err
+	}
+	if cfg.OIDCIssuer != "" {
+		auth.UseOIDC(oidc.New(oidc.Config{
+			Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
+			GroupsClaim: cfg.OIDCGroupsClaim,
+		}), cfg.SessionTTL)
+		log.Info("вход через корпоративный провайдер", "issuer", cfg.OIDCIssuer,
+			"session_ttl", cfg.SessionTTL)
 	}
 	switch {
 	case auth.Enforced():
