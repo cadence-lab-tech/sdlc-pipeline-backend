@@ -243,3 +243,72 @@ func (s *Store) ResolveDriftSignal(ctx context.Context, q Querier, signalID, act
 		  AND d.to_commit IS NOT NULL`, signalID, actor)
 	return translate(err)
 }
+
+// RefToSync — привязанный к задаче PR, состояние которого пора обновить.
+type RefToSync struct {
+	ID      uuid.UUID
+	TaskID  uuid.UUID
+	TaskKey string
+	Owner   string
+	Name    string
+	RefType string
+	Ref     string
+	State   *string
+}
+
+// RepoRefsToSync — PR задач в полёте, начиная с тех, о которых система знает
+// меньше всего.
+//
+// Закрытые и влитые не опрашиваются: их состояние уже конечное, а лимит
+// запросов к провайдеру общий с индексацией.
+func (s *Store) RepoRefsToSync(ctx context.Context, q Querier, limit int) ([]RefToSync, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := q.Query(ctx, `
+		SELECT rr.id, rr.task_id, t.key, r.owner, r.name, rr.ref_type, rr.ref, rr.state
+		FROM task_repo_refs rr
+		JOIN repositories r       ON r.id = rr.repository_id
+		JOIN tasks t              ON t.id = rr.task_id
+		JOIN workflow_statuses ws ON ws.id = t.status_id
+		WHERE rr.ref_type = 'pull_request'
+		  AND t.closed_at IS NULL AND ws.is_terminal = false
+		  AND (rr.state IS NULL OR rr.state NOT IN ('closed', 'merged', 'declined'))
+		ORDER BY rr.synced_at NULLS FIRST
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []RefToSync{}
+	for rows.Next() {
+		var r RefToSync
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.TaskKey, &r.Owner, &r.Name,
+			&r.RefType, &r.Ref, &r.State); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, r)
+	}
+	return out, translate(rows.Err())
+}
+
+// UpdateRepoRefChecks кладёт снимок состояния PR и его проверок.
+//
+// Снимок, а не отдельные сущности: это состояние чужой системы на момент
+// опроса, и хранить его нормализованно значило бы делать вид, что оно наше.
+// Гейт external_check читает именно эту строку — в сеть он не ходит.
+func (s *Store) UpdateRepoRefChecks(ctx context.Context, q Querier, id uuid.UUID, state, headSHA, url string, checks json.RawMessage) error {
+	if len(checks) == 0 {
+		checks = json.RawMessage(`{}`)
+	}
+	_, err := q.Exec(ctx, `
+		UPDATE task_repo_refs
+		SET state = nullif($2, ''),
+		    head_sha = nullif($3, ''),
+		    url = coalesce(nullif($4, ''), url),
+		    checks = $5,
+		    synced_at = now()
+		WHERE id = $1`, id, state, headSHA, url, checks)
+	return translate(err)
+}

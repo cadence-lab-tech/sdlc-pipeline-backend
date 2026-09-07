@@ -16,6 +16,7 @@ import (
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 )
 
@@ -30,6 +31,9 @@ type Options struct {
 	// осталась бы занятой навсегда.
 	LeaseTTL          time.Duration
 	HeartbeatInterval time.Duration
+	// Векторизация запросов поиска. nil — поиск остаётся полнотекстовым:
+	// без провайдера эмбеддингов система обязана работать, просто хуже.
+	Embedder embed.Embedder
 }
 
 const (
@@ -43,6 +47,7 @@ type Engine struct {
 	strict     bool
 	leaseTTL   time.Duration
 	heartbeat  time.Duration
+	embedder   embed.Embedder
 	evaluators map[string]evaluator
 }
 
@@ -56,6 +61,7 @@ func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {
 	e := &Engine{
 		store: store, log: log, strict: opts.StrictGates,
 		leaseTTL: opts.LeaseTTL, heartbeat: opts.HeartbeatInterval,
+		embedder: opts.Embedder,
 	}
 	e.registerEvaluators()
 	return e

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
@@ -73,6 +74,9 @@ func run() error {
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
 		HeartbeatInterval: cfg.HeartbeatInterval,
+		// Индексацию ведёт воркер, но вектор поискового запроса считается
+		// здесь: поиск синхронный, и ждать фонового прохода ему нечего.
+		Embedder: newEmbedder(cfg, log),
 	})
 	authoring := workflow.NewAuthoring(store, log, engine)
 	if !cfg.StrictGates {
@@ -167,4 +171,18 @@ func newLogger(cfg config.Config) *slog.Logger {
 		return slog.New(slog.NewJSONHandler(os.Stdout, opts))
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, opts))
+}
+
+// newEmbedder выбирает, кто векторизует поисковый запрос. Без провайдера
+// поиск остаётся полнотекстовым — это рабочий режим, а не поломка.
+func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
+	switch cfg.EmbeddingProvider {
+	case "voyage":
+		return embed.NewVoyage(cfg.VoyageAPIURL, cfg.VoyageAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBatch)
+	case "hash":
+		log.Warn("эмбеддинги считает заглушка: это мешок слов, а не семантика")
+		return embed.Hash{}
+	default:
+		return nil
+	}
 }

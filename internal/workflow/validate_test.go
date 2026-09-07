@@ -126,7 +126,9 @@ func TestValidateUnimplementedGateDependsOnStrict(t *testing.T) {
 	newSt.Roles = []domain.StatusRole{{IsPrimary: true}}
 	done.Roles = []domain.StatusRole{{IsPrimary: true}}
 
-	gate := domain.Gate{Key: "ci", Type: domain.GateExternalCheck, Blocking: true}
+	// Тип взят несуществующий: все девять типов из схемы движок исполняет,
+	// а проверка тут про поведение, а не про конкретный тип.
+	gate := domain.Gate{Key: "ci", Type: "future_gate_type", Blocking: true}
 	only := func(string) bool { return false }
 	cycle := wf([]domain.Status{newSt, done}, transition("finish", &newSt, done, gate))
 
@@ -151,7 +153,7 @@ func TestValidateNonBlockingGateStaysWarning(t *testing.T) {
 	newSt.Roles = []domain.StatusRole{{IsPrimary: true}}
 	done.Roles = []domain.StatusRole{{IsPrimary: true}}
 
-	gate := domain.Gate{Key: "hint", Type: domain.GateExternalCheck, Blocking: false}
+	gate := domain.Gate{Key: "hint", Type: "future_gate_type", Blocking: false}
 	v := validateWorkflow(wf([]domain.Status{newSt, done},
 		transition("finish", &newSt, done, gate)), func(string) bool { return false }, true)
 

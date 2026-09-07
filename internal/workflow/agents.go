@@ -186,6 +186,14 @@ func (e *Engine) Claim(ctx context.Context, taskKey string, actor uuid.UUID, ses
 			return err
 		}
 
+		// Базовая линия задачи ставится здесь: с этого коммита построены её
+		// артефакты, и от него же считается, что код под задачей уехал.
+		// Индекса репозитория может ещё не быть — тогда линия появится на
+		// следующем захвате, и до тех пор дрейфу не от чего отсчитывать.
+		if _, err := e.store.EnsureBaselines(ctx, tx, task.ID, &run.ID, actor); err != nil {
+			return err
+		}
+
 		out, err = e.stageState(ctx, tx, task, run)
 		if err != nil {
 			return err

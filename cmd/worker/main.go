@@ -1,9 +1,11 @@
 // Команда worker — фоновые задания, которые никто не дёргает запросом.
 //
-// В фазе 2 это одно задание: возврат задач с протухшей арендой. Агент
-// локальный и может умереть, не отпустив задачу; без этого прохода она
-// осталась бы занятой навсегда. В фазе 3 сюда встанут индексация
-// репозиториев и детектор дрейфа.
+// Заданий четыре: возврат задач с протухшей арендой, инкрементальная
+// индексация репозиториев с детектором дрейфа сразу после неё, синхронизация
+// состояния привязанных PR и векторизация артефактов.
+//
+// Все они идут последовательно в одном цикле: воркер один, и параллелить
+// внутри него нечего — узкое место у всех заданий одно и то же, чужой API.
 package main
 
 import (
@@ -11,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +21,9 @@ import (
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/indexer"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
 )
@@ -53,10 +59,12 @@ func run() error {
 	store := postgres.New(pool)
 	// Миграции катит api: два процесса, накатывающие схему, разошлись бы в
 	// порядке старта. Воркер работает по уже готовой схеме.
+	embedder := newEmbedder(cfg, log)
 	engine := workflow.NewEngine(store, log, workflow.Options{
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
 		HeartbeatInterval: cfg.HeartbeatInterval,
+		Embedder:          embedder,
 	})
 
 	system, err := store.ResolveActor(ctx, store.DB(), systemActor, domain.PrincipalSystem)
@@ -64,22 +72,146 @@ func run() error {
 		return err
 	}
 
-	log.Info("воркер запущен",
-		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL)
+	ix := indexer.New(store,
+		indexer.NewGitHubSource(github.New(cfg.GitHubAPIURL, cfg.GitHubToken), secretFromEnv),
+		embedder, log, indexer.Options{
+			MaxFileBytes: cfg.IndexMaxFileBytes,
+			MaxFiles:     cfg.IndexMaxFiles,
+			ChunkChars:   cfg.ChunkMaxChars,
+			EmbedBatch:   cfg.EmbeddingBatch,
+			StuckAfter:   cfg.IndexStuckAfter,
+		})
 
-	ticker := time.NewTicker(cfg.LeaseSweepInterval)
-	defer ticker.Stop()
+	log.Info("воркер запущен",
+		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL,
+		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
+		"embeddings", cfg.EmbeddingProvider)
+
+	leaseTicker := time.NewTicker(cfg.LeaseSweepInterval)
+	defer leaseTicker.Stop()
+	indexTicker := time.NewTicker(cfg.IndexInterval)
+	defer indexTicker.Stop()
+
+	sweepLeases(ctx, engine, log, system.ID)
+	if cfg.IndexEnabled {
+		indexPass(ctx, ix, engine, log, system.ID)
+	}
 
 	for {
-		sweepLeases(ctx, engine, log, system.ID)
-
 		select {
 		case <-ctx.Done():
 			log.Info("получен сигнал, останавливаемся")
 			return nil
-		case <-ticker.C:
+		case <-leaseTicker.C:
+			sweepLeases(ctx, engine, log, system.ID)
+		case <-indexTicker.C:
+			if cfg.IndexEnabled {
+				indexPass(ctx, ix, engine, log, system.ID)
+			}
 		}
 	}
+}
+
+// newEmbedder выбирает, кто считает векторы. Провайдера может не быть вовсе:
+// тогда индекс строится без векторов, поиск живёт на полнотекстовой половине,
+// а досчитать векторы можно потом — backfill для того и написан.
+func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
+	switch cfg.EmbeddingProvider {
+	case "voyage":
+		return embed.NewVoyage(cfg.VoyageAPIURL, cfg.VoyageAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBatch)
+	case "hash":
+		log.Warn("эмбеддинги считает заглушка: это мешок слов, а не семантика")
+		return embed.Hash{}
+	default:
+		return nil
+	}
+}
+
+// secretFromEnv переводит repositories.credential_ref в токен. В базе лежит
+// имя секрета, а не сам токен: класть секреты в БД нельзя.
+func secretFromEnv(ref string) string {
+	name := strings.Map(func(r rune) rune {
+		if r == '-' || r == '.' || r == '/' {
+			return '_'
+		}
+		return r
+	}, strings.ToUpper(ref))
+	return os.Getenv(name)
+}
+
+// indexPass — полный проход по всему, что приезжает из провайдера и уезжает
+// в индекс.
+//
+// Порядок неслучаен: сперва ставим в очередь новые коммиты, потом исполняем
+// прогоны и сразу за каждым гоняем детектор дрейфа (задача, проехавшая мимо
+// расхождения, узнает о нём на следующем этапе, когда чинить дороже), затем
+// состояние PR для гейта external_check и в конце — векторизация артефактов.
+func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) {
+	if _, err := ix.Enqueue(ctx); err != nil {
+		logJobError(ctx, log, "постановка прогонов индексации", err)
+	}
+
+	// Предел прогонов за проход: репозиториев может быть много, а следующий
+	// тик всё равно наступит — лучше вернуться к арендам, чем зависнуть.
+	for i := 0; i < maxRunsPerPass; i++ {
+		run, err := ix.RunNext(ctx)
+		if err != nil {
+			logJobError(ctx, log, "прогон индексации", err)
+			break
+		}
+		if run == nil {
+			break
+		}
+		signals, err := engine.DetectDrift(ctx, *run, system)
+		if err != nil {
+			logJobError(ctx, log, "детектор дрейфа", err)
+			continue
+		}
+		if len(signals) > 0 {
+			log.Info("заведены сигналы дрейфа",
+				"repository", run.Repository, "commit", run.CommitSHA[:min(8, len(run.CommitSHA))],
+				"count", len(signals))
+		}
+	}
+
+	if n, err := ix.SyncRepoRefs(ctx, 50); err != nil {
+		logJobError(ctx, log, "синхронизация PR", err)
+	} else if n > 0 {
+		log.Info("состояние PR обновлено", "count", n)
+	}
+
+	if artifacts, documents, err := ix.IndexKnowledge(ctx, 50); err != nil {
+		logJobError(ctx, log, "векторизация артефактов", err)
+	} else if artifacts+documents > 0 {
+		log.Info("артефакты и документы разложены на куски",
+			"artifacts", artifacts, "documents", documents)
+	}
+
+	if n, err := ix.BackfillEmbeddings(ctx, 100); err != nil {
+		logJobError(ctx, log, "досчёт эмбеддингов", err)
+	} else if n > 0 {
+		log.Info("векторы досчитаны кускам, записанным без них", "count", n)
+	}
+
+	// Пересечение задач возникает не от движения main, а от того, что вторая
+	// задача объявила ту же зону: ждать индексации для него незачем.
+	if signals, err := engine.DetectOverlaps(ctx, system); err != nil {
+		logJobError(ctx, log, "поиск пересечений задач", err)
+	} else if len(signals) > 0 {
+		log.Info("найдены пересечения зон задач", "count", len(signals))
+	}
+}
+
+// maxRunsPerPass — сколько прогонов индексации исполняется за один проход.
+const maxRunsPerPass = 20
+
+// logJobError не роняет воркер: база или чужой API могли отвалиться на
+// секунду, а следующий тик всё равно наступит.
+func logJobError(ctx context.Context, log *slog.Logger, job string, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	log.Error(job+" не удалась", "error", err)
 }
 
 // sweepLeases возвращает в pending всё, чья аренда истекла.

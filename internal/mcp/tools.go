@@ -32,6 +32,11 @@ func (s *Server) registerTools() {
 	add(s, "sdlc_get_artifact",
 		"Содержимое конкретного артефакта.",
 		s.getArtifact)
+	add(s, "sdlc_search_context",
+		"Семантический поиск по коду репозиториев, артефактам задач и проектным документам. "+
+			"Возвращает куски с источником: файл и диапазон строк на конкретном коммите либо "+
+			"артефакт задачи и этапа.",
+		s.searchContext)
 	add(s, "sdlc_submit_artifact",
 		"Сдать результат работы. Повторная сдача того же kind создаёт новую версию. "+
 			"code_refs объявляют зону задачи в коде и питают детектор дрейфа.",
@@ -679,4 +684,30 @@ func (s *Server) artifactInProject(ctx context.Context, a domain.Artifact) error
 		return apperr.NotFound("артефакт не принадлежит проекту %s", key)
 	}
 	return nil
+}
+
+// ── поиск по знанию проекта ─────────────────────────────────────────────────
+
+type searchInput struct {
+	Query        string   `json:"query"`
+	Scope        []string `json:"scope,omitempty" jsonschema:"code, artifacts, documents; пусто — все три"`
+	Repositories []string `json:"repositories,omitempty" jsonschema:"owner/name; сужает поиск по коду"`
+	TopK         int      `json:"top_k,omitempty"`
+}
+
+func (s *Server) searchContext(ctx context.Context, in searchInput) (*sdk.CallToolResult, any, error) {
+	key, err := projectKey(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	res, err := s.engine.SearchContext(ctx, key, workflow.SearchInput{
+		Query:        in.Query,
+		Scopes:       in.Scope,
+		Repositories: in.Repositories,
+		TopK:         in.TopK,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	return ok(res)
 }

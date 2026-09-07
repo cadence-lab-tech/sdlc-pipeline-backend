@@ -115,7 +115,7 @@ as human:ci decide "$TASK" --transition architecture_done --gate human_approval 
 as agent:arch-bot transition "$TASK" --to architecture_done --summary "Решение зафиксировано" >/dev/null
 echo "статус: $(status)"
 
-step "10. Разработка: PR обязателен и обязан лежать в области задачи"
+step "10. Разработка: PR обязателен, лежит в области задачи, CI-гейт снимает человек"
 as agent:dev-bot claim "$TASK" >/dev/null
 for kind in dev.plan dev.change_summary dev.test_report; do
     as agent:dev-bot submit "$TASK" --kind "$kind" --title "$kind" \
@@ -126,6 +126,12 @@ done
 as agent:dev-bot link "$TASK" --repo frontend --ref 5 2>&1 | head -1 || true
 as agent:dev-bot link "$TASK" --repo backend --ref 128 \
     --url https://github.com/stepaKaziatko/sdlc-pipeline-backend/pull/128 --state open >/dev/null
+# Гейт external_check читает состояние проверок, которое приносит воркер из
+# GitHub. Локально репозитория с этим PR нет, проверки не приезжают, и гейт
+# честно стоит в pending — это не поломка сценария, а его отдельный шаг:
+# человек снимает гейт вручную, и снятие остаётся в аудите.
+as human:ci decide "$TASK" --transition dev_done --gate ci --status waived \
+    --details '{"reason":"CI недоступен в локальном прогоне"}' >/dev/null
 as agent:dev-bot transition "$TASK" --to dev_done --summary "Реализовано" >/dev/null
 echo "статус: $(status)"
 

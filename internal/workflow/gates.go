@@ -63,8 +63,7 @@ func (e *Engine) registerEvaluators() {
 		domain.GateDriftClear:        e.evalDriftClear,
 		domain.GateSchemaValidation:  e.evalSchemaValidation,
 		domain.GateAgentReview:       e.evalAgentReview,
-		// external_check приезжает с чтением GitHub (фаза 3). До тех пор
-		// поведение незарегистрированного типа определяет Engine.strict.
+		domain.GateExternalCheck:     e.evalExternalCheck,
 	}
 }
 
@@ -451,4 +450,144 @@ func (e *Engine) evalDriftClear(ctx context.Context, q postgres.Querier, in Eval
 		fmt.Sprintf("открытых расхождений: %d — разберите их и переставьте базовую линию", total))
 	out.Details = details
 	return out, nil
+}
+
+// ── external_check ──────────────────────────────────────────────────────────
+
+type externalCheckConfig struct {
+	// Пока провайдер один; поле оставлено, чтобы конфигурация гейта не
+	// переписывалась, когда появится второй.
+	Provider string `json:"provider"`
+	// Какое заключение считается успешным. По умолчанию success.
+	RequiredConclusion string `json:"required_conclusion"`
+	// Имена конкретных проверок. Пусто — годится общий вердикт по коммиту.
+	Contexts []string `json:"contexts"`
+	RefType  string   `json:"ref_type"`
+}
+
+// checksSnapshot — состояние проверок, принесённое воркером в task_repo_refs.
+type checksSnapshot struct {
+	Conclusion string `json:"conclusion"`
+	Runs       []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"runs"`
+}
+
+// evalExternalCheck проверяет CI на привязанном к задаче PR.
+//
+// Гейт не ходит в сеть: он исполняется внутри транзакции перехода вместе с
+// остальными, и сетевой вызов означал бы открытую транзакцию на время
+// таймаута чужого API. Состояние приносит воркер, гейт читает готовое —
+// поэтому «данных ещё нет» здесь честно отдаётся как pending, а не как
+// провал: непришедший ответ GitHub не является отрицательным заключением.
+func (e *Engine) evalExternalCheck(ctx context.Context, q postgres.Querier, in EvalInput) (GateOutcome, error) {
+	var cfg externalCheckConfig
+	if err := json.Unmarshal(in.Gate.Config, &cfg); err != nil {
+		return GateOutcome{}, fmt.Errorf("конфигурация гейта %q: %w", in.Gate.Key, err)
+	}
+	if cfg.RequiredConclusion == "" {
+		cfg.RequiredConclusion = "success"
+	}
+	if cfg.RefType == "" {
+		cfg.RefType = "pull_request"
+	}
+
+	rows, err := q.Query(ctx, `
+		SELECT r.owner || '/' || r.name, rr.ref, coalesce(rr.head_sha, ''),
+		       rr.checks, rr.synced_at IS NOT NULL
+		FROM task_repo_refs rr
+		JOIN repositories r ON r.id = rr.repository_id
+		WHERE rr.task_id = $1 AND rr.ref_type = $2
+		  AND (rr.state IS NULL OR rr.state NOT IN ('closed', 'declined'))
+		ORDER BY 1, rr.ref`, in.Task.ID, cfg.RefType)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+	defer rows.Close()
+
+	type refState struct {
+		repo, ref, head string
+		checks          checksSnapshot
+		synced          bool
+	}
+	var refs []refState
+	for rows.Next() {
+		var r refState
+		var raw []byte
+		if err := rows.Scan(&r.repo, &r.ref, &r.head, &raw, &r.synced); err != nil {
+			return GateOutcome{}, err
+		}
+		_ = json.Unmarshal(raw, &r.checks)
+		refs = append(refs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return GateOutcome{}, err
+	}
+
+	if len(refs) == 0 {
+		out := base(in.Gate, domain.GateResultFailed,
+			"к задаче не привязан "+cfg.RefType+", проверять нечего")
+		return out, nil
+	}
+
+	details := map[string]any{"required_conclusion": cfg.RequiredConclusion}
+	var pending, failed []string
+	perRef := []map[string]any{}
+
+	for _, r := range refs {
+		item := map[string]any{"repository": r.repo, "ref": r.ref, "commit": r.head}
+		switch {
+		case !r.synced:
+			item["state"] = "unknown"
+			pending = append(pending, r.repo+"#"+r.ref+" — состояние проверок ещё не приезжало")
+		case len(cfg.Contexts) > 0:
+			byName := map[string]string{}
+			status := map[string]string{}
+			for _, run := range r.checks.Runs {
+				byName[run.Name] = run.Conclusion
+				status[run.Name] = run.Status
+			}
+			for _, name := range cfg.Contexts {
+				conclusion, ok := byName[name]
+				switch {
+				case !ok:
+					pending = append(pending, r.repo+"#"+r.ref+": проверка "+name+" не запускалась")
+				case status[name] != "completed":
+					pending = append(pending, r.repo+"#"+r.ref+": проверка "+name+" ещё идёт")
+				case conclusion != cfg.RequiredConclusion:
+					failed = append(failed, r.repo+"#"+r.ref+": "+name+" — "+conclusion)
+				}
+			}
+			item["checks"] = byName
+		case r.checks.Conclusion == "":
+			item["state"] = "pending"
+			pending = append(pending, r.repo+"#"+r.ref+" — проверки ещё идут")
+		case r.checks.Conclusion != cfg.RequiredConclusion:
+			item["state"] = r.checks.Conclusion
+			failed = append(failed, r.repo+"#"+r.ref+" — "+r.checks.Conclusion)
+		default:
+			item["state"] = r.checks.Conclusion
+		}
+		perRef = append(perRef, item)
+	}
+	details["refs"] = perRef
+
+	switch {
+	case len(failed) > 0:
+		out := base(in.Gate, domain.GateResultFailed, "проверки не прошли: "+strings.Join(failed, "; "))
+		details["failed"] = failed
+		out.Details = details
+		return out, nil
+	case len(pending) > 0:
+		out := base(in.Gate, domain.GateResultPending, strings.Join(pending, "; "))
+		details["pending"] = pending
+		out.Details = details
+		return out, nil
+	default:
+		out := base(in.Gate, domain.GateResultPassed, "")
+		out.Details = details
+		return out, nil
+	}
 }

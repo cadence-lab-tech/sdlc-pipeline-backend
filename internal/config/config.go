@@ -40,6 +40,30 @@ type Config struct {
 	// транспорта над одним ядром (решение 0011).
 	MCPEnabled bool
 
+	// Чтение GitHub. Система работает с репозиториями только на чтение
+	// (repositories.access_mode), поэтому токену достаточно прав на чтение.
+	GitHubAPIURL string
+	GitHubToken  string
+
+	// Индексация репозиториев. Кодовая база под задачами двигается непрерывно,
+	// поэтому прогон наследует у предыдущего всё, что не изменилось, и
+	// выкачивает только изменившееся.
+	IndexEnabled      bool
+	IndexInterval     time.Duration
+	IndexStuckAfter   time.Duration
+	IndexMaxFileBytes int
+	IndexMaxFiles     int
+	ChunkMaxChars     int
+
+	// Эмбеддинги: voyage — модель, hash — детерминированная заглушка для
+	// локального прогона без ключа, none — вектора не считаются и поиск
+	// вырождается в полнотекстовый.
+	EmbeddingProvider string
+	EmbeddingModel    string
+	EmbeddingBatch    int
+	VoyageAPIURL      string
+	VoyageAPIKey      string
+
 	// Движок
 	// StrictGates=false: гейт нереализованного типа отдаёт skipped и пропускает
 	// переход. Это режим отладки цикла, пока фазы 2-3 не написаны.
@@ -69,6 +93,19 @@ func Load() (Config, error) {
 		HeartbeatInterval:  5 * time.Minute,
 		LeaseSweepInterval: time.Minute,
 		MCPEnabled:         true,
+		GitHubAPIURL:       env("SDLC_GITHUB_API_URL", "https://api.github.com"),
+		GitHubToken:        env("SDLC_GITHUB_TOKEN", ""),
+		IndexEnabled:       true,
+		IndexInterval:      5 * time.Minute,
+		IndexStuckAfter:    30 * time.Minute,
+		IndexMaxFileBytes:  512 << 10,
+		IndexMaxFiles:      20000,
+		ChunkMaxChars:      1600,
+		EmbeddingProvider:  env("SDLC_EMBEDDINGS_PROVIDER", ""),
+		EmbeddingModel:     env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
+		EmbeddingBatch:     96,
+		VoyageAPIURL:       env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
+		VoyageAPIKey:       env("SDLC_VOYAGE_API_KEY", ""),
 		DefaultActor:       env("SDLC_DEFAULT_ACTOR", "anonymous"),
 		LogLevel:           env("SDLC_LOG_LEVEL", "info"),
 		Env:                env("SDLC_ENV", "development"),
@@ -101,6 +138,46 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("SDLC_HEARTBEAT_INTERVAL (%s) не меньше SDLC_LEASE_TTL (%s): "+
 			"аренда протухнет раньше первого продления", c.HeartbeatInterval, c.LeaseTTL)
 	}
+	if c.IndexEnabled, err = envBool("SDLC_INDEX_ENABLED", c.IndexEnabled); err != nil {
+		return c, err
+	}
+	if c.IndexInterval, err = envDuration("SDLC_INDEX_INTERVAL", c.IndexInterval); err != nil {
+		return c, err
+	}
+	if c.IndexStuckAfter, err = envDuration("SDLC_INDEX_STUCK_AFTER", c.IndexStuckAfter); err != nil {
+		return c, err
+	}
+	if c.IndexMaxFileBytes, err = envInt("SDLC_INDEX_MAX_FILE_BYTES", c.IndexMaxFileBytes); err != nil {
+		return c, err
+	}
+	if c.IndexMaxFiles, err = envInt("SDLC_INDEX_MAX_FILES", c.IndexMaxFiles); err != nil {
+		return c, err
+	}
+	if c.ChunkMaxChars, err = envInt("SDLC_INDEX_CHUNK_CHARS", c.ChunkMaxChars); err != nil {
+		return c, err
+	}
+	if c.EmbeddingBatch, err = envInt("SDLC_EMBEDDINGS_BATCH", c.EmbeddingBatch); err != nil {
+		return c, err
+	}
+	// Провайдер по умолчанию выводится из наличия ключа: забыть переменную
+	// провайдера при заданном ключе — типичная причина молча пустого индекса.
+	if c.EmbeddingProvider == "" {
+		if c.VoyageAPIKey != "" {
+			c.EmbeddingProvider = "voyage"
+		} else {
+			c.EmbeddingProvider = "none"
+		}
+	}
+	switch c.EmbeddingProvider {
+	case "voyage":
+		if c.VoyageAPIKey == "" {
+			return c, fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER=voyage без SDLC_VOYAGE_API_KEY")
+		}
+	case "hash", "none":
+	default:
+		return c, fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER: %q — не voyage, hash или none", c.EmbeddingProvider)
+	}
+
 	if c.LogJSON, err = envBool("SDLC_LOG_JSON", c.Env != "development"); err != nil {
 		return c, err
 	}

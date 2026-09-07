@@ -371,6 +371,7 @@ const (
 	EventReviewRequested   = "review.requested"
 	EventReviewCompleted   = "review.completed"
 	EventRepoRefLinked     = "repo_ref.linked"
+	EventDriftDetected     = "drift.detected"
 	EventDriftResolved     = "drift.resolved"
 )
 

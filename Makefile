@@ -3,7 +3,7 @@
 BIN     := bin
 VERSION ?= dev
 
-.PHONY: build run test lint tidy up down logs psql reset image
+.PHONY: build run test test-integration lint tidy up down logs psql reset image
 
 # Три бинарника: сервис, фоновые задания и CLI для CI.
 build:
@@ -13,6 +13,17 @@ build:
 
 test:
 	go test ./...
+
+# Интеграционные проверки идут по настоящей схеме: инкрементальность прогона
+# индексации и гибридный поиск живут в связке с базой и на моках не ловятся.
+# База выделенная — тест сносит в ней схему целиком.
+test-integration:
+	docker compose -f dev/docker-compose.yml exec -T postgres \
+		psql -U sdlc -d postgres -c 'CREATE DATABASE sdlc_test' 2>/dev/null || true
+	# -p 1: база одна на все пакеты, а каждый начинает с чистой схемы —
+	# параллельные пакеты снесли бы её друг у друга посреди прогона.
+	SDLC_TEST_DATABASE_URL='postgres://sdlc:sdlc@localhost:55432/sdlc_test?sslmode=disable' \
+		go test ./... -count=1 -p 1
 
 lint:
 	go vet ./...

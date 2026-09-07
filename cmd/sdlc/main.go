@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -44,6 +45,8 @@ func commands() []command {
 		{"gates", "что мешает переходу", "sdlc gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "sdlc transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file]", cmdTransition},
 		{"decide", "закрыть гейт решением", "sdlc decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
+		{"search", "поиск по коду, артефактам и документам проекта", "sdlc search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
+		{"index", "состояние индекса репозиториев", "sdlc index [--project SDLC]", cmdIndex},
 		{"drift", "открытые расхождения задачи", "sdlc drift SDLC-42", cmdDrift},
 		{"resolve-drift", "закрыть сигнал дрейфа", "sdlc resolve-drift <signal-id> --resolution resolved [--note ...]", cmdResolveDrift},
 	}
@@ -635,4 +638,67 @@ func guessFormat(file string) string {
 	default:
 		return "markdown"
 	}
+}
+
+// cmdSearch — тот же поиск, что у агента через sdlc_search_context.
+func cmdSearch(ctx context.Context, c *Client, args []string) error {
+	var projectFlag, scope, repos string
+	var top int
+	// Запрос читается первым позиционным аргументом по той же причине, что и
+	// ключ задачи: именно так эту команду пишут.
+	query, rest := popTask(args)
+	fs, err := flags("search", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+		fs.StringVar(&scope, "scope", "", "code, artifacts, documents через запятую")
+		fs.StringVar(&repos, "repo", "", "owner/name через запятую: сузить поиск по коду")
+		fs.IntVar(&top, "top", 0, "сколько кусков вернуть")
+	})
+	if err != nil {
+		return err
+	}
+	if query == "" {
+		return errors.New("не указан запрос: sdlc search \"как устроена ротация токенов\"")
+	}
+	key, err := project(fs, projectFlag)
+	if err != nil {
+		return err
+	}
+
+	q := url.Values{}
+	q.Set("q", query)
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	if repos != "" {
+		q.Set("repositories", repos)
+	}
+	if top > 0 {
+		q.Set("top_k", strconv.Itoa(top))
+	}
+
+	var out any
+	if err := c.get(ctx, "/projects/"+key+"/search", q, &out); err != nil {
+		return err
+	}
+	return print(out)
+}
+
+func cmdIndex(ctx context.Context, c *Client, args []string) error {
+	var projectFlag string
+	fs, err := flags("index", args, func(fs *flag.FlagSet) {
+		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+	})
+	if err != nil {
+		return err
+	}
+	key, err := project(fs, projectFlag)
+	if err != nil {
+		return err
+	}
+
+	var out any
+	if err := c.get(ctx, "/projects/"+key+"/index", nil, &out); err != nil {
+		return err
+	}
+	return print(out)
 }

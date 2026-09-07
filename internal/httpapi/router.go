@@ -85,6 +85,11 @@ func (s *Server) Handler() http.Handler {
 		// Агентская часть: те же сервисы, что у MCP-тулов. Сюда ходят CLI и
 		// CI, локальный агент — в /mcp.
 		v1.GET("/projects/:projectKey/queue", s.listQueue)
+		// Поиск по знанию проекта: код репозиториев, артефакты задач,
+		// проектные документы. Гибридный — вектор плюс полнотекст.
+		v1.GET("/projects/:projectKey/search", s.search)
+		v1.POST("/projects/:projectKey/search", s.search)
+		v1.GET("/projects/:projectKey/index", s.indexStatus)
 		v1.GET("/tasks/:taskKey/state", s.getTaskState)
 		v1.POST("/tasks/:taskKey/claim", s.claimTask)
 		v1.POST("/tasks/:taskKey/heartbeat", s.heartbeat)

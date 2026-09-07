@@ -61,6 +61,12 @@ services:
       # Аренда задачи: сколько живёт без heartbeat и как часто его слать.
       SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
       SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
+      # Эмбеддинги. Без ключа провайдер выключается сам, и поиск остаётся
+      # полнотекстовым: это рабочий режим, а не поломка. hash — детерминированная
+      # заглушка для локальной проверки проводки, семантики в ней нет.
+      SDLC_EMBEDDINGS_PROVIDER: ${SDLC_EMBEDDINGS_PROVIDER:-}
+      SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+      SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
     ports:
       # 8088, а не 8080: восьмидесятый на машине разработчика обычно занят.
       - "${API_PORT:-8088}:8080"
@@ -73,9 +79,10 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # Фоновые задания: возврат задач с протухшей арендой. Отдельный процесс, а
-  # не горутина в api: реплик api может быть несколько, и каждая гоняла бы
-  # свой проход. Миграции воркер не катит — схему поднимает api.
+  # Фоновые задания: протухшие аренды, инкрементальная индексация репозиториев
+  # с детектором дрейфа, синхронизация PR и векторизация артефактов. Отдельный
+  # процесс, а не горутина в api: реплик api может быть несколько, и каждая
+  # гоняла бы свой проход. Миграции воркер не катит — схему поднимает api.
   worker:
     build:
       context: ..
@@ -97,6 +104,20 @@ services:
       SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
       SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
       SDLC_LEASE_SWEEP_INTERVAL: ${SDLC_LEASE_SWEEP_INTERVAL:-1m}
+      # Индексация репозиториев. Без токена GitHub прогон не поставится:
+      # репозитории демо-проекта приватные, и воркер честно скажет об этом
+      # в логе, а остальные задания продолжат работать.
+      SDLC_INDEX_ENABLED: ${SDLC_INDEX_ENABLED:-true}
+      # Минута, а не пять: локально хочется видеть индексацию сразу после
+      # пуша, а три запроса в минуту лимиты GitHub не замечают.
+      SDLC_INDEX_INTERVAL: ${SDLC_INDEX_INTERVAL:-1m}
+      SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
+      SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
+      # Те же настройки эмбеддингов, что у api: индекс считает воркер, вектор
+      # поискового запроса — api, и модель у них обязана быть одна.
+      SDLC_EMBEDDINGS_PROVIDER: ${SDLC_EMBEDDINGS_PROVIDER:-}
+      SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+      SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
     restart: unless-stopped
 
   # Просмотр базы руками: docker compose --profile tools up -d
