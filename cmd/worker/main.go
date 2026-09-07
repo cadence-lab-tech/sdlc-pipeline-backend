@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
@@ -57,6 +58,15 @@ func run() error {
 	defer pool.Close()
 
 	store := postgres.New(pool)
+	if cfg.BlobDir != "" {
+		// Тот же каталог, что у api: документы и артефакты, вынесенные
+		// сервисом, воркер читает при векторизации.
+		fs, err := blobstore.NewFS(cfg.BlobDir)
+		if err != nil {
+			return err
+		}
+		store.UseBlobStore(fs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
+	}
 	// Миграции катит api: два процесса, накатывающие схему, разошлись бы в
 	// порядке старта. Воркер работает по уже готовой схеме.
 	embedder := newEmbedder(cfg, log)
@@ -91,10 +101,14 @@ func run() error {
 	defer leaseTicker.Stop()
 	indexTicker := time.NewTicker(cfg.IndexInterval)
 	defer indexTicker.Stop()
+	// Очередь прогонов опрашивается чаще, чем головы веток: вебхук кладёт
+	// коммит в очередь сразу, и ждать полного интервала до него незачем.
+	queueTicker := time.NewTicker(cfg.IndexPollInterval)
+	defer queueTicker.Stop()
 
 	sweepLeases(ctx, engine, log, system.ID)
 	if cfg.IndexEnabled {
-		indexPass(ctx, ix, engine, log, system.ID)
+		indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns)
 	}
 
 	for {
@@ -106,10 +120,57 @@ func run() error {
 			sweepLeases(ctx, engine, log, system.ID)
 		case <-indexTicker.C:
 			if cfg.IndexEnabled {
-				indexPass(ctx, ix, engine, log, system.ID)
+				indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns)
+			}
+		case <-queueTicker.C:
+			if cfg.IndexEnabled {
+				drainQueue(ctx, ix, engine, log, system.ID)
 			}
 		}
 	}
+}
+
+// drainQueue исполняет то, что уже стоит в очереди, не опрашивая провайдера:
+// это путь вебхука к индексу и детектору дрейфа между полными проходами.
+func drainQueue(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) {
+	if runIndexRuns(ctx, ix, engine, log, system) > 0 {
+		if n, err := ix.SyncRepoRefs(ctx, 50); err != nil {
+			logJobError(ctx, log, "синхронизация PR", err)
+		} else if n > 0 {
+			log.Info("состояние PR обновлено", "count", n)
+		}
+	}
+}
+
+// runIndexRuns исполняет прогоны из очереди и сразу за каждым гоняет
+// детектор дрейфа: задача, проехавшая мимо расхождения, узнает о нём на
+// следующем этапе, когда чинить дороже.
+func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) int {
+	done := 0
+	// Предел прогонов за проход: репозиториев может быть много, а следующий
+	// тик всё равно наступит — лучше вернуться к арендам, чем зависнуть.
+	for i := 0; i < maxRunsPerPass; i++ {
+		run, err := ix.RunNext(ctx)
+		if err != nil {
+			logJobError(ctx, log, "прогон индексации", err)
+			break
+		}
+		if run == nil {
+			break
+		}
+		done++
+		signals, err := engine.DetectDrift(ctx, *run, system)
+		if err != nil {
+			logJobError(ctx, log, "детектор дрейфа", err)
+			continue
+		}
+		if len(signals) > 0 {
+			log.Info("заведены сигналы дрейфа",
+				"repository", run.Repository, "commit", run.CommitSHA[:min(8, len(run.CommitSHA))],
+				"count", len(signals))
+		}
+	}
+	return done
 }
 
 // newEmbedder выбирает, кто считает векторы. Провайдера может не быть вовсе:
@@ -146,32 +207,19 @@ func secretFromEnv(ref string) string {
 // прогоны и сразу за каждым гоняем детектор дрейфа (задача, проехавшая мимо
 // расхождения, узнает о нём на следующем этапе, когда чинить дороже), затем
 // состояние PR для гейта external_check и в конце — векторизация артефактов.
-func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) {
+func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, retain int) {
 	if _, err := ix.Enqueue(ctx); err != nil {
 		logJobError(ctx, log, "постановка прогонов индексации", err)
 	}
 
-	// Предел прогонов за проход: репозиториев может быть много, а следующий
-	// тик всё равно наступит — лучше вернуться к арендам, чем зависнуть.
-	for i := 0; i < maxRunsPerPass; i++ {
-		run, err := ix.RunNext(ctx)
-		if err != nil {
-			logJobError(ctx, log, "прогон индексации", err)
-			break
-		}
-		if run == nil {
-			break
-		}
-		signals, err := engine.DetectDrift(ctx, *run, system)
-		if err != nil {
-			logJobError(ctx, log, "детектор дрейфа", err)
-			continue
-		}
-		if len(signals) > 0 {
-			log.Info("заведены сигналы дрейфа",
-				"repository", run.Repository, "commit", run.CommitSHA[:min(8, len(run.CommitSHA))],
-				"count", len(signals))
-		}
+	runIndexRuns(ctx, ix, engine, log, system)
+
+	// Индекс на коммит неизменяем и растёт линейно по коммитам; старые
+	// прогоны без ссылающихся базовых линий вычищаются.
+	if n, err := ix.Prune(ctx, retain); err != nil {
+		logJobError(ctx, log, "вычистка старых прогонов", err)
+	} else if n > 0 {
+		log.Info("старые прогоны индексации удалены", "count", n, "retain_per_branch", retain)
 	}
 
 	if n, err := ix.SyncRepoRefs(ctx, 50); err != nil {

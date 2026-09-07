@@ -8,20 +8,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
 )
 
 const (
 	ctxRequestID = "request_id"
-	ctxActor     = "actor"
+	ctxIdentity  = "identity"
 
-	// ActorHeader несёт хэндл действующего лица.
-	//
-	// Аутентификации в фазе 1 нет сознательно (решение 0010): заголовку никто
-	// не мешает соврать. Но все аудит-поля уже ссылаются на principals, а не
-	// хранят строки, поэтому включение auth в фазе 2 — это замена вот этого
-	// одного middleware, без миграции данных.
+	// ActorHeader несёт хэндл действующего лица в режиме без аутентификации
+	// (SDLC_AUTH_MODE=header). В режиме токенов игнорируется: кто пришёл,
+	// определяет токен, а не то, что клиент написал о себе.
 	ActorHeader = "X-SDLC-Actor"
 )
 
@@ -68,51 +66,128 @@ func recovery(log *slog.Logger) gin.HandlerFunc {
 	})
 }
 
-// resolveActor материализует действующее лицо в principals.
+// authenticate определяет, кто пришёл.
 //
-// Формат заголовка: "handle" или "agent:handle". Пустой заголовок даёт
-// принципала по умолчанию — иначе локальную отладку пришлось бы вести с
-// обязательным заголовком в каждом curl.
-func resolveActor(store *postgres.Store, log *slog.Logger, defaultActor string) gin.HandlerFunc {
-	return resolveActorAs(store, log, defaultActor, domain.PrincipalUser)
-}
-
-// resolveActorAs отличается только видом принципала по умолчанию: в REST за
-// заголовком стоит человек, в MCP — агент. Явный префикс в заголовке
-// перекрывает и то, и другое.
-func resolveActorAs(store *postgres.Store, log *slog.Logger, defaultActor string, defaultKind domain.PrincipalKind) gin.HandlerFunc {
+// Предъявленный токен (Authorization: Bearer) проверяется всегда. Без токена
+// поведение зависит от режима: в режиме заголовка актор берётся из
+// X-SDLC-Actor и заводится в principals при первом обращении, как в фазах
+// 1-3; в режиме токенов запрос без токена отбивается.
+func (s *Server) authenticate(defaultKind domain.PrincipalKind) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		raw := strings.TrimSpace(c.GetHeader(ActorHeader))
-		if raw == "" {
-			raw = defaultActor
-		}
-
-		kind := defaultKind
-		handle := raw
-		if before, after, found := strings.Cut(raw, ":"); found {
-			switch domain.PrincipalKind(before) {
-			case domain.PrincipalAgent:
-				kind, handle = domain.PrincipalAgent, after
-			case domain.PrincipalUser:
-				kind, handle = domain.PrincipalUser, after
+		if bearer, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer "); ok {
+			id, err := s.auth.Authenticate(c.Request.Context(), bearer)
+			if err != nil {
+				fail(c, s.log, err)
+				return
 			}
-		}
-		if handle == "" {
-			handle = defaultActor
-		}
-
-		p, err := store.ResolveActor(c.Request.Context(), store.DB(), handle, kind)
-		if err != nil {
-			fail(c, log, err)
+			c.Set(ctxIdentity, id)
+			c.Next()
 			return
 		}
-		c.Set(ctxActor, p)
+
+		if s.auth.Enforced() {
+			fail(c, s.log, apperr.Unauthenticated("нужен токен: заголовок Authorization: Bearer <token>"))
+			return
+		}
+
+		raw := strings.TrimSpace(c.GetHeader(ActorHeader))
+		if raw == "" {
+			raw = s.cfg.DefaultActor
+		}
+		kind, handle := workflow.SplitHandle(raw, defaultKind)
+		if handle == "" {
+			handle = s.cfg.DefaultActor
+		}
+		p, err := s.store.ResolveActor(c.Request.Context(), s.store.DB(), handle, kind)
+		if err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		c.Set(ctxIdentity, workflow.Identity{Principal: p})
 		c.Next()
 	}
 }
 
+func identity(c *gin.Context) workflow.Identity {
+	v, _ := c.Get(ctxIdentity)
+	id, _ := v.(workflow.Identity)
+	return id
+}
+
 func actor(c *gin.Context) domain.Principal {
-	p, _ := c.Get(ctxActor)
-	principal, _ := p.(domain.Principal)
-	return principal
+	return identity(c).Principal
+}
+
+// guard проверяет уровень прав в проекте, к которому относится запрос.
+//
+// Проект вычисляется из пути: ключ проекта, ключ задачи, версия цикла,
+// артефакт или сигнал дрейфа — что есть. Ручки при этом остаются без
+// логики прав: правило «кому что можно» живёт в workflow.Auth и одинаково
+// для REST и MCP.
+func (s *Server) guard(need domain.MemberRole) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.auth.Enforced() {
+			c.Next()
+			return
+		}
+		projectID, err := s.projectOf(c)
+		if err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		if err := s.auth.Require(c.Request.Context(), identity(c), projectID, need); err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		c.Next()
+	}
+}
+
+// requireAdmin — действия администратора системы.
+func (s *Server) requireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := s.auth.RequireAdmin(identity(c)); err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		c.Next()
+	}
+}
+
+func (s *Server) projectOf(c *gin.Context) (uuid.UUID, error) {
+	ctx, q := c.Request.Context(), s.store.DB()
+	switch {
+	case c.Param("projectKey") != "":
+		p, err := s.store.GetProjectByKey(ctx, q, c.Param("projectKey"))
+		return p.ID, err
+	case c.Param("taskKey") != "":
+		t, err := s.store.GetTaskByKey(ctx, q, c.Param("taskKey"))
+		return t.ProjectID, err
+	case c.Param("workflowID") != "":
+		id, err := uuid.Parse(c.Param("workflowID"))
+		if err != nil {
+			return uuid.Nil, apperr.InvalidInput("идентификатор версии цикла не UUID")
+		}
+		wf, err := s.store.WorkflowHead(ctx, q, id)
+		return wf.ProjectID, err
+	case c.Param("artifactID") != "":
+		id, err := uuid.Parse(c.Param("artifactID"))
+		if err != nil {
+			return uuid.Nil, apperr.InvalidInput("идентификатор артефакта не UUID")
+		}
+		a, err := s.store.GetArtifact(ctx, q, id)
+		return a.ProjectID, err
+	case c.Param("signalID") != "":
+		id, err := uuid.Parse(c.Param("signalID"))
+		if err != nil {
+			return uuid.Nil, apperr.InvalidInput("идентификатор сигнала не UUID")
+		}
+		sig, err := s.store.GetDriftSignal(ctx, q, id)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		t, err := s.store.GetTaskByID(ctx, q, sig.TaskID)
+		return t.ProjectID, err
+	}
+	return uuid.Nil, apperr.Internal(nil, "маршрут %s не привязан к проекту", c.FullPath())
 }

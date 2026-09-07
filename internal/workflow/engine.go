@@ -356,6 +356,20 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 			return err
 		}
 
+		// Апрув человека ставит человек. Агент, представившийся человеком,
+		// в режиме токенов не пройдёт аутентификацию; в режиме заголовка
+		// это защита от случайного самоапрува агентом, а не от злого умысла.
+		if gate.Type == domain.GateHumanApproval {
+			who, err := e.store.GetPrincipal(ctx, tx, actor)
+			if err != nil {
+				return err
+			}
+			if who.Kind != domain.PrincipalUser {
+				return apperr.Forbidden("гейт %q закрывает человек, а не %s %q",
+					gate.Key, who.Kind, who.Handle)
+			}
+		}
+
 		if err := e.store.RecordGateResult(ctx, tx, run.ID, gate.ID, transition.ID,
 			status, json.RawMessage(details), &actor); err != nil {
 			return err

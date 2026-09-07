@@ -27,6 +27,10 @@ type Querier interface {
 
 type Store struct {
 	pool *pgxpool.Pool
+	// Внешнее хранилище крупного содержимого; nil — всё лежит inline.
+	blobs     BlobStore
+	inlineMax int
+	blobMax   int
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -70,9 +74,9 @@ func (s *Store) ResolveActor(ctx context.Context, q Querier, handle string, kind
 		INSERT INTO principals (kind, handle, display_name)
 		VALUES ($1, $2, $2)
 		ON CONFLICT (handle) DO UPDATE SET handle = EXCLUDED.handle
-		RETURNING id, kind, handle, display_name, email, created_at`,
+		RETURNING id, kind, handle, display_name, email, is_admin, created_at`,
 		kind, handle,
-	).Scan(&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.CreatedAt)
+	).Scan(&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.IsAdmin, &p.CreatedAt)
 	if err != nil {
 		return p, apperr.Internal(err, "резолв актора %q", handle)
 	}

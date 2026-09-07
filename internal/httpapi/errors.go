@@ -31,6 +31,10 @@ func statusFor(code apperr.Code) int {
 		return http.StatusNotFound
 	case apperr.CodeContractViolation:
 		return http.StatusBadRequest
+	case apperr.CodeUnauthenticated:
+		return http.StatusUnauthorized
+	case apperr.CodeForbidden:
+		return http.StatusForbidden
 	case apperr.CodeConflict, apperr.CodeGatesNotSatisfied,
 		apperr.CodeTransitionNotAllowed, apperr.CodeOutOfTaskScope,
 		apperr.CodeTaskNotClaimable, apperr.CodeLeaseHeldByOther,

@@ -84,6 +84,9 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 	if err != nil {
 		return fail(err)
 	}
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	q := s.store.DB()
 
 	project, err := s.store.GetProjectByKey(ctx, q, key)
@@ -116,16 +119,27 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 		statuses = append(statuses, item)
 	}
 
-	me := actor(ctx)
-	return ok(map[string]any{
+	id := identity(ctx)
+	me := id.Principal
+	level, err := s.auth.ProjectRole(ctx, id, project.ID)
+	if err != nil {
+		return fail(err)
+	}
+	view := map[string]any{
 		"actor":    map[string]any{"handle": me.Handle, "kind": me.Kind},
 		"project":  map[string]any{"key": project.Key, "name": project.Name},
 		"workflow": map[string]any{"name": wf.Name, "version": wf.Version, "statuses": statuses},
 		"roles":    roleViews,
-		// Аутентификации пока нет (решение 0010): актор — это то, чем
-		// представился клиент, а не то, что кто-то проверил.
-		"authenticated": false,
-	})
+		// В режиме заголовка актор — это то, чем представился клиент, а не
+		// то, что кто-то проверил (решение 0021).
+		"authenticated": id.Authenticated(),
+		"auth_mode":     s.auth.Mode(),
+		"access_level":  level,
+	}
+	if allowed := id.AllowedRoles(); allowed != nil {
+		view["allowed_roles"] = allowed
+	}
+	return ok(view)
 }
 
 // ── список задач ────────────────────────────────────────────────────────────
@@ -138,6 +152,9 @@ type listTasksInput struct {
 }
 
 func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	key, err := projectKey(ctx)
 	if err != nil {
 		return fail(err)
@@ -204,10 +221,14 @@ type claimInput struct {
 }
 
 func (s *Server) claimTask(ctx context.Context, in claimInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
-	res, err := s.engine.Claim(ctx, in.TaskKey, actor(ctx).ID, in.SessionRef)
+	res, err := s.engine.ClaimWith(ctx, in.TaskKey, actor(ctx).ID, in.SessionRef,
+		workflow.ClaimOptions{AllowedRoles: identity(ctx).AllowedRoles()})
 	if err != nil {
 		return fail(err)
 	}
@@ -219,6 +240,9 @@ type taskKeyInput struct {
 }
 
 func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
@@ -263,6 +287,9 @@ type artifactInput struct {
 }
 
 func (s *Server) getArtifact(ctx context.Context, in artifactInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	id, err := uuid.Parse(in.ArtifactID)
 	if err != nil {
 		return fail(apperr.InvalidInput("artifact_id не UUID"))
@@ -315,6 +342,9 @@ type submitInput struct {
 }
 
 func (s *Server) submitArtifact(ctx context.Context, in submitInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	taskKey, runID, err := s.resolveTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
@@ -367,6 +397,9 @@ type linkRepoRefInput struct {
 }
 
 func (s *Server) linkRepoRef(ctx context.Context, in linkRepoRefInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
@@ -387,6 +420,9 @@ type scopeInput struct {
 }
 
 func (s *Server) updateScope(ctx context.Context, in scopeInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
@@ -409,6 +445,9 @@ type driftInput struct {
 }
 
 func (s *Server) getDrift(ctx context.Context, in driftInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
@@ -436,6 +475,9 @@ type resolveDriftInput struct {
 }
 
 func (s *Server) resolveDrift(ctx context.Context, in resolveDriftInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	id, err := uuid.Parse(in.SignalID)
 	if err != nil {
 		return fail(apperr.InvalidInput("signal_id не UUID"))
@@ -470,6 +512,9 @@ type checkGatesInput struct {
 }
 
 func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
@@ -509,6 +554,9 @@ type transitionInput struct {
 }
 
 func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	taskKey, runID, err := s.resolveTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
@@ -561,6 +609,9 @@ type leaseInput struct {
 }
 
 func (s *Server) heartbeat(ctx context.Context, in leaseInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	runID, err := s.leaseTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
@@ -573,6 +624,9 @@ func (s *Server) heartbeat(ctx context.Context, in leaseInput) (*sdk.CallToolRes
 }
 
 func (s *Server) release(ctx context.Context, in leaseInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
 	runID, err := s.leaseTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
@@ -696,6 +750,9 @@ type searchInput struct {
 }
 
 func (s *Server) searchContext(ctx context.Context, in searchInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberViewer); err != nil {
+		return fail(err)
+	}
 	key, err := projectKey(ctx)
 	if err != nil {
 		return fail(err)

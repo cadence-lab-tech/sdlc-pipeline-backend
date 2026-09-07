@@ -24,7 +24,7 @@ import (
 
 const (
 	// Version — версия сервера, которую видит клиент при initialize.
-	Version = "0.2.0"
+	Version = "0.4.0"
 	// ServerName показывается в клиенте рядом с тулами.
 	ServerName = "sdlc-pipeline"
 )
@@ -33,7 +33,7 @@ type ctxKey int
 
 const (
 	keyProject ctxKey = iota
-	keyActor
+	keyIdentity
 )
 
 // WithProject кладёт в контекст проект, к которому привязано подключение.
@@ -43,8 +43,9 @@ func WithProject(ctx context.Context, projectKey string) context.Context {
 	return context.WithValue(ctx, keyProject, projectKey)
 }
 
-func WithActor(ctx context.Context, p domain.Principal) context.Context {
-	return context.WithValue(ctx, keyActor, p)
+// WithIdentity кладёт в контекст того, кто пришёл: принципала и токен.
+func WithIdentity(ctx context.Context, id workflow.Identity) context.Context {
+	return context.WithValue(ctx, keyIdentity, id)
 }
 
 func projectKey(ctx context.Context) (string, error) {
@@ -55,27 +56,52 @@ func projectKey(ctx context.Context) (string, error) {
 	return key, nil
 }
 
+func identity(ctx context.Context) workflow.Identity {
+	id, _ := ctx.Value(keyIdentity).(workflow.Identity)
+	return id
+}
+
 func actor(ctx context.Context) domain.Principal {
-	p, _ := ctx.Value(keyActor).(domain.Principal)
-	return p
+	return identity(ctx).Principal
 }
 
 type Server struct {
-	log    *slog.Logger
-	store  *postgres.Store
-	engine *workflow.Engine
-	mcp    *sdk.Server
+	log       *slog.Logger
+	store     *postgres.Store
+	engine    *workflow.Engine
+	authoring *workflow.Authoring
+	auth      *workflow.Auth
+	mcp       *sdk.Server
 }
 
-func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine) *Server {
-	s := &Server{log: log, store: store, engine: engine}
+func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth) *Server {
+	s := &Server{log: log, store: store, engine: engine, authoring: authoring, auth: auth}
 	s.mcp = sdk.NewServer(&sdk.Implementation{
 		Name:    ServerName,
 		Title:   "SDLC Pipeline",
 		Version: Version,
 	}, nil)
 	s.registerTools()
+	s.registerCatalogTools()
+	s.registerPrompts()
 	return s
+}
+
+// allow проверяет уровень прав актора в проекте подключения. Правило одно
+// с REST (решение 0011): тул и ручка — одно действие с одними правами.
+func (s *Server) allow(ctx context.Context, need domain.MemberRole) error {
+	key, err := projectKey(ctx)
+	if err != nil {
+		return err
+	}
+	if !s.auth.Enforced() {
+		return nil
+	}
+	project, err := s.store.GetProjectByKey(ctx, s.store.DB(), key)
+	if err != nil {
+		return err
+	}
+	return s.auth.Require(ctx, identity(ctx), project.ID, need)
 }
 
 // Handler отдаёт HTTP-обработчик MCP. Проект и актор кладёт в контекст

@@ -25,7 +25,8 @@ func (s *Server) claimTask(c *gin.Context) {
 	var req claimRequest
 	_ = c.ShouldBindJSON(&req)
 
-	res, err := s.engine.Claim(c.Request.Context(), c.Param("taskKey"), actor(c).ID, req.SessionRef)
+	res, err := s.engine.ClaimWith(c.Request.Context(), c.Param("taskKey"), actor(c).ID, req.SessionRef,
+		workflow.ClaimOptions{AllowedRoles: identity(c).AllowedRoles()})
 	if err != nil {
 		fail(c, s.log, err)
 		return

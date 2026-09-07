@@ -18,6 +18,9 @@ import (
 type Client struct {
 	base  string
 	actor string
+	// Токен доступа (SDLC_TOKEN). С ним заголовок актора не нужен: кто
+	// пришёл, определяет токен (решение 0021).
+	token string
 	http  *http.Client
 }
 
@@ -26,6 +29,7 @@ func NewClient() *Client {
 	return &Client{
 		base:  strings.TrimRight(base, "/"),
 		actor: env("SDLC_ACTOR", "agent:"+env("USER", "sdlc-cli")),
+		token: env("SDLC_TOKEN", ""),
 		http:  &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -61,7 +65,11 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-SDLC-Actor", c.actor)
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	} else {
+		req.Header.Set("X-SDLC-Actor", c.actor)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -103,6 +111,32 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	return c.do(ctx, http.MethodPost, path, body, out)
+}
+
+// getRaw читает ответ как есть: содержимое документа приезжает сырым телом.
+func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	} else {
+		req.Header.Set("X-SDLC-Actor", c.actor)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+	}
+	return raw, nil
 }
 
 func env(key, def string) string {

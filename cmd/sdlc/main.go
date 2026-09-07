@@ -4,7 +4,8 @@
 // ходит по MCP, скрипт сборки — сюда. Логики цикла здесь нет и быть не должно.
 //
 //	SDLC_API_URL   адрес API           (по умолчанию http://localhost:8088/v1)
-//	SDLC_ACTOR     кто действует        (по умолчанию agent:$USER)
+//	SDLC_TOKEN     токен доступа        (режим токенов; без него — заголовок актора)
+//	SDLC_ACTOR     кто действует        (режим заголовка; по умолчанию agent:$USER)
 //	SDLC_PROJECT   проект по умолчанию для команд, которым нужен проект
 package main
 
@@ -49,6 +50,19 @@ func commands() []command {
 		{"index", "состояние индекса репозиториев", "sdlc index [--project SDLC]", cmdIndex},
 		{"drift", "открытые расхождения задачи", "sdlc drift SDLC-42", cmdDrift},
 		{"resolve-drift", "закрыть сигнал дрейфа", "sdlc resolve-drift <signal-id> --resolution resolved [--note ...]", cmdResolveDrift},
+		{"metrics", "метрики цикла: где застревают задачи, какие гейты валятся", "sdlc metrics [--period 30d]", cmdMetrics},
+
+		{"me", "кто я по токену, где состою", "sdlc me", cmdMe},
+		{"token", "выдать, перечислить или отозвать токен", "sdlc token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | sdlc token list [--project SDLC] | sdlc token revoke <id>", cmdToken},
+		{"members", "участники проекта и их уровни", "sdlc members [list] | sdlc members set user:alice maintainer | sdlc members remove user:alice", cmdMembers},
+
+		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "sdlc export [--project SDLC] > bundle.json", cmdExport},
+		{"import", "применить связку к проекту", "sdlc import --file bundle.json [--dry-run]", cmdImport},
+		{"import-guide", "инструкция агенту по переносу правил команды", "sdlc import-guide", cmdImportGuide},
+		{"repo", "привязать репозиторий к проекту", "sdlc repo add acme/api [--hint backend] [--branch main]", cmdRepo},
+		{"role", "показать роль или завести версию инструкции", "sdlc role show analyst | sdlc role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
+		{"doc", "проектные документы", "sdlc doc list | sdlc doc put --kind guideline --title Соглашения --file CLAUDE.md | sdlc doc get <id>", cmdDoc},
+		{"workflow", "версии цикла: список, проверка, активация черновика", "sdlc workflow list | sdlc workflow validate <id> | sdlc workflow activate <id>", cmdWorkflow},
 	}
 }
 
@@ -83,8 +97,8 @@ func usage() {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", cmd.name, cmd.summary)
 	}
 	fmt.Fprintln(os.Stderr, "\nsdlc <команда> --help — аргументы команды")
-	fmt.Fprintln(os.Stderr, "\nАдрес API — SDLC_API_URL, действующее лицо — SDLC_ACTOR,")
-	fmt.Fprintln(os.Stderr, "проект по умолчанию — SDLC_PROJECT.")
+	fmt.Fprintln(os.Stderr, "\nАдрес API — SDLC_API_URL, токен — SDLC_TOKEN (без него действующее")
+	fmt.Fprintln(os.Stderr, "лицо берётся из SDLC_ACTOR), проект по умолчанию — SDLC_PROJECT.")
 }
 
 // exit печатает ошибку домена так, чтобы её можно было разобрать скриптом:

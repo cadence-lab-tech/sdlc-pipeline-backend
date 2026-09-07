@@ -151,6 +151,19 @@ type ClaimResult struct {
 // одной транзакции. Без этого два агента, пришедшие одновременно, прочитали
 // бы одну и ту же свободную аренду и оба решили, что задача досталась им.
 func (e *Engine) Claim(ctx context.Context, taskKey string, actor uuid.UUID, sessionRef string) (ClaimResult, error) {
+	return e.ClaimWith(ctx, taskKey, actor, sessionRef, ClaimOptions{})
+}
+
+// ClaimOptions — рамки захвата, приезжающие из токена агента.
+type ClaimOptions struct {
+	// Роли специалистов, которые агенту разрешено забирать. nil — любые.
+	// Ограничение живёт в токене (agent_tokens.role_keys): токен ревьюера
+	// не должен позволять забрать этап разработчика.
+	AllowedRoles []string
+}
+
+// ClaimWith — захват с ограничениями из токена.
+func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID, sessionRef string, opts ClaimOptions) (ClaimResult, error) {
 	var out ClaimResult
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -167,6 +180,9 @@ func (e *Engine) Claim(ctx context.Context, taskKey string, actor uuid.UUID, ses
 			return err
 		}
 		if err := claimable(run, actor); err != nil {
+			return err
+		}
+		if err := roleAllowed(run, opts.AllowedRoles); err != nil {
 			return err
 		}
 
@@ -263,6 +279,24 @@ func claimable(run domain.StageRun, actor uuid.UUID) error {
 			})
 	}
 	return nil
+}
+
+// roleAllowed отбивает захват, если токен агента ограничен ролями, а прогон
+// адресован другой.
+func roleAllowed(run domain.StageRun, allowed []string) error {
+	if allowed == nil {
+		return nil
+	}
+	for _, key := range allowed {
+		if key == run.RoleKey {
+			return nil
+		}
+	}
+	role := run.RoleKey
+	if role == "" {
+		role = "без роли"
+	}
+	return apperr.Forbidden("токен ограничен ролями %v, а этап адресован роли %s", allowed, role)
 }
 
 // Heartbeat продлевает аренду. Продлить может только держатель: heartbeat

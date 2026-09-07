@@ -1,7 +1,5 @@
-// Команда api — REST-сервис SDLC Pipeline.
-//
-// В фазе 2 сюда же встанет MCP-сервер: он поднимется на том же процессе и тех
-// же сервисах, потому что REST и MCP — два транспорта над одним ядром.
+// Команда api — REST-сервис SDLC Pipeline и MCP-сервер в одном процессе:
+// два транспорта над одним ядром (решение 0011).
 package main
 
 import (
@@ -16,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
@@ -70,6 +69,9 @@ func run() error {
 	}
 
 	store := postgres.New(pool)
+	if err := useBlobStore(cfg, store, log); err != nil {
+		return err
+	}
 	engine := workflow.NewEngine(store, log, workflow.Options{
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
@@ -84,15 +86,31 @@ func run() error {
 			"пропускают переход — режим отладки цикла, не для продакшена")
 	}
 
+	auth := workflow.NewAuth(store, log, cfg.AuthMode)
+	if err := auth.Bootstrap(ctx, cfg.AdminHandle, cfg.AdminToken); err != nil {
+		return err
+	}
+	switch {
+	case auth.Enforced():
+		log.Info("аутентификация по токенам", "admin", cfg.AdminHandle,
+			"bootstrap_token", cfg.AdminToken != "")
+	default:
+		log.Warn("SDLC_AUTH_MODE=header: актор берётся из заголовка, права не " +
+			"проверяются — режим отладки цикла, не для продакшена")
+	}
+	if cfg.GitHubWebhookSecret != "" {
+		log.Info("вебхуки GitHub включены", "path", "/webhooks/github")
+	}
+
 	var mcpServer *mcp.Server
 	if cfg.MCPEnabled {
-		mcpServer = mcp.NewServer(log, store, engine)
+		mcpServer = mcp.NewServer(log, store, engine, authoring, auth)
 		log.Info("MCP-сервер поднят", "path", "/mcp/projects/{PROJECT}")
 	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, mcpServer).Handler(),
+		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,
@@ -123,6 +141,22 @@ func run() error {
 		return err
 	}
 	log.Info("остановлено штатно")
+	return nil
+}
+
+// useBlobStore включает вынос крупного содержимого, если задан каталог.
+// Без него всё лежит inline, а содержимое больше предела отбивается.
+func useBlobStore(cfg config.Config, store *postgres.Store, log *slog.Logger) error {
+	if cfg.BlobDir == "" {
+		return nil
+	}
+	fs, err := blobstore.NewFS(cfg.BlobDir)
+	if err != nil {
+		return err
+	}
+	store.UseBlobStore(fs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
+	log.Info("внешнее хранилище содержимого", "dir", cfg.BlobDir,
+		"inline_max_bytes", cfg.BlobInlineMaxBytes, "max_bytes", cfg.BlobMaxBytes)
 	return nil
 }
 

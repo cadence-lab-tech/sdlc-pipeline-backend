@@ -25,7 +25,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
-        -o /out/sdlc ./cmd/sdlc
+        -o /out/sdlc ./cmd/sdlc && \
+    mkdir -p /out/blobs
 
 # distroless без shell: внутрь нечего эксплуатировать, а проба готовности
 # делается самим бинарником (api healthcheck).
@@ -37,6 +38,10 @@ COPY --from=build /out/api /api
 # Воркер запускается тем же образом с другим entrypoint.
 COPY --from=build /out/worker /worker
 COPY --from=build /out/sdlc /sdlc
+# Каталог для вынесенного содержимого (SDLC_BLOB_DIR). Заводится в образе с
+# владельцем nonroot: именованный том наследует права каталога образа, а
+# пустой том создался бы под root, и сервис не смог бы в него писать.
+COPY --from=build --chown=nonroot:nonroot /out/blobs /blobs
 
 USER nonroot:nonroot
 EXPOSE 8080

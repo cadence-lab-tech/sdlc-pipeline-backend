@@ -27,7 +27,74 @@ type Principal struct {
 	Handle      string        `json:"handle"`
 	DisplayName string        `json:"display_name"`
 	Email       *string       `json:"email,omitempty"`
+	// Глобальный администратор: заводит проекты и первых участников.
+	IsAdmin   bool      `json:"is_admin"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Уровни прав участника проекта. Это не роли специалистов (roles): «агент»
+// может забирать задачи, «сопровождающий» — править цикл и ставить апрувы,
+// «администратор» — управлять участниками и токенами. Порядок значим —
+// каждый следующий уровень включает предыдущий.
+type MemberRole string
+
+const (
+	MemberViewer     MemberRole = "viewer"
+	MemberAgent      MemberRole = "agent"
+	MemberMaintainer MemberRole = "maintainer"
+	MemberAdmin      MemberRole = "admin"
+)
+
+// Rank отдаёт порядок уровня; неизвестный уровень ниже любого известного.
+func (r MemberRole) Rank() int {
+	switch r {
+	case MemberViewer:
+		return 1
+	case MemberAgent:
+		return 2
+	case MemberMaintainer:
+		return 3
+	case MemberAdmin:
+		return 4
+	}
+	return 0
+}
+
+func (r MemberRole) Valid() bool { return r.Rank() > 0 }
+
+// Covers — достаточно ли уровня r для требования need.
+func (r MemberRole) Covers(need MemberRole) bool { return r.Rank() >= need.Rank() }
+
+type ProjectMember struct {
+	ProjectID   uuid.UUID     `json:"project_id"`
+	ProjectKey  string        `json:"project_key"`
+	PrincipalID uuid.UUID     `json:"principal_id"`
+	Handle      string        `json:"handle"`
+	Kind        PrincipalKind `json:"kind"`
+	DisplayName string        `json:"display_name"`
+	Role        MemberRole    `json:"role"`
 	CreatedAt   time.Time     `json:"created_at"`
+}
+
+// AccessToken — предъявляемый токен. Сам токен в базе не хранится, только
+// его хеш; целиком он показывается один раз при выдаче.
+type AccessToken struct {
+	ID          uuid.UUID     `json:"id"`
+	PrincipalID uuid.UUID     `json:"principal_id"`
+	Handle      string        `json:"handle"`
+	Kind        PrincipalKind `json:"kind"`
+	// Токен, привязанный к проекту, вне него недействителен.
+	ProjectID  *uuid.UUID `json:"project_id,omitempty"`
+	ProjectKey *string    `json:"project_key,omitempty"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	// Роли специалистов, которые агент с этим токеном может забирать.
+	// Пусто — любые роли проекта.
+	RoleKeys   []string   `json:"role_keys"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
 type Project struct {

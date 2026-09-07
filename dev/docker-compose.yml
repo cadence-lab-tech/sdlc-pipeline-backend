@@ -55,7 +55,19 @@ services:
       # Для продакшена значение обратное — иначе цикл проходится мимо
       # непроверенных условий.
       SDLC_STRICT_GATES: ${SDLC_STRICT_GATES:-false}
+      # Аутентификация (решение 0021). header — актор из заголовка, права не
+      # проверяются: режим отладки цикла. token — только токены, права по
+      # участию в проекте; первый администратор — из SDLC_ADMIN_TOKEN.
+      SDLC_AUTH_MODE: ${SDLC_AUTH_MODE:-header}
+      SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
+      SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN:-}
       SDLC_DEFAULT_ACTOR: ${SDLC_DEFAULT_ACTOR:-local-dev}
+      # Вебхуки GitHub: без секрета ручка /webhooks/github выключена.
+      SDLC_GITHUB_WEBHOOK_SECRET: ${SDLC_GITHUB_WEBHOOK_SECRET:-}
+      # Крупное содержимое артефактов и документов уходит на том, в базе
+      # остаётся адрес. Том общий с воркером: он читает документы при
+      # векторизации.
+      SDLC_BLOB_DIR: /blobs
       # MCP-сервер для локальных агентов: /mcp/projects/{PROJECT}.
       SDLC_MCP_ENABLED: ${SDLC_MCP_ENABLED:-true}
       # Аренда задачи: сколько живёт без heartbeat и как часто его слать.
@@ -67,6 +79,8 @@ services:
       SDLC_EMBEDDINGS_PROVIDER: ${SDLC_EMBEDDINGS_PROVIDER:-}
       SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
       SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
+    volumes:
+      - blobs:/blobs
     ports:
       # 8088, а не 8080: восьмидесятый на машине разработчика обычно занят.
       - "${API_PORT:-8088}:8080"
@@ -111,6 +125,10 @@ services:
       # Минута, а не пять: локально хочется видеть индексацию сразу после
       # пуша, а три запроса в минуту лимиты GitHub не замечают.
       SDLC_INDEX_INTERVAL: ${SDLC_INDEX_INTERVAL:-1m}
+      # Очередь прогонов смотрится чаще: туда кладёт коммиты вебхук.
+      SDLC_INDEX_POLL_INTERVAL: ${SDLC_INDEX_POLL_INTERVAL:-15s}
+      SDLC_INDEX_RETAIN_RUNS: ${SDLC_INDEX_RETAIN_RUNS:-5}
+      SDLC_BLOB_DIR: /blobs
       SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
       SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
       # Те же настройки эмбеддингов, что у api: индекс считает воркер, вектор
@@ -118,6 +136,8 @@ services:
       SDLC_EMBEDDINGS_PROVIDER: ${SDLC_EMBEDDINGS_PROVIDER:-}
       SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
       SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
+    volumes:
+      - blobs:/blobs
     restart: unless-stopped
 
   # Просмотр базы руками: docker compose --profile tools up -d
@@ -136,3 +156,5 @@ services:
 
 volumes:
   pgdata:
+  # Вынесенное содержимое артефактов и документов; общий для api и воркера.
+  blobs:

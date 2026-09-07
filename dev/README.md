@@ -154,9 +154,78 @@ curl -s -X POST localhost:8088/v1/tasks/SDLC-1/claim \
 claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 ```
 
-Заголовок `X-SDLC-Actor` — это действующее лицо. Аутентификации пока нет
-([решение 0010](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0010-auth-deferred.md)),
-заголовку никто не мешает соврать; без него берётся `SDLC_DEFAULT_ACTOR`.
+Заголовок `X-SDLC-Actor` — это действующее лицо в режиме
+`SDLC_AUTH_MODE=header`, в котором compose поднимает окружение по умолчанию:
+заголовку никто не мешает соврать, права не проверяются — это режим отладки
+цикла. Без заголовка берётся `SDLC_DEFAULT_ACTOR`.
+
+## Аутентификация и права
+
+Режим `SDLC_AUTH_MODE=token` ([решение 0021](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0021-token-auth-and-project-members.md)):
+запрос без `Authorization: Bearer <token>` отбивается, права проверяются по
+участию в проекте (`viewer`, `agent`, `maintainer`, `admin`). Первый
+администратор заводится из окружения — в пустой базе некому выдать первый
+токен:
+
+```bash
+printf 'SDLC_AUTH_MODE=token\nSDLC_ADMIN_TOKEN=sdlc_замените_на_длинный_секрет\n' >> dev/.env
+make up
+
+export SDLC_TOKEN=sdlc_замените_на_длинный_секрет SDLC_PROJECT=SDLC
+./bin/sdlc me                                     # admin, is_admin=true
+./bin/sdlc members set user:alice maintainer      # добавить человека
+./bin/sdlc token create --name alice --for user:alice   # выдать ей токен
+./bin/sdlc token create --name ci-reviewer --for agent:reviewer-bot --roles reviewer
+```
+
+Токен агента привязан к проекту и, если задан `--roles`, позволяет забирать
+только этапы этих ролей: токен ревьюера не заберёт этап разработчика. Сам
+токен показывается один раз при выдаче; в базе лежит хеш. Локальный агент
+подключается с ним же:
+
+```bash
+claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
+    --header "Authorization: Bearer $SDLC_TOKEN"
+```
+
+Гейт `human_approval` в любом режиме закрывает только принципал вида `user`:
+агент, даже сопровождающий, поставить апрув не может.
+
+## Перенос правил в проект
+
+Существующие правила команды — CLAUDE.md, AGENTS.md, ADR, описания ролей —
+переносятся в проект связкой ([решение 0022](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0022-bundle-import-export.md)).
+Агенту достаточно промпта `/mcp__sdlc__import_rules` или тула
+`sdlc_import_guide`; из CLI:
+
+```bash
+./bin/sdlc import-guide                          # что и куда переносить
+./bin/sdlc export > bundle.json                  # выгрузить проект связкой
+./bin/sdlc import --file bundle.json --dry-run   # отчёт без изменений
+./bin/sdlc import --file bundle.json
+./bin/sdlc repo add acme/api --hint backend
+./bin/sdlc role put --key writer --name Техписатель --file docs/roles/writer.md
+./bin/sdlc doc put --kind guideline --title Соглашения --file CLAUDE.md
+./bin/sdlc workflow activate <id>                # цикл из связки приходит черновиком
+```
+
+Импорт идемпотентен: роль с той же инструкцией не трогается, с другой —
+получает новую версию; документ с теми же `kind` и `title` обновляется.
+
+## Вебхуки GitHub
+
+С секретом `SDLC_GITHUB_WEBHOOK_SECRET` сервис принимает события на
+`POST /webhooks/github` ([решение 0023](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0023-github-webhooks-write-to-queue.md)):
+`push` ставит коммит в очередь индексации, `pull_request` и `check_run`
+помечают привязанные PR к пересинхронизации. В сеть обработчик не ходит —
+воркер забирает очередь раз в `SDLC_INDEX_POLL_INTERVAL`. Локально без
+публичного адреса индексация по-прежнему идёт по таймеру.
+
+## Метрики цикла
+
+`GET /v1/projects/SDLC/metrics?period=30d` или `sdlc metrics`: длительность
+этапов по статусам, откаты и повторные попытки, вердикты по гейтам, сигналы
+дрейфа, пропускная способность. Считается по накопленным таблицам.
 
 ## Переменные окружения
 
@@ -167,7 +236,16 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 | `SDLC_AUTO_MIGRATE` | `true` | накатывать схему на старте |
 | `SDLC_SEED` | пусто | сиды через запятую, только на пустой базе |
 | `SDLC_STRICT_GATES` | `false` | см. ниже |
-| `SDLC_DEFAULT_ACTOR` | `anonymous` | актор без заголовка |
+| `SDLC_AUTH_MODE` | `header` в development, иначе `token` | `header` — актор из заголовка без проверки прав; `token` — только токены |
+| `SDLC_ADMIN_HANDLE` | `admin` | хэндл первого администратора |
+| `SDLC_ADMIN_TOKEN` | пусто | его токен; заводится на старте, при рестарте не дублируется |
+| `SDLC_DEFAULT_ACTOR` | `anonymous` | актор без заголовка (режим `header`) |
+| `SDLC_BLOB_DIR` | пусто | каталог для вынесенного содержимого; пусто — всё inline |
+| `SDLC_BLOB_INLINE_MAX_BYTES` | `262144` | до этого размера содержимое лежит в базе |
+| `SDLC_BLOB_MAX_BYTES` | `67108864` | предел принимаемого содержимого |
+| `SDLC_GITHUB_WEBHOOK_SECRET` | пусто | секрет подписи вебхуков; без него ручка выключена |
+| `SDLC_INDEX_POLL_INTERVAL` | `15s` | как часто воркер смотрит в очередь прогонов между опросами |
+| `SDLC_INDEX_RETAIN_RUNS` | `5` | сколько завершённых прогонов хранить на ветку |
 | `SDLC_MCP_ENABLED` | `true` | поднимать ли MCP-сервер в этом же процессе |
 | `SDLC_LEASE_TTL` | `30m` | сколько живёт аренда без heartbeat |
 | `SDLC_HEARTBEAT_INTERVAL` | `5m` | как часто агент обязан её продлевать |
@@ -207,10 +285,12 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 несколько, и каждая гоняла бы свой проход по одним и тем же арендам. Схему
 воркер не катит — она уже накачена приложением.
 
-Заданий четыре, и идут они последовательно: возврат протухших аренд;
+Заданий пять, и идут они последовательно: возврат протухших аренд;
 индексация репозиториев с детектором дрейфа сразу после каждого прогона;
-синхронизация состояния привязанных PR (её читает гейт `external_check`);
-разбор артефактов на куски и досчёт векторов.
+вычистка старых прогонов без ссылающихся базовых линий; синхронизация
+состояния привязанных PR (её читает гейт `external_check`); разбор артефактов
+на куски и досчёт векторов. Между полными проходами воркер раз в
+`SDLC_INDEX_POLL_INTERVAL` забирает из очереди то, что положил вебхук.
 
 ```bash
 docker compose -f dev/docker-compose.yml logs -f worker

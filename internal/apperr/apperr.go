@@ -29,6 +29,11 @@ const (
 	CodeDriftUnresolved         Code = "drift_unresolved"
 	CodeUnknownRepository       Code = "unknown_repository"
 	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"
+
+	// Аутентификация и права (фаза 4): токен не предъявлен или недействителен,
+	// либо предъявлен, но прав на действие нет.
+	CodeUnauthenticated Code = "unauthenticated"
+	CodeForbidden       Code = "forbidden"
 )
 
 type Error struct {
@@ -72,6 +77,14 @@ func InvalidInput(format string, args ...any) *Error {
 
 func Conflict(format string, args ...any) *Error {
 	return New(CodeConflict, format, args...)
+}
+
+func Unauthenticated(format string, args ...any) *Error {
+	return New(CodeUnauthenticated, format, args...)
+}
+
+func Forbidden(format string, args ...any) *Error {
+	return New(CodeForbidden, format, args...)
 }
 
 func Internal(cause error, format string, args ...any) *Error {

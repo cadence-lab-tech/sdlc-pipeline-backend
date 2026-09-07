@@ -13,23 +13,42 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
 )
 
-// InlineMaxBytes — предел для содержимого, лежащего прямо в blobs.content.
-// Вынос крупного в объектное хранилище запланирован фазой 4; пока превышение
-// честно отбивается, а не молча кладёт мегабайты в строку таблицы.
+// InlineMaxBytes — предел содержимого, которое лежит прямо в blobs.content,
+// когда внешнее хранилище не настроено. С хранилищем порог задаётся
+// настройкой (SDLC_BLOB_INLINE_MAX_BYTES), а этот — верхняя граница того,
+// что вообще принимается без выноса.
 const InlineMaxBytes = 4 << 20
 
+// BlobStore — внешнее хранилище крупного содержимого. Объявлен здесь, а не
+// импортирован из blobstore, чтобы store не зависел от реализации.
+type BlobStore interface {
+	Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error)
+	Get(ctx context.Context, uri string) ([]byte, error)
+}
+
+// UseBlobStore включает вынос: содержимое больше inlineMax уходит во внешнее
+// хранилище, в базе остаётся адрес. maxBytes — предел принимаемого вовсе.
+func (s *Store) UseBlobStore(bs BlobStore, inlineMax, maxBytes int) {
+	s.blobs = bs
+	s.inlineMax = inlineMax
+	s.blobMax = maxBytes
+}
+
+func (s *Store) inlineLimit() int {
+	if s.blobs == nil || s.inlineMax <= 0 {
+		return InlineMaxBytes
+	}
+	return s.inlineMax
+}
+
 // PutBlob кладёт содержимое в контент-адресуемое хранилище и возвращает sha256.
-// Повторная запись того же содержимого не создаёт дубликата — на этом держится
-// иммутабельность артефактов: новая версия ссылается на новый blob, а
-// одинаковые вложения разных задач физически хранятся один раз.
+//
+// Дедупликация бесплатна: одинаковое содержимое даёт одинаковый sha, и второй
+// INSERT ничего не делает. Крупное уходит во внешнее хранилище до записи
+// строки — иначе строка с адресом появилась бы раньше содержимого.
 func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaType string) (string, error) {
 	if len(content) == 0 {
 		return "", apperr.InvalidInput("содержимое артефакта пустое")
-	}
-	if len(content) > InlineMaxBytes {
-		return "", apperr.InvalidInput(
-			"содержимое %d байт больше предела %d: вынос в объектное хранилище появится в фазе 4",
-			len(content), InlineMaxBytes)
 	}
 	if mediaType == "" {
 		mediaType = "text/markdown"
@@ -37,11 +56,35 @@ func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaTyp
 
 	sum := sha256.Sum256(content)
 	sha := hex.EncodeToString(sum[:])
+
+	if len(content) <= s.inlineLimit() {
+		if _, err := q.Exec(ctx, `
+			INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
+			VALUES ($1, $2, $3, 'inline', $4)
+			ON CONFLICT (sha256) DO NOTHING`,
+			sha, len(content), mediaType, content); err != nil {
+			return "", translate(err)
+		}
+		return sha, nil
+	}
+
+	if s.blobs == nil {
+		return "", apperr.InvalidInput(
+			"содержимое %d байт больше предела %d, а внешнее хранилище не настроено (SDLC_BLOB_DIR)",
+			len(content), InlineMaxBytes)
+	}
+	if s.blobMax > 0 && len(content) > s.blobMax {
+		return "", apperr.InvalidInput("содержимое %d байт больше предела %d", len(content), s.blobMax)
+	}
+	uri, err := s.blobs.Put(ctx, sha, content, mediaType)
+	if err != nil {
+		return "", apperr.Internal(err, "запись во внешнее хранилище")
+	}
 	if _, err := q.Exec(ctx, `
-		INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
-		VALUES ($1, $2, $3, 'inline', $4)
+		INSERT INTO blobs (sha256, size_bytes, media_type, storage, external_uri)
+		VALUES ($1, $2, $3, 'external', $4)
 		ON CONFLICT (sha256) DO NOTHING`,
-		sha, len(content), mediaType, content); err != nil {
+		sha, len(content), mediaType, uri); err != nil {
 		return "", translate(err)
 	}
 	return sha, nil
@@ -57,8 +100,16 @@ func (s *Store) BlobContent(ctx context.Context, q Querier, sha string) ([]byte,
 	if err != nil {
 		return nil, "", notFound(err, "содержимое %s не найдено", sha)
 	}
-	if storage != "inline" {
-		return nil, "", apperr.Internal(nil, "содержимое вынесено во внешнее хранилище, чтение появится в фазе 4")
+	if storage == "inline" {
+		return content, mediaType, nil
+	}
+	if s.blobs == nil || externalURI == nil {
+		return nil, "", apperr.Internal(nil,
+			"содержимое %s вынесено во внешнее хранилище, а оно не настроено", sha)
+	}
+	content, err = s.blobs.Get(ctx, *externalURI)
+	if err != nil {
+		return nil, "", apperr.Internal(err, "чтение %s из внешнего хранилища", sha)
 	}
 	return content, mediaType, nil
 }

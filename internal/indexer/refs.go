@@ -125,3 +125,12 @@ func conclude(runs []CheckRun) string {
 	}
 	return worst
 }
+
+// Prune удаляет старые завершённые прогоны, оставляя keep последних на ветку
+// и все, на которые ссылаются базовые линии задач.
+func (ix *Indexer) Prune(ctx context.Context, keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	return ix.store.PruneIndexRuns(ctx, ix.store.DB(), keep)
+}

@@ -17,8 +17,10 @@ import (
 
 // ── проекты ─────────────────────────────────────────────────────────────────
 
+// listProjects отдаёт проекты, доступные актору: в режиме токенов — те, где
+// он участник, администратору — все.
 func (s *Server) listProjects(c *gin.Context) {
-	projects, err := s.store.ListProjects(c.Request.Context(), s.store.DB())
+	projects, err := s.auth.VisibleProjects(c.Request.Context(), identity(c))
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -38,10 +40,9 @@ func (s *Server) createProject(c *gin.Context) {
 		badRequest(c, s.log, err)
 		return
 	}
-	project, err := s.store.CreateProject(c.Request.Context(), s.store.DB(),
+	project, err := s.engine.CreateProject(c.Request.Context(), actor(c).ID,
 		postgres.CreateProjectInput{
 			Key: req.Key, Name: req.Name, Description: req.Description,
-			CreatedBy: actor(c).ID,
 		})
 	if err != nil {
 		fail(c, s.log, err)

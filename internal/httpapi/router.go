@@ -1,8 +1,9 @@
 // Package httpapi — REST-транспорт над движком цикла.
 //
 // Ручки не содержат логики: они разбирают запрос, зовут движок или хранилище и
-// сериализуют ответ. Так MCP-сервер в фазе 2 сможет встать на те же сервисы,
-// не переписывая правила (решение 0011).
+// сериализуют ответ. Так MCP-сервер встаёт на те же сервисы, не переписывая
+// правила (решение 0011). Права проверяет middleware guard по уровню участия
+// в проекте (решение 0021); правило «кому что можно» живёт в workflow.Auth.
 package httpapi
 
 import (
@@ -28,14 +29,15 @@ type Server struct {
 	// Редактирование ролей и цикла отделено от движка: движок исполняет цикл,
 	// authoring его собирает, и правила иммутабельности живут там.
 	authoring *workflow.Authoring
+	auth      *workflow.Auth
 	// nil, если MCP выключен настройкой.
 	mcp *mcp.Server
 }
 
-func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, mcpServer *mcp.Server) *Server {
+func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
 	return &Server{
 		cfg: cfg, log: log, store: store, engine: engine,
-		authoring: authoring, mcp: mcpServer,
+		authoring: authoring, auth: auth, mcp: mcpServer,
 	}
 }
 
@@ -52,93 +54,126 @@ func (s *Server) Handler() http.Handler {
 	r.GET("/healthz", s.healthz)
 	r.GET("/readyz", s.readyz)
 
-	v1 := r.Group("/v1", resolveActor(s.store, s.log, s.cfg.DefaultActor))
+	// Вебхуки провайдера: подпись вместо токена.
+	r.POST("/webhooks/github", s.githubWebhook)
+
+	viewer := s.guard(domain.MemberViewer)
+	agent := s.guard(domain.MemberAgent)
+	maintainer := s.guard(domain.MemberMaintainer)
+
+	v1 := r.Group("/v1", s.authenticate(domain.PrincipalUser))
 	{
+		// Кто я, токены. Права на выдачу проверяет сам сервис: токен себе
+		// может любой, другому — администратор проекта или системы.
+		v1.GET("/auth/me", s.me)
+		v1.GET("/auth/tokens", s.listTokens)
+		v1.POST("/auth/tokens", s.issueToken)
+		v1.DELETE("/auth/tokens/:tokenID", s.revokeToken)
+
 		v1.GET("/projects", s.listProjects)
-		v1.POST("/projects", s.createProject)
-		v1.GET("/projects/:projectKey", s.getProject)
-		v1.GET("/projects/:projectKey/workflow", s.getWorkflow)
-		v1.GET("/projects/:projectKey/tasks", s.listTasks)
-		v1.POST("/projects/:projectKey/tasks", s.createTask)
+		v1.POST("/projects", s.requireAdmin(), s.createProject)
+		v1.GET("/projects/:projectKey", viewer, s.getProject)
+		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)
+		v1.GET("/projects/:projectKey/tasks", viewer, s.listTasks)
+		v1.POST("/projects/:projectKey/tasks", maintainer, s.createTask)
+
+		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
+		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)
+		v1.DELETE("/projects/:projectKey/members/:handle", maintainer, s.removeMember)
+
+		// Перенос правил: экспорт и импорт связки, каталог репозиториев и
+		// документов (решение 0022).
+		v1.GET("/projects/:projectKey/export", viewer, s.exportBundle)
+		v1.POST("/projects/:projectKey/import", maintainer, s.importBundle)
+		v1.POST("/projects/:projectKey/repositories", maintainer, s.addRepository)
+		v1.GET("/projects/:projectKey/documents", viewer, s.listDocuments)
+		v1.POST("/projects/:projectKey/documents", maintainer, s.putDocument)
+		v1.GET("/projects/:projectKey/documents/:documentID", viewer, s.getDocument)
+		v1.GET("/projects/:projectKey/documents/:documentID/content", viewer, s.getDocument)
+		v1.DELETE("/projects/:projectKey/documents/:documentID", maintainer, s.deleteDocument)
+
+		v1.GET("/projects/:projectKey/metrics", viewer, s.metrics)
 
 		// Роли. Версия роли иммутабельна: правка инструкции — новая версия,
 		// потому что пройденные этапы ссылаются на ту, по которой работали.
-		v1.GET("/projects/:projectKey/roles", s.listRoles)
-		v1.POST("/projects/:projectKey/roles", s.createRole)
-		v1.GET("/projects/:projectKey/roles/:roleKey", s.getRole)
-		v1.PATCH("/projects/:projectKey/roles/:roleKey", s.updateRole)
-		v1.DELETE("/projects/:projectKey/roles/:roleKey", s.archiveRole)
-		v1.POST("/projects/:projectKey/roles/:roleKey/restore", s.restoreRole)
-		v1.GET("/projects/:projectKey/roles/:roleKey/versions", s.listRoleVersions)
-		v1.POST("/projects/:projectKey/roles/:roleKey/versions", s.createRoleVersion)
-		v1.GET("/projects/:projectKey/roles/:roleKey/versions/:version", s.getRoleVersion)
+		v1.GET("/projects/:projectKey/roles", viewer, s.listRoles)
+		v1.POST("/projects/:projectKey/roles", maintainer, s.createRole)
+		v1.GET("/projects/:projectKey/roles/:roleKey", viewer, s.getRole)
+		v1.PATCH("/projects/:projectKey/roles/:roleKey", maintainer, s.updateRole)
+		v1.DELETE("/projects/:projectKey/roles/:roleKey", maintainer, s.archiveRole)
+		v1.POST("/projects/:projectKey/roles/:roleKey/restore", maintainer, s.restoreRole)
+		v1.GET("/projects/:projectKey/roles/:roleKey/versions", viewer, s.listRoleVersions)
+		v1.POST("/projects/:projectKey/roles/:roleKey/versions", maintainer, s.createRoleVersion)
+		v1.GET("/projects/:projectKey/roles/:roleKey/versions/:version", viewer, s.getRoleVersion)
 
 		// Версии цикла. Редактируется только черновик; активация переключает
 		// проект на него целиком.
-		v1.GET("/projects/:projectKey/workflows", s.listWorkflows)
-		v1.POST("/projects/:projectKey/workflows", s.createWorkflow)
+		v1.GET("/projects/:projectKey/workflows", viewer, s.listWorkflows)
+		v1.POST("/projects/:projectKey/workflows", maintainer, s.createWorkflow)
 
-		v1.GET("/tasks/:taskKey", s.getTask)
-		v1.GET("/tasks/:taskKey/timeline", s.listEvents)
-		v1.PATCH("/tasks/:taskKey/scope", s.updateScope)
+		v1.GET("/tasks/:taskKey", viewer, s.getTask)
+		v1.GET("/tasks/:taskKey/timeline", viewer, s.listEvents)
+		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
 
 		// Агентская часть: те же сервисы, что у MCP-тулов. Сюда ходят CLI и
 		// CI, локальный агент — в /mcp.
-		v1.GET("/projects/:projectKey/queue", s.listQueue)
+		v1.GET("/projects/:projectKey/queue", viewer, s.listQueue)
 		// Поиск по знанию проекта: код репозиториев, артефакты задач,
 		// проектные документы. Гибридный — вектор плюс полнотекст.
-		v1.GET("/projects/:projectKey/search", s.search)
-		v1.POST("/projects/:projectKey/search", s.search)
-		v1.GET("/projects/:projectKey/index", s.indexStatus)
-		v1.GET("/tasks/:taskKey/state", s.getTaskState)
-		v1.POST("/tasks/:taskKey/claim", s.claimTask)
-		v1.POST("/tasks/:taskKey/heartbeat", s.heartbeat)
-		v1.POST("/tasks/:taskKey/release", s.releaseTask)
-		v1.GET("/tasks/:taskKey/repo-refs", s.listRepoRefs)
-		v1.POST("/tasks/:taskKey/repo-refs", s.linkRepoRef)
-		v1.GET("/tasks/:taskKey/drift", s.getDrift)
-		v1.POST("/drift-signals/:signalID/resolve", s.resolveDrift)
+		v1.GET("/projects/:projectKey/search", viewer, s.search)
+		v1.POST("/projects/:projectKey/search", viewer, s.search)
+		v1.GET("/projects/:projectKey/index", viewer, s.indexStatus)
+		v1.GET("/tasks/:taskKey/state", viewer, s.getTaskState)
+		v1.POST("/tasks/:taskKey/claim", agent, s.claimTask)
+		v1.POST("/tasks/:taskKey/heartbeat", agent, s.heartbeat)
+		v1.POST("/tasks/:taskKey/release", agent, s.releaseTask)
+		v1.GET("/tasks/:taskKey/repo-refs", viewer, s.listRepoRefs)
+		v1.POST("/tasks/:taskKey/repo-refs", agent, s.linkRepoRef)
+		v1.GET("/tasks/:taskKey/drift", viewer, s.getDrift)
+		v1.POST("/drift-signals/:signalID/resolve", agent, s.resolveDrift)
 
-		v1.GET("/tasks/:taskKey/artifacts", s.listArtifacts)
-		v1.POST("/tasks/:taskKey/artifacts", s.submitArtifact)
+		v1.GET("/tasks/:taskKey/artifacts", viewer, s.listArtifacts)
+		v1.POST("/tasks/:taskKey/artifacts", agent, s.submitArtifact)
 
-		v1.GET("/tasks/:taskKey/transitions", s.listTransitions)
-		v1.POST("/tasks/:taskKey/transitions/:transitionKey", s.executeTransition)
+		v1.GET("/tasks/:taskKey/transitions", viewer, s.listTransitions)
+		v1.POST("/tasks/:taskKey/transitions/:transitionKey", agent, s.executeTransition)
 		// Гейт закрывается отдельно от перехода: на переходе их несколько и
-		// закрывать их можно в любом порядке и разными людьми.
-		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", s.decideGate)
+		// закрывать их можно в любом порядке и разными людьми. Решение по
+		// гейту — за сопровождающим; human_approval движок дополнительно
+		// требует человека, а не агента.
+		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", maintainer, s.decideGate)
 
-		v1.GET("/workflows/:workflowID", s.getWorkflowVersion)
-		v1.DELETE("/workflows/:workflowID", s.deleteWorkflow)
-		v1.GET("/workflows/:workflowID/validation", s.validateWorkflow)
-		v1.POST("/workflows/:workflowID/activate", s.activateWorkflow)
+		v1.GET("/workflows/:workflowID", viewer, s.getWorkflowVersion)
+		v1.DELETE("/workflows/:workflowID", maintainer, s.deleteWorkflow)
+		v1.GET("/workflows/:workflowID/validation", viewer, s.validateWorkflow)
+		v1.POST("/workflows/:workflowID/activate", maintainer, s.activateWorkflow)
 
-		v1.POST("/workflows/:workflowID/statuses", s.createStatus)
+		v1.POST("/workflows/:workflowID/statuses", maintainer, s.createStatus)
 		// Порядок колонок меняется одним запросом целиком: уникальность
 		// (workflow_id, position) не переживает перестановку по одному.
-		v1.PUT("/workflows/:workflowID/statuses", s.reorderStatuses)
-		v1.PATCH("/workflows/:workflowID/statuses/:statusKey", s.updateStatus)
-		v1.DELETE("/workflows/:workflowID/statuses/:statusKey", s.deleteStatus)
-		v1.PUT("/workflows/:workflowID/statuses/:statusKey/roles", s.setStatusRoles)
+		v1.PUT("/workflows/:workflowID/statuses", maintainer, s.reorderStatuses)
+		v1.PATCH("/workflows/:workflowID/statuses/:statusKey", maintainer, s.updateStatus)
+		v1.DELETE("/workflows/:workflowID/statuses/:statusKey", maintainer, s.deleteStatus)
+		v1.PUT("/workflows/:workflowID/statuses/:statusKey/roles", maintainer, s.setStatusRoles)
 
-		v1.POST("/workflows/:workflowID/transitions", s.createTransition)
-		v1.PATCH("/workflows/:workflowID/transitions/:transitionKey", s.updateTransition)
-		v1.DELETE("/workflows/:workflowID/transitions/:transitionKey", s.deleteTransition)
-		v1.POST("/workflows/:workflowID/transitions/:transitionKey/gates", s.createGate)
-		v1.PATCH("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", s.updateGate)
-		v1.DELETE("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", s.deleteGate)
+		v1.POST("/workflows/:workflowID/transitions", maintainer, s.createTransition)
+		v1.PATCH("/workflows/:workflowID/transitions/:transitionKey", maintainer, s.updateTransition)
+		v1.DELETE("/workflows/:workflowID/transitions/:transitionKey", maintainer, s.deleteTransition)
+		v1.POST("/workflows/:workflowID/transitions/:transitionKey/gates", maintainer, s.createGate)
+		v1.PATCH("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", maintainer, s.updateGate)
+		v1.DELETE("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", maintainer, s.deleteGate)
 
-		v1.GET("/artifacts/:artifactID/content", s.getArtifactContent)
-		v1.POST("/artifacts/:artifactID/approve", s.approveArtifact)
+		v1.GET("/artifacts/:artifactID/content", viewer, s.getArtifactContent)
+		v1.POST("/artifacts/:artifactID/approve", maintainer, s.approveArtifact)
 	}
 
 	// MCP-сервер живёт в том же процессе и на тех же сервисах: REST и MCP —
 	// два транспорта над одним ядром (решение 0011). Привязка к проекту — в
 	// пути, поэтому агент физически не может обратиться к чужому проекту.
+	// Уровень прав каждый тул проверяет сам: у них он разный.
 	if s.mcp != nil {
 		handler := s.mcp.Handler()
-		group := r.Group("/mcp/projects/:projectKey",
-			resolveActorAs(s.store, s.log, s.cfg.DefaultActor, domain.PrincipalAgent))
+		group := r.Group("/mcp/projects/:projectKey", s.authenticate(domain.PrincipalAgent))
 		group.Any("", s.serveMCP(handler))
 		group.Any("/*rest", s.serveMCP(handler))
 	}
@@ -151,7 +186,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) serveMCP(h http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := mcp.WithProject(c.Request.Context(), c.Param("projectKey"))
-		ctx = mcp.WithActor(ctx, actor(c))
+		ctx = mcp.WithIdentity(ctx, identity(c))
 		h.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
 	}
 }

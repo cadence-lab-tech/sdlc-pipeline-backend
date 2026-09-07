@@ -70,9 +70,32 @@ type Config struct {
 	// StrictGates=true: такой гейт валит переход. Значение для продакшена.
 	StrictGates bool
 
-	// Аутентификации нет (решение 0010): актор приезжает заголовком
-	// X-SDLC-Actor, при его отсутствии подставляется DefaultActor.
+	// Аутентификация (решение 0021). header — актор приезжает заголовком
+	// X-SDLC-Actor, права не проверяются: режим отладки цикла. token — только
+	// предъявленный токен, права по участию в проекте: значение для продакшена.
+	AuthMode string
+	// Первый администратор: заводится из окружения, потому что в пустой базе
+	// некому выдать первый токен.
+	AdminHandle string
+	AdminToken  string
+	// Актор по умолчанию в режиме header, если заголовка нет.
 	DefaultActor string
+
+	// Вынос крупного содержимого из базы. Пустой BlobDir — всё лежит inline,
+	// а содержимое больше InlineMaxBytes отбивается.
+	BlobDir            string
+	BlobInlineMaxBytes int
+	BlobMaxBytes       int
+
+	// Вебхуки GitHub: без секрета ручка выключена — принимать неподписанные
+	// события значит позволить кому угодно ставить прогоны в очередь.
+	GitHubWebhookSecret string
+	// Как часто воркер смотрит в очередь прогонов между опросами голов веток:
+	// вебхук кладёт коммит в очередь, и ждать полного интервала незачем.
+	IndexPollInterval time.Duration
+	// Сколько завершённых прогонов хранить на ветку; на прогоны, на которые
+	// ссылаются базовые линии задач, вычистка не распространяется.
+	IndexRetainRuns int
 
 	LogLevel string
 	LogJSON  bool
@@ -81,34 +104,43 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:           env("SDLC_HTTP_ADDR", ":8080"),
-		ShutdownTimeout:    15 * time.Second,
-		RequestTimeout:     30 * time.Second,
-		DatabaseURL:        env("SDLC_DATABASE_URL", ""),
-		MaxConns:           10,
-		ConnectTimeout:     30 * time.Second,
-		AutoMigrate:        true,
-		StrictGates:        false,
-		LeaseTTL:           30 * time.Minute,
-		HeartbeatInterval:  5 * time.Minute,
-		LeaseSweepInterval: time.Minute,
-		MCPEnabled:         true,
-		GitHubAPIURL:       env("SDLC_GITHUB_API_URL", "https://api.github.com"),
-		GitHubToken:        env("SDLC_GITHUB_TOKEN", ""),
-		IndexEnabled:       true,
-		IndexInterval:      5 * time.Minute,
-		IndexStuckAfter:    30 * time.Minute,
-		IndexMaxFileBytes:  512 << 10,
-		IndexMaxFiles:      20000,
-		ChunkMaxChars:      1600,
-		EmbeddingProvider:  env("SDLC_EMBEDDINGS_PROVIDER", ""),
-		EmbeddingModel:     env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
-		EmbeddingBatch:     96,
-		VoyageAPIURL:       env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
-		VoyageAPIKey:       env("SDLC_VOYAGE_API_KEY", ""),
-		DefaultActor:       env("SDLC_DEFAULT_ACTOR", "anonymous"),
-		LogLevel:           env("SDLC_LOG_LEVEL", "info"),
-		Env:                env("SDLC_ENV", "development"),
+		HTTPAddr:            env("SDLC_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:     15 * time.Second,
+		RequestTimeout:      30 * time.Second,
+		DatabaseURL:         env("SDLC_DATABASE_URL", ""),
+		MaxConns:            10,
+		ConnectTimeout:      30 * time.Second,
+		AutoMigrate:         true,
+		StrictGates:         false,
+		LeaseTTL:            30 * time.Minute,
+		HeartbeatInterval:   5 * time.Minute,
+		LeaseSweepInterval:  time.Minute,
+		MCPEnabled:          true,
+		GitHubAPIURL:        env("SDLC_GITHUB_API_URL", "https://api.github.com"),
+		GitHubToken:         env("SDLC_GITHUB_TOKEN", ""),
+		IndexEnabled:        true,
+		IndexInterval:       5 * time.Minute,
+		IndexStuckAfter:     30 * time.Minute,
+		IndexMaxFileBytes:   512 << 10,
+		IndexMaxFiles:       20000,
+		ChunkMaxChars:       1600,
+		EmbeddingProvider:   env("SDLC_EMBEDDINGS_PROVIDER", ""),
+		EmbeddingModel:      env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
+		EmbeddingBatch:      96,
+		VoyageAPIURL:        env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
+		VoyageAPIKey:        env("SDLC_VOYAGE_API_KEY", ""),
+		AuthMode:            env("SDLC_AUTH_MODE", ""),
+		AdminHandle:         env("SDLC_ADMIN_HANDLE", "admin"),
+		AdminToken:          env("SDLC_ADMIN_TOKEN", ""),
+		DefaultActor:        env("SDLC_DEFAULT_ACTOR", "anonymous"),
+		BlobDir:             env("SDLC_BLOB_DIR", ""),
+		BlobInlineMaxBytes:  256 << 10,
+		BlobMaxBytes:        64 << 20,
+		GitHubWebhookSecret: env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
+		IndexPollInterval:   15 * time.Second,
+		IndexRetainRuns:     5,
+		LogLevel:            env("SDLC_LOG_LEVEL", "info"),
+		Env:                 env("SDLC_ENV", "development"),
 	}
 
 	if c.DatabaseURL == "" {
@@ -176,6 +208,39 @@ func Load() (Config, error) {
 	case "hash", "none":
 	default:
 		return c, fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER: %q — не voyage, hash или none", c.EmbeddingProvider)
+	}
+
+	// Режим аутентификации по умолчанию выводится из окружения: локальная
+	// отладка идёт по заголовку, всё остальное — по токенам. Забыть включить
+	// токены на проде — типичная причина открытого наружу сервиса.
+	if c.AuthMode == "" {
+		if c.Env == "development" {
+			c.AuthMode = "header"
+		} else {
+			c.AuthMode = "token"
+		}
+	}
+	switch c.AuthMode {
+	case "header", "token":
+	default:
+		return c, fmt.Errorf("SDLC_AUTH_MODE: %q — не header или token", c.AuthMode)
+	}
+	if c.AuthMode == "token" && c.AdminToken == "" {
+		if c.Env == "development" {
+			fmt.Fprintln(os.Stderr, "SDLC_AUTH_MODE=token без SDLC_ADMIN_TOKEN: первого администратора завести некому")
+		}
+	}
+	if c.BlobInlineMaxBytes, err = envInt("SDLC_BLOB_INLINE_MAX_BYTES", c.BlobInlineMaxBytes); err != nil {
+		return c, err
+	}
+	if c.BlobMaxBytes, err = envInt("SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes); err != nil {
+		return c, err
+	}
+	if c.IndexPollInterval, err = envDuration("SDLC_INDEX_POLL_INTERVAL", c.IndexPollInterval); err != nil {
+		return c, err
+	}
+	if c.IndexRetainRuns, err = envInt("SDLC_INDEX_RETAIN_RUNS", c.IndexRetainRuns); err != nil {
+		return c, err
 	}
 
 	if c.LogJSON, err = envBool("SDLC_LOG_JSON", c.Env != "development"); err != nil {
