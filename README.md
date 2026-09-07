@@ -18,13 +18,13 @@ MCP-сервер для локальных агентов, воркеры инд
 
 ## Стек
 
-Go 1.23, Gin, pgx (без ORM), PostgreSQL 17 + pgvector, эмбеддинги Voyage
-(`voyage-code-3`, 1024).
+Go 1.25, Gin, pgx (без ORM), PostgreSQL 17 + pgvector, официальный MCP SDK,
+эмбеддинги Voyage (`voyage-code-3`, 1024).
 
 ## Запуск
 
 ```bash
-make up      # база + приложение в контейнерах
+make up      # база, приложение и воркер в контейнерах
 make logs
 make reset   # снести вместе с данными
 ```
@@ -41,7 +41,15 @@ make reset   # снести вместе с данными
 ```bash
 export SDLC_DATABASE_URL='postgres://sdlc:sdlc@localhost:55432/sdlc?sslmode=disable'
 export SDLC_SEED=default_workflow
-make build && ./bin/api
+make build && ./bin/api      # рядом собираются bin/worker и bin/sdlc
+```
+
+Сквозной проход задачи по циклу глазами агентов — `dev/e2e.sh`: захват,
+аренда, сдача артефактов, перепроверка ревьюером с возвратом на доработку,
+апрувы и переходы до терминального статуса.
+
+```bash
+make reset up && dev/e2e.sh
 ```
 
 ## API
@@ -77,6 +85,13 @@ make build && ./bin/api
 | `POST` | `/v1/tasks/{key}/transitions/{transition}` | выполнить переход |
 | `POST` | `.../transitions/{transition}/gates/{gate}/decision` | решение по гейту |
 | `GET`/`POST` | `/v1/artifacts/{id}/content`, `/approve` | содержимое и апрув артефакта |
+| `GET` | `/v1/projects/{key}/queue` | очередь работы: незакрытые прогоны с ролью и состоянием аренды |
+| `GET` | `/v1/tasks/{key}/state` | задача глазами агента: роль, вход этапа, дрейф, гейты впереди |
+| `POST` | `/v1/tasks/{key}/claim`, `/heartbeat`, `/release` | аренда задачи |
+| `GET`/`POST` | `/v1/tasks/{key}/repo-refs` | привязанные PR, ветки и коммиты |
+| `GET` | `/v1/tasks/{key}/drift` | базовые линии и открытые расхождения |
+| `POST` | `/v1/drift-signals/{id}/resolve` | закрыть сигнал разбором или отклонить |
+| `POST` | `/mcp/projects/{key}` | MCP-сервер для локальных агентов (streamable HTTP) |
 
 Заблокированный гейтами переход — это `409` с разбором по каждому гейту: что
 именно не сдано и что с этим делать.
@@ -85,29 +100,59 @@ make build && ./bin/api
 редактируется только черновик цикла ([решение 0016](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0016-workflow-versions-immutable.md)).
 Попытка изменить активный цикл — `409`.
 
+## Агенты
+
+Локальный агент подключается к MCP-серверу, привязанному к проекту путём:
+
+```bash
+claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
+```
+
+Инструкция роли, результаты предыдущих этапов, область репозиториев и требования
+гейтов приезжают в ответе на `sdlc_claim_task` — синхронизировать в локальный
+репозиторий нечего. Полный контракт — в [MCP_CONTRACT.md](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md).
+
+Задача выдаётся под аренду с heartbeat: агент локальный и может умереть, не
+отпустив её. Протухшие аренды возвращает в общий доступ `cmd/worker`.
+
+Те же операции для CI и не-MCP клиентов даёт CLI:
+
+```bash
+export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:analyst-bot
+./bin/sdlc queue --role analyst
+./bin/sdlc claim SDLC-1
+./bin/sdlc submit SDLC-1 --kind analysis.brief --title "Разбор" --file brief.md
+./bin/sdlc gates SDLC-1 --transition analysis_done
+./bin/sdlc transition SDLC-1 --to analysis_done --summary "Требования разобраны"
+```
+
 ## Структура
 
 ```
-cmd/api/            HTTP-сервер; в фазе 2 сюда встанет MCP
+cmd/api/            HTTP-сервер: REST и MCP на одних сервисах
+cmd/worker/         фоновые задания: протухшие аренды
+cmd/sdlc/           CLI для агентов и CI
 internal/
   config/           настройки из окружения
   apperr/           ошибки домена с кодом, общим для REST и MCP
   domain/           сущности схемы в Go
-  workflow/         движок: переходы, прогон гейтов, артефакты, область задачи;
-                    отдельно authoring — сборка ролей и версий цикла
+  workflow/         движок: переходы, прогон гейтов, артефакты, область задачи,
+                    аренды и перепроверка; отдельно authoring — роли и цикл
   store/postgres/   запросы, миграции, контент-адресуемые blobs
+  mcp/              MCP-сервер поверх тех же сервисов
   httpapi/          роутер Gin, middleware, хендлеры
 migrations/         схема и сиды, встроены в бинарник через embed.go
-dev/                docker-compose для локального запуска
+dev/                docker-compose и сквозной сценарий e2e.sh
 docs/               референсы реализации
 ```
 
 ## Статус
 
-Фаза 1 на бэкенде закрыта: проекты, задачи, артефакты, движок переходов с
+Фазы 1 и 2 на бэкенде закрыты: проекты, задачи, артефакты, движок переходов с
 гейтами `artifacts_required`, `checklist`, `human_approval`, `repo_ref_required`,
-`repo_scope`, `drift_clear`, редактор ролей и цикла.
+`repo_scope`, `drift_clear`, `agent_review`, `schema_validation`, редактор ролей
+и цикла, MCP-сервер, аренды с heartbeat, воркер и CLI.
 
-Дальше: MCP-сервер и аренды (фаза 2), индексация репозиториев и детектор дрейфа
-(фаза 3). Гейты `agent_review`, `schema_validation` и `external_check` до тех
-пор держатся флагом `SDLC_STRICT_GATES`.
+Дальше: чтение GitHub, индексация репозиториев, семантический поиск и детектор
+дрейфа (фаза 3). Гейт `external_check` до тех пор держится флагом
+`SDLC_STRICT_GATES`.

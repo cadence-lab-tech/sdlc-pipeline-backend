@@ -1,7 +1,8 @@
 # dev — локальное окружение
 
 Здесь лежит всё, что нужно, чтобы поднять бэкенд целиком на своей машине:
-Postgres с pgvector, само приложение и инструменты для разглядывания базы.
+Postgres с pgvector, приложение, воркер фоновых заданий и инструменты для
+разглядывания базы.
 
 ## Запуск
 
@@ -21,6 +22,7 @@ docker compose -f dev/docker-compose.yml up -d --build
 | Что | Адрес |
 |---|---|
 | API | http://localhost:8088 |
+| MCP для агентов | http://localhost:8088/mcp/projects/SDLC |
 | Postgres | `localhost:55432`, база/пользователь/пароль — `sdlc` |
 | Adminer | http://localhost:8089 (только с `--profile tools`) |
 
@@ -45,6 +47,20 @@ docker compose -f dev/docker-compose.yml up -d --build
 SDLC_SEED=default_workflow,drift_demo make reset up
 ```
 
+## Сквозной сценарий
+
+`e2e.sh` прогоняет задачу по всему циклу глазами агентов: захват с арендой,
+heartbeat, отказ второй машине на занятой задаче, сдача артефактов,
+перепроверка ревьюером с возвратом на доработку и повторным ревью, апрувы,
+проверка содержимого вердикта схемой и переходы до терминального статуса.
+
+```bash
+make reset up && dev/e2e.sh
+```
+
+Скрипту нужна чистая база: демо-задача `SDLC-1` должна стоять на статусе `new`.
+Он же — самый быстрый способ увидеть, что именно происходит в цикле.
+
 ## Первые запросы
 
 ```bash
@@ -58,6 +74,20 @@ curl -X POST localhost:8088/v1/tasks/SDLC-1/transitions/start \
 
 # посмотреть, что держит следующий переход
 curl -s localhost:8088/v1/tasks/SDLC-1/transitions | jq '.transitions[] | select(.key=="analysis_done")'
+
+# очередь работы: что можно забрать и кем
+curl -s localhost:8088/v1/projects/SDLC/queue | jq '.queue[] | {task: .task.key, role: .role_key, claimable}'
+
+# забрать задачу агентом и получить контекст этапа
+curl -s -X POST localhost:8088/v1/tasks/SDLC-1/claim \
+     -H 'X-SDLC-Actor: agent:analyst-bot' -H 'Content-Type: application/json' \
+     -d '{"session_ref":"macbook/claude-code/8f21"}'
+```
+
+Подключить локального агента:
+
+```bash
+claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 ```
 
 Заголовок `X-SDLC-Actor` — это действующее лицо. Аутентификации пока нет
@@ -74,11 +104,30 @@ curl -s localhost:8088/v1/tasks/SDLC-1/transitions | jq '.transitions[] | select
 | `SDLC_SEED` | пусто | сиды через запятую, только на пустой базе |
 | `SDLC_STRICT_GATES` | `false` | см. ниже |
 | `SDLC_DEFAULT_ACTOR` | `anonymous` | актор без заголовка |
+| `SDLC_MCP_ENABLED` | `true` | поднимать ли MCP-сервер в этом же процессе |
+| `SDLC_LEASE_TTL` | `30m` | сколько живёт аренда без heartbeat |
+| `SDLC_HEARTBEAT_INTERVAL` | `5m` | как часто агент обязан её продлевать |
+| `SDLC_LEASE_SWEEP_INTERVAL` | `1m` | как часто воркер ищет протухшие аренды |
 | `SDLC_LOG_LEVEL` | `info` | `debug`, `warn`, `error` |
 | `SDLC_ENV` | `development` | не-development включает release-режим Gin и JSON-логи |
 
-**`SDLC_STRICT_GATES`** решает, что делать с гейтом типа, который ещё не
-реализован (`agent_review`, `schema_validation`, `external_check` приезжают в
-фазах 2-3). `false` — такой гейт отдаёт `skipped` и переход пропускает, и цикл
-можно прогнать насквозь. `true` — валит переход. В продакшене значение
+`SDLC_HEARTBEAT_INTERVAL` обязан быть меньше `SDLC_LEASE_TTL` — иначе аренда
+протухнет раньше первого продления, и сервис откажется стартовать. Обе величины
+задаются и приложению, и воркеру: он решает, что аренда истекла, по тем же
+правилам, по которым приложение её выдаёт.
+
+**`SDLC_STRICT_GATES`** решает, что делать с гейтом типа, который движок ещё не
+умеет исполнять — сейчас это только `external_check`, он приезжает с чтением
+GitHub в фазе 3. `false` — такой гейт отдаёт `skipped` и переход пропускает, и
+цикл можно прогнать насквозь. `true` — валит переход. В продакшене значение
 обязано быть `true`, иначе задача проезжает мимо непроверенных условий.
+
+## Воркер
+
+Отдельный процесс, а не горутина в приложении: реплик приложения может быть
+несколько, и каждая гоняла бы свой проход по одним и тем же арендам. Схему
+воркер не катит — она уже накачена приложением.
+
+```bash
+docker compose -f dev/docker-compose.yml logs -f worker
+```

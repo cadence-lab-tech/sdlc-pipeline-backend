@@ -223,7 +223,7 @@ func (s *Server) executeTransition(c *gin.Context) {
 	}
 
 	if res.Blocked {
-		fail(c, s.log, apperr.New(apperr.CodeGateBlocked,
+		fail(c, s.log, apperr.New(apperr.CodeGatesNotSatisfied,
 			"переход %q заблокирован гейтами", c.Param("transitionKey")).
 			WithDetails(gin.H{"gates": res.Gates}))
 		return
@@ -337,23 +337,17 @@ type submitArtifactRequest struct {
 	Meta         json.RawMessage `json:"meta"`
 }
 
+// submitArtifact принимает и форму из UI, и расширенную форму агента со
+// ссылками и зоной в коде: ручка одна, потому что сдача результата одна.
 func (s *Server) submitArtifact(c *gin.Context) {
-	var req submitArtifactRequest
+	var req agentArtifactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
 		return
 	}
 
-	artifact, err := s.engine.SubmitArtifact(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
-		workflow.SubmitArtifactInput{
-			Kind:         req.Kind,
-			Title:        req.Title,
-			Format:       req.Format,
-			Content:      []byte(req.Content),
-			MediaType:    req.MediaType,
-			SupersedesID: req.SupersedesID,
-			Meta:         req.Meta,
-		})
+	artifact, err := s.engine.SubmitArtifact(c.Request.Context(), c.Param("taskKey"),
+		actor(c).ID, agentSubmitInput(req))
 	if err != nil {
 		fail(c, s.log, err)
 		return

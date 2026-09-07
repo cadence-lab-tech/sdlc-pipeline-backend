@@ -74,13 +74,20 @@ func recovery(log *slog.Logger) gin.HandlerFunc {
 // принципала по умолчанию — иначе локальную отладку пришлось бы вести с
 // обязательным заголовком в каждом curl.
 func resolveActor(store *postgres.Store, log *slog.Logger, defaultActor string) gin.HandlerFunc {
+	return resolveActorAs(store, log, defaultActor, domain.PrincipalUser)
+}
+
+// resolveActorAs отличается только видом принципала по умолчанию: в REST за
+// заголовком стоит человек, в MCP — агент. Явный префикс в заголовке
+// перекрывает и то, и другое.
+func resolveActorAs(store *postgres.Store, log *slog.Logger, defaultActor string, defaultKind domain.PrincipalKind) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := strings.TrimSpace(c.GetHeader(ActorHeader))
 		if raw == "" {
 			raw = defaultActor
 		}
 
-		kind := domain.PrincipalUser
+		kind := defaultKind
 		handle := raw
 		if before, after, found := strings.Cut(raw, ":"); found {
 			switch domain.PrincipalKind(before) {

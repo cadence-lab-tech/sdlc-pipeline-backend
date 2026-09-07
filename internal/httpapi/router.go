@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
 )
@@ -26,10 +28,15 @@ type Server struct {
 	// Редактирование ролей и цикла отделено от движка: движок исполняет цикл,
 	// authoring его собирает, и правила иммутабельности живут там.
 	authoring *workflow.Authoring
+	// nil, если MCP выключен настройкой.
+	mcp *mcp.Server
 }
 
-func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring) *Server {
-	return &Server{cfg: cfg, log: log, store: store, engine: engine, authoring: authoring}
+func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, mcpServer *mcp.Server) *Server {
+	return &Server{
+		cfg: cfg, log: log, store: store, engine: engine,
+		authoring: authoring, mcp: mcpServer,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -75,6 +82,18 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/tasks/:taskKey/timeline", s.listEvents)
 		v1.PATCH("/tasks/:taskKey/scope", s.updateScope)
 
+		// Агентская часть: те же сервисы, что у MCP-тулов. Сюда ходят CLI и
+		// CI, локальный агент — в /mcp.
+		v1.GET("/projects/:projectKey/queue", s.listQueue)
+		v1.GET("/tasks/:taskKey/state", s.getTaskState)
+		v1.POST("/tasks/:taskKey/claim", s.claimTask)
+		v1.POST("/tasks/:taskKey/heartbeat", s.heartbeat)
+		v1.POST("/tasks/:taskKey/release", s.releaseTask)
+		v1.GET("/tasks/:taskKey/repo-refs", s.listRepoRefs)
+		v1.POST("/tasks/:taskKey/repo-refs", s.linkRepoRef)
+		v1.GET("/tasks/:taskKey/drift", s.getDrift)
+		v1.POST("/drift-signals/:signalID/resolve", s.resolveDrift)
+
 		v1.GET("/tasks/:taskKey/artifacts", s.listArtifacts)
 		v1.POST("/tasks/:taskKey/artifacts", s.submitArtifact)
 
@@ -108,7 +127,28 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/artifacts/:artifactID/approve", s.approveArtifact)
 	}
 
+	// MCP-сервер живёт в том же процессе и на тех же сервисах: REST и MCP —
+	// два транспорта над одним ядром (решение 0011). Привязка к проекту — в
+	// пути, поэтому агент физически не может обратиться к чужому проекту.
+	if s.mcp != nil {
+		handler := s.mcp.Handler()
+		group := r.Group("/mcp/projects/:projectKey",
+			resolveActorAs(s.store, s.log, s.cfg.DefaultActor, domain.PrincipalAgent))
+		group.Any("", s.serveMCP(handler))
+		group.Any("/*rest", s.serveMCP(handler))
+	}
+
 	return r
+}
+
+// serveMCP кладёт проект и актора в контекст запроса: тулы читают их оттуда,
+// потому что MCP-сессия stateless и своего состояния не держит.
+func (s *Server) serveMCP(h http.Handler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := mcp.WithProject(c.Request.Context(), c.Param("projectKey"))
+		ctx = mcp.WithActor(ctx, actor(c))
+		h.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
+	}
 }
 
 func (s *Server) healthz(c *gin.Context) {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,18 +19,44 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 )
 
+// Options — рамки работы движка, приезжающие из конфигурации.
+type Options struct {
+	// StrictGates=false: гейт нереализованного типа отдаёт skipped и переход
+	// пропускает. Так цикл можно прогонять целиком, пока фаза 3 не написана.
+	// StrictGates=true: такой гейт валит переход — значение для продакшена.
+	StrictGates bool
+	// Сколько живёт аренда без heartbeat и как часто его слать. Агент
+	// локальный и может умереть, не отпустив задачу: без этой пары задача
+	// осталась бы занятой навсегда.
+	LeaseTTL          time.Duration
+	HeartbeatInterval time.Duration
+}
+
+const (
+	defaultLeaseTTL          = 30 * time.Minute
+	defaultHeartbeatInterval = 5 * time.Minute
+)
+
 type Engine struct {
-	store *postgres.Store
-	log   *slog.Logger
-	// strict=false: гейт нереализованного типа отдаёт skipped и переход
-	// пропускает. Так цикл можно прогонять целиком, пока фазы 2-3 не написаны.
-	// strict=true: такой гейт валит переход — значение для продакшена.
+	store      *postgres.Store
+	log        *slog.Logger
 	strict     bool
+	leaseTTL   time.Duration
+	heartbeat  time.Duration
 	evaluators map[string]evaluator
 }
 
-func NewEngine(store *postgres.Store, log *slog.Logger, strict bool) *Engine {
-	e := &Engine{store: store, log: log, strict: strict}
+func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {
+	if opts.LeaseTTL <= 0 {
+		opts.LeaseTTL = defaultLeaseTTL
+	}
+	if opts.HeartbeatInterval <= 0 || opts.HeartbeatInterval >= opts.LeaseTTL {
+		opts.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	e := &Engine{
+		store: store, log: log, strict: opts.StrictGates,
+		leaseTTL: opts.LeaseTTL, heartbeat: opts.HeartbeatInterval,
+	}
 	e.registerEvaluators()
 	return e
 }
@@ -152,6 +179,14 @@ func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, act
 
 		if !allowed {
 			res.Blocked = true
+			// Асинхронные гейты запускаются здесь, а не в Preview: агент
+			// попросил перейти — значит свою работу считает законченной, и
+			// самое время звать проверяющего. Preview обязан оставаться
+			// чистой проверкой без побочных эффектов.
+			if err := e.spawnReviews(ctx, tx, task, run, transition, outcomes,
+				stageArtifacts, actor); err != nil {
+				return err
+			}
 			return e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventGateFailed, actor,
 				map[string]any{"transition": transition.Key, "gates": outcomes})
 		}

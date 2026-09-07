@@ -20,9 +20,14 @@ type SubmitArtifactInput struct {
 	MediaType    string
 	SupersedesID *uuid.UUID
 	Meta         json.RawMessage
+	Links        []postgres.ArtifactLink
+	CodeRefs     []postgres.ArtifactCodeRef
+	// Прогон, к которому крепится результат. Пусто — движок определит его
+	// сам: прогон перепроверки, если агент держит его, иначе текущий этап.
+	StageRunID *uuid.UUID
 }
 
-// SubmitArtifact прикрепляет результат работы к текущей попытке этапа.
+// SubmitArtifact прикрепляет результат работы к попытке этапа.
 //
 // Привязка именно к stage_run, а не к задаче, — то, на чём стоит гейт
 // artifacts_required: после отката задача заходит на статус заново, и
@@ -35,12 +40,25 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 		if err != nil {
 			return err
 		}
-		run, err := e.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
+		run, err := e.workRun(ctx, tx, task, actor, in.StageRunID)
 		if err != nil {
 			return err
 		}
 		if run.FinishedAt != nil {
 			return apperr.Conflict("этап уже завершён, артефакт прикреплять некуда")
+		}
+		if err := e.checkContract(ctx, tx, run, in.Kind); err != nil {
+			return err
+		}
+		// Повторная сдача того же kind — это новая версия, а не второй
+		// «актуальный» артефакт: иначе гейты и контекст следующего этапа
+		// видели бы две версии одного документа и выбирали бы случайную.
+		if in.SupersedesID == nil {
+			prev, err := e.store.LatestArtifactOfKind(ctx, tx, task.ID, in.Kind)
+			if err != nil {
+				return err
+			}
+			in.SupersedesID = prev
 		}
 
 		out, err = e.store.CreateArtifact(ctx, tx, postgres.CreateArtifactInput{
@@ -54,6 +72,8 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 			SupersedesID: in.SupersedesID,
 			Status:       domain.ArtifactSubmitted,
 			Meta:         in.Meta,
+			Links:        in.Links,
+			CodeRefs:     in.CodeRefs,
 			ProducedBy:   actor,
 		})
 		if err != nil {
@@ -66,16 +86,101 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 			return err
 		}
 
-		return e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventArtifactSubmitted, actor,
+		if err := e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventArtifactSubmitted, actor,
 			map[string]any{
 				"artifact_id": out.ID.String(),
 				"kind":        out.Kind,
 				"title":       out.Title,
 				"version":     out.Version,
-			})
+				"stage_kind":  run.Kind,
+			}); err != nil {
+			return err
+		}
+
+		if run.Kind == domain.StageKindReview {
+			// Сдача вердикта и есть завершение работы ревьюера: собственного
+			// перехода у него нет.
+			return e.completeReview(ctx, tx, task, run, out, actor)
+		}
+		// Исполнитель сдал новую версию результата — прежний вердикт вынесен
+		// о том, чего уже нет, и перепроверку придётся пройти заново.
+		return e.resetReview(ctx, tx, run)
 	})
 
 	return out, err
+}
+
+// workRun определяет, в чей прогон агент сдаёт результат.
+//
+// Ревьюер и исполнитель работают на одном статусе, но в разных прогонах;
+// перепутать их значит закрыть гейт artifacts_required вердиктом ревью или
+// наоборот.
+func (e *Engine) workRun(ctx context.Context, q postgres.Querier, task domain.Task, actor uuid.UUID, explicit *uuid.UUID) (domain.StageRun, error) {
+	if explicit != nil {
+		run, err := e.store.GetStageRun(ctx, q, *explicit)
+		if err != nil {
+			return run, err
+		}
+		if run.TaskID != task.ID {
+			return run, apperr.InvalidInput("прогон принадлежит другой задаче")
+		}
+		return run, nil
+	}
+
+	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
+	if err != nil {
+		return run, err
+	}
+	reviews, err := e.store.OpenReviewRuns(ctx, q, run.ID)
+	if err != nil {
+		return run, err
+	}
+	for _, r := range reviews {
+		if r.ClaimedBy != nil && *r.ClaimedBy == actor {
+			return r, nil
+		}
+	}
+	return run, nil
+}
+
+// checkContract не пускает артефакт, которого нет в output_contract роли.
+//
+// Это то место, где контракт роли перестаёт быть просто текстом: гейт
+// artifacts_required проверяет наличие, а здесь проверяется, что роль вообще
+// имеет право сдавать такой kind.
+func (e *Engine) checkContract(ctx context.Context, q postgres.Querier, run domain.StageRun, kind string) error {
+	if run.RoleVersionID == nil {
+		return nil
+	}
+	rv, err := e.store.GetRoleVersion(ctx, q, *run.RoleVersionID)
+	if err != nil {
+		return err
+	}
+
+	var contract []struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(rv.OutputContract, &contract); err != nil || len(contract) == 0 {
+		// Роль без объявленного контракта ничего не ограничивает: описать
+		// контракт — решение проекта, а не требование движка.
+		return nil
+	}
+	allowed := make([]string, 0, len(contract))
+	for _, c := range contract {
+		if c.Kind == kind {
+			return nil
+		}
+		allowed = append(allowed, c.Kind)
+	}
+	// Описание проблемы сдаётся при откате назад и в контракт роли не входит:
+	// это не результат этапа, а объяснение, почему его не будет.
+	if isProblemReport(kind) {
+		return nil
+	}
+
+	return apperr.New(apperr.CodeContractViolation,
+		"артефакт %q не входит в контракт роли", kind).
+		WithDetails(map[string]any{"allowed_kinds": allowed})
 }
 
 type UpdateScopeInput struct {

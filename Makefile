@@ -1,12 +1,15 @@
 # Команды разработки. Всё, что касается контейнеров, живёт в dev/.
 
-BIN     := bin/api
+BIN     := bin
 VERSION ?= dev
 
 .PHONY: build run test lint tidy up down logs psql reset image
 
+# Три бинарника: сервис, фоновые задания и CLI для CI.
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/api
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/api ./cmd/api
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/worker ./cmd/worker
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/sdlc ./cmd/sdlc
 
 test:
 	go test ./...

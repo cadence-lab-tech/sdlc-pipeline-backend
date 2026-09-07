@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -125,7 +126,7 @@ func TestValidateUnimplementedGateDependsOnStrict(t *testing.T) {
 	newSt.Roles = []domain.StatusRole{{IsPrimary: true}}
 	done.Roles = []domain.StatusRole{{IsPrimary: true}}
 
-	gate := domain.Gate{Key: "review", Type: domain.GateAgentReview, Blocking: true}
+	gate := domain.Gate{Key: "ci", Type: domain.GateExternalCheck, Blocking: true}
 	only := func(string) bool { return false }
 	cycle := wf([]domain.Status{newSt, done}, transition("finish", &newSt, done, gate))
 
@@ -208,5 +209,46 @@ func TestValidTransitionKind(t *testing.T) {
 	}
 	if validTransitionKind("approve") {
 		t.Error("неизвестный вид перехода не должен проходить")
+	}
+}
+
+// Перепроверку не может делать тот, кто делал работу: иначе гейт agent_review
+// превращается в «агент проверяет сам себя». Поймать это можно только на цикле
+// целиком — гейт знает ключ роли, но не знает исполнителя статуса.
+func TestValidateReviewerRole(t *testing.T) {
+	analysis := status("analysis", true, false)
+	arch := status("architecture", false, true)
+	analysis.Roles = []domain.StatusRole{{IsPrimary: true, RoleKey: "analyst"}}
+	arch.Roles = []domain.StatusRole{{IsPrimary: true, RoleKey: "architect"}}
+
+	review := func(config string) domain.Workflow {
+		g := domain.Gate{Key: "peer_review", Type: domain.GateAgentReview,
+			Blocking: true, Config: json.RawMessage(config)}
+		return wf([]domain.Status{analysis, arch}, transition("done", &analysis, arch, g))
+	}
+
+	cases := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{"чужая роль проверяет", `{"reviewer_role_key":"reviewer"}`, ""},
+		{"роль не указана", `{}`, "review_role_missing"},
+		{"исполнитель проверяет сам себя", `{"reviewer_role_key":"analyst"}`, "review_role_is_executor"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := validateWorkflow(review(tc.config), allImplemented, false)
+			if tc.want == "" {
+				if !v.Valid {
+					t.Fatalf("цикл собран верно: %v", v.Problems)
+				}
+				return
+			}
+			if _, ok := codes(v.Problems)[tc.want]; !ok {
+				t.Fatalf("не найдена проблема %q: %v", tc.want, v.Problems)
+			}
+		})
 	}
 }

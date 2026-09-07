@@ -21,9 +21,14 @@ func (s *Store) AppendEvent(ctx context.Context, q Querier, taskID uuid.UUID, st
 		}
 		body = b
 	}
+	// clock_timestamp(), а не now(): now() — это время начала транзакции, и
+	// события, записанные в одной транзакции (сдача артефакта, закрытие
+	// перепроверки, переход), получили бы одинаковую метку и легли бы в
+	// ленту в случайном порядке.
 	_, err := q.Exec(ctx, `
-		INSERT INTO task_events (task_id, stage_run_id, type, actor_id, payload)
-		VALUES ($1, $2, $3, $4, $5)`, taskID, stageRunID, eventType, actor, body)
+		INSERT INTO task_events (task_id, stage_run_id, type, actor_id, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, clock_timestamp())`,
+		taskID, stageRunID, eventType, actor, body)
 	return translate(err)
 }
 

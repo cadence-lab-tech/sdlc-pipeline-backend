@@ -27,8 +27,15 @@ func statusFor(code apperr.Code) int {
 		return http.StatusNotFound
 	case apperr.CodeInvalidInput:
 		return http.StatusBadRequest
-	case apperr.CodeConflict, apperr.CodeGateBlocked,
-		apperr.CodeTransitionNotAllowed, apperr.CodeOutOfTaskScope:
+	case apperr.CodeUnknownRepository:
+		return http.StatusNotFound
+	case apperr.CodeContractViolation:
+		return http.StatusBadRequest
+	case apperr.CodeConflict, apperr.CodeGatesNotSatisfied,
+		apperr.CodeTransitionNotAllowed, apperr.CodeOutOfTaskScope,
+		apperr.CodeTaskNotClaimable, apperr.CodeLeaseHeldByOther,
+		apperr.CodeLeaseExpired, apperr.CodeDriftUnresolved,
+		apperr.CodeScopeExpansionForbidden:
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError

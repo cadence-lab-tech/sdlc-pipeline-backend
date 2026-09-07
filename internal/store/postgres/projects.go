@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
 )
 
@@ -101,7 +102,11 @@ func (s *Store) FindRepository(ctx context.Context, q Querier, projectID uuid.UU
 	).Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name,
 		&r.DefaultBranch, &r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint)
 	if err != nil {
-		return r, notFound(err, "репозиторий %q не найден в проекте", ref)
+		if isNoRows(err) {
+			return r, apperr.New(apperr.CodeUnknownRepository,
+				"репозиторий %q не привязан к проекту", ref)
+		}
+		return r, translate(err)
 	}
 	return r, nil
 }
@@ -121,6 +126,33 @@ func (s *Store) ListTaskPropertyDefs(ctx context.Context, q Querier, projectID u
 		var d domain.TaskPropertyDef
 		if err := rows.Scan(&d.ID, &d.Key, &d.Name, &d.Description, &d.ValueType,
 			&d.DefaultValue, &d.EnumValues, &d.IsSystem, &d.ExposeToAgent, &d.Position); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, d)
+	}
+	return out, translate(rows.Err())
+}
+
+// ListProjectDocuments — материалы проекта вне задач. Агенту они приезжают
+// списком в контексте захвата: содержимое он вытянет отдельно, если нужно.
+func (s *Store) ListProjectDocuments(ctx context.Context, q Querier, projectID uuid.UUID) ([]domain.ProjectDocument, error) {
+	rows, err := q.Query(ctx, `
+		SELECT d.id, d.project_id, d.kind, d.title, d.source, d.url,
+		       r.owner || '/' || r.name, d.repo_path, d.blob_sha, d.meta
+		FROM project_documents d
+		LEFT JOIN repositories r ON r.id = d.repository_id
+		WHERE d.project_id = $1
+		ORDER BY d.kind, d.title`, projectID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.ProjectDocument{}
+	for rows.Next() {
+		var d domain.ProjectDocument
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Kind, &d.Title, &d.Source,
+			&d.URL, &d.Repository, &d.RepoPath, &d.BlobSHA, &d.Meta); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, d)

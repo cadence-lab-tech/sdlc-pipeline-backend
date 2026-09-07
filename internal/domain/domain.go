@@ -223,6 +223,13 @@ type TaskPropertyDef struct {
 	Position      int             `json:"position"`
 }
 
+// Вид прогона. Перепроверка (гейт agent_review) идёт таким же прогоном этапа,
+// но живёт внутри родительского и принадлежит гейту, который её запустил.
+const (
+	StageKindStage  = "stage"
+	StageKindReview = "review"
+)
+
 // Состояния попытки прохождения этапа.
 const (
 	StagePending    = "pending"
@@ -240,17 +247,51 @@ type StageRun struct {
 	TaskID        uuid.UUID  `json:"task_id"`
 	StatusID      uuid.UUID  `json:"status_id"`
 	StatusKey     string     `json:"status_key"`
+	Kind          string     `json:"kind"`
 	RoleID        *uuid.UUID `json:"role_id,omitempty"`
+	RoleKey       string     `json:"role_key,omitempty"`
 	RoleVersionID *uuid.UUID `json:"role_version_id,omitempty"`
 	Attempt       int        `json:"attempt"`
 	State         string     `json:"state"`
 	ClaimedBy     *uuid.UUID `json:"claimed_by,omitempty"`
+	ClaimedHandle *string    `json:"claimed_by_handle,omitempty"`
 	ClaimedAt     *time.Time `json:"claimed_at,omitempty"`
 	LeaseExpires  *time.Time `json:"lease_expires_at,omitempty"`
-	EnteredAt     time.Time  `json:"entered_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	Outcome       *string    `json:"outcome,omitempty"`
-	Summary       *string    `json:"summary,omitempty"`
+	HeartbeatAt   *time.Time `json:"heartbeat_at,omitempty"`
+	SessionRef    *string    `json:"agent_session_ref,omitempty"`
+	// Заполнены только у прогона перепроверки: чей результат он проверяет
+	// и по какому гейту запущен.
+	ParentRunID *uuid.UUID `json:"parent_run_id,omitempty"`
+	GateID      *uuid.UUID `json:"gate_id,omitempty"`
+	// Этап, который откатил задачу сюда: из него собирается контекст
+	// «из-за чего вернулись» при следующем захвате.
+	RejectedFromRunID *uuid.UUID `json:"rejected_from_run_id,omitempty"`
+	EnteredAt         time.Time  `json:"entered_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
+	Outcome           *string    `json:"outcome,omitempty"`
+	Summary           *string    `json:"summary,omitempty"`
+}
+
+// LeaseHeld — держит ли прогон живую аренду на момент now.
+//
+// Состояние прогона здесь не смотрится намеренно: агент, сдавший артефакт
+// (submitted), задачу не отпустил — он ещё будет дорабатывать результат и
+// запрашивать переход. Аренда снимается явно: release, протухание, или
+// уход этапа в gating.
+func (r StageRun) LeaseHeld(now time.Time) bool {
+	if r.ClaimedBy == nil || r.LeaseExpires == nil || r.FinishedAt != nil {
+		return false
+	}
+	return r.LeaseExpires.After(now)
+}
+
+// Open — прогон, в котором ещё можно работать.
+func (r StageRun) Open() bool {
+	switch r.State {
+	case StagePending, StageClaimed, StageInProgress, StageSubmitted:
+		return true
+	}
+	return false
 }
 
 // Результаты гейтов.
@@ -323,4 +364,27 @@ const (
 	EventTaskAdvanced      = "task.advanced"
 	EventTaskRejected      = "task.rejected"
 	EventTaskCancelled     = "task.cancelled"
+	EventStageClaimed      = "stage.claimed"
+	EventStageReleased     = "stage.released"
+	EventLeaseExtended     = "lease.extended"
+	EventLeaseExpired      = "lease.expired"
+	EventReviewRequested   = "review.requested"
+	EventReviewCompleted   = "review.completed"
+	EventRepoRefLinked     = "repo_ref.linked"
+	EventDriftResolved     = "drift.resolved"
 )
+
+// ProjectDocument — материал проекта вне задач: API-registry, глоссарий,
+// схема взаимодействия. Едет агенту в контексте захвата списком.
+type ProjectDocument struct {
+	ID         uuid.UUID       `json:"id"`
+	ProjectID  uuid.UUID       `json:"project_id"`
+	Kind       string          `json:"kind"`
+	Title      string          `json:"title"`
+	Source     string          `json:"source"`
+	URL        *string         `json:"url,omitempty"`
+	Repository *string         `json:"repository,omitempty"`
+	RepoPath   *string         `json:"repo_path,omitempty"`
+	BlobSHA    *string         `json:"blob_sha,omitempty"`
+	Meta       json.RawMessage `json:"meta"`
+}

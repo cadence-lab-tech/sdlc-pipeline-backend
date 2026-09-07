@@ -51,11 +51,16 @@ services:
       # Демонстрационный проект: цикл из восьми статусов, пять ролей, гейты,
       # эпик с тремя задачами. Применяется только на пустой базе.
       SDLC_SEED: ${SDLC_SEED:-default_workflow}
-      # Гейты типов, которые появятся в фазах 2-3 (agent_review,
-      # schema_validation, external_check), переход не держат. Для продакшена
-      # значение обратное — иначе цикл проходится мимо непроверенных условий.
+      # Гейт external_check появится в фазе 3 и до тех пор переход не держит.
+      # Для продакшена значение обратное — иначе цикл проходится мимо
+      # непроверенных условий.
       SDLC_STRICT_GATES: ${SDLC_STRICT_GATES:-false}
       SDLC_DEFAULT_ACTOR: ${SDLC_DEFAULT_ACTOR:-local-dev}
+      # MCP-сервер для локальных агентов: /mcp/projects/{PROJECT}.
+      SDLC_MCP_ENABLED: ${SDLC_MCP_ENABLED:-true}
+      # Аренда задачи: сколько живёт без heartbeat и как часто его слать.
+      SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
+      SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
     ports:
       # 8088, а не 8080: восьмидесятый на машине разработчика обычно занят.
       - "${API_PORT:-8088}:8080"
@@ -66,6 +71,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  # Фоновые задания: возврат задач с протухшей арендой. Отдельный процесс, а
+  # не горутина в api: реплик api может быть несколько, и каждая гоняла бы
+  # свой проход. Миграции воркер не катит — схему поднимает api.
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    container_name: sdlc-worker
+    entrypoint: ["/worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SDLC_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD:-sdlc}@postgres:5432/${POSTGRES_DB:-sdlc}?sslmode=disable
+      SDLC_ENV: development
+      SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
+      SDLC_AUTO_MIGRATE: "false"
+      # Обе величины обязаны совпадать с настройками api: воркер решает,
+      # что аренда протухла, по тем же правилам, по которым api её выдаёт.
+      SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
+      SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
+      SDLC_LEASE_SWEEP_INTERVAL: ${SDLC_LEASE_SWEEP_INTERVAL:-1m}
     restart: unless-stopped
 
   # Просмотр базы руками: docker compose --profile tools up -d

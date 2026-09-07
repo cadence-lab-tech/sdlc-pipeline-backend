@@ -61,9 +61,10 @@ func (e *Engine) registerEvaluators() {
 		domain.GateRepoRefRequired:   e.evalRepoRefRequired,
 		domain.GateRepoScope:         e.evalRepoScope,
 		domain.GateDriftClear:        e.evalDriftClear,
-		// schema_validation и agent_review приезжают с MCP-сервером (фаза 2),
-		// external_check — с чтением GitHub (фаза 3). До тех пор поведение
-		// незарегистрированного типа определяет Engine.strict.
+		domain.GateSchemaValidation:  e.evalSchemaValidation,
+		domain.GateAgentReview:       e.evalAgentReview,
+		// external_check приезжает с чтением GitHub (фаза 3). До тех пор
+		// поведение незарегистрированного типа определяет Engine.strict.
 	}
 }
 

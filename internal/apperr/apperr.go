@@ -14,10 +14,21 @@ const (
 	CodeNotFound             Code = "not_found"
 	CodeInvalidInput         Code = "invalid_input"
 	CodeConflict             Code = "conflict"
-	CodeGateBlocked          Code = "gate_blocked"
+	CodeGatesNotSatisfied    Code = "gates_not_satisfied"
 	CodeTransitionNotAllowed Code = "transition_not_allowed"
 	CodeOutOfTaskScope       Code = "out_of_task_scope"
 	CodeInternal             Code = "internal"
+
+	// Коды работы агента (фаза 2). Названия — из таблицы ошибок
+	// MCP_CONTRACT.md: агент разбирает ответ одинаково, пришёл он по MCP,
+	// через CLI или из REST.
+	CodeTaskNotClaimable        Code = "task_not_claimable"
+	CodeLeaseHeldByOther        Code = "lease_held_by_other"
+	CodeLeaseExpired            Code = "lease_expired"
+	CodeContractViolation       Code = "contract_violation"
+	CodeDriftUnresolved         Code = "drift_unresolved"
+	CodeUnknownRepository       Code = "unknown_repository"
+	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"
 )
 
 type Error struct {

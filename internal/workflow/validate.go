@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -120,6 +121,45 @@ func validateWorkflow(wf domain.Workflow, implemented func(string) bool, strict 
 				continue
 			}
 			v.Warnings = append(v.Warnings, p)
+		}
+	}
+
+	// Перепроверка чужого результата теряет смысл, если проверяет тот же, кто
+	// делал. Отловить это можно только на цикле целиком: гейт знает ключ роли,
+	// но не знает, кто исполнитель статуса, из которого ведёт переход.
+	for _, t := range wf.Transitions {
+		for _, g := range t.Gates {
+			if g.Type != domain.GateAgentReview {
+				continue
+			}
+			var cfg struct {
+				ReviewerRoleKey string `json:"reviewer_role_key"`
+			}
+			_ = json.Unmarshal(g.Config, &cfg)
+
+			if cfg.ReviewerRoleKey == "" {
+				v.Problems = append(v.Problems, Problem{
+					Code: "review_role_missing", Transition: t.Key, Gate: g.Key,
+					Message: "в гейте перепроверки не указан reviewer_role_key"})
+				continue
+			}
+			if t.FromStatusID == nil {
+				continue
+			}
+			from, ok := statusByID[*t.FromStatusID]
+			if !ok {
+				continue
+			}
+			for _, r := range from.Roles {
+				if r.IsPrimary && r.RoleKey == cfg.ReviewerRoleKey {
+					v.Problems = append(v.Problems, Problem{
+						Code: "review_role_is_executor", Transition: t.Key, Gate: g.Key,
+						Status: from.Key,
+						Message: fmt.Sprintf(
+							"роль %q проверяла бы собственный результат: она же исполнитель статуса %q",
+							cfg.ReviewerRoleKey, from.Key)})
+				}
+			}
 		}
 	}
 

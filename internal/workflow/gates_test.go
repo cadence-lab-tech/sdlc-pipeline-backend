@@ -13,7 +13,7 @@ import (
 )
 
 func testEngine(strict bool) *Engine {
-	return NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), strict)
+	return NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{StrictGates: strict})
 }
 
 func gate(t string, config string) domain.Gate {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
 )
@@ -68,16 +69,26 @@ func run() error {
 	}
 
 	store := postgres.New(pool)
-	engine := workflow.NewEngine(store, log, cfg.StrictGates)
+	engine := workflow.NewEngine(store, log, workflow.Options{
+		StrictGates:       cfg.StrictGates,
+		LeaseTTL:          cfg.LeaseTTL,
+		HeartbeatInterval: cfg.HeartbeatInterval,
+	})
 	authoring := workflow.NewAuthoring(store, log, engine)
 	if !cfg.StrictGates {
 		log.Warn("SDLC_STRICT_GATES выключен: гейты нереализованных типов " +
 			"пропускают переход — режим отладки цикла, не для продакшена")
 	}
 
+	var mcpServer *mcp.Server
+	if cfg.MCPEnabled {
+		mcpServer = mcp.NewServer(log, store, engine)
+		log.Info("MCP-сервер поднят", "path", "/mcp/projects/{PROJECT}")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring).Handler(),
+		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, mcpServer).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,

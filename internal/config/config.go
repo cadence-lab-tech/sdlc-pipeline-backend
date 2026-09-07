@@ -30,6 +30,16 @@ type Config struct {
 	// Применяются только на пустой базе — сиды не идемпотентны.
 	Seeds []string
 
+	// Аренды агентов. Аренда протухает без heartbeat, воркер возвращает
+	// задачу в pending — иначе умерший локально агент держал бы её вечно.
+	LeaseTTL           time.Duration
+	HeartbeatInterval  time.Duration
+	LeaseSweepInterval time.Duration
+
+	// MCP-сервер поднимается в том же процессе, что и REST: это два
+	// транспорта над одним ядром (решение 0011).
+	MCPEnabled bool
+
 	// Движок
 	// StrictGates=false: гейт нереализованного типа отдаёт skipped и пропускает
 	// переход. Это режим отладки цикла, пока фазы 2-3 не написаны.
@@ -47,17 +57,21 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:        env("SDLC_HTTP_ADDR", ":8080"),
-		ShutdownTimeout: 15 * time.Second,
-		RequestTimeout:  30 * time.Second,
-		DatabaseURL:     env("SDLC_DATABASE_URL", ""),
-		MaxConns:        10,
-		ConnectTimeout:  30 * time.Second,
-		AutoMigrate:     true,
-		StrictGates:     false,
-		DefaultActor:    env("SDLC_DEFAULT_ACTOR", "anonymous"),
-		LogLevel:        env("SDLC_LOG_LEVEL", "info"),
-		Env:             env("SDLC_ENV", "development"),
+		HTTPAddr:           env("SDLC_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:    15 * time.Second,
+		RequestTimeout:     30 * time.Second,
+		DatabaseURL:        env("SDLC_DATABASE_URL", ""),
+		MaxConns:           10,
+		ConnectTimeout:     30 * time.Second,
+		AutoMigrate:        true,
+		StrictGates:        false,
+		LeaseTTL:           30 * time.Minute,
+		HeartbeatInterval:  5 * time.Minute,
+		LeaseSweepInterval: time.Minute,
+		MCPEnabled:         true,
+		DefaultActor:       env("SDLC_DEFAULT_ACTOR", "anonymous"),
+		LogLevel:           env("SDLC_LOG_LEVEL", "info"),
+		Env:                env("SDLC_ENV", "development"),
 	}
 
 	if c.DatabaseURL == "" {
@@ -70,6 +84,22 @@ func Load() (Config, error) {
 	}
 	if c.StrictGates, err = envBool("SDLC_STRICT_GATES", c.StrictGates); err != nil {
 		return c, err
+	}
+	if c.MCPEnabled, err = envBool("SDLC_MCP_ENABLED", c.MCPEnabled); err != nil {
+		return c, err
+	}
+	if c.LeaseTTL, err = envDuration("SDLC_LEASE_TTL", c.LeaseTTL); err != nil {
+		return c, err
+	}
+	if c.HeartbeatInterval, err = envDuration("SDLC_HEARTBEAT_INTERVAL", c.HeartbeatInterval); err != nil {
+		return c, err
+	}
+	if c.LeaseSweepInterval, err = envDuration("SDLC_LEASE_SWEEP_INTERVAL", c.LeaseSweepInterval); err != nil {
+		return c, err
+	}
+	if c.HeartbeatInterval >= c.LeaseTTL {
+		return c, fmt.Errorf("SDLC_HEARTBEAT_INTERVAL (%s) не меньше SDLC_LEASE_TTL (%s): "+
+			"аренда протухнет раньше первого продления", c.HeartbeatInterval, c.LeaseTTL)
 	}
 	if c.LogJSON, err = envBool("SDLC_LOG_JSON", c.Env != "development"); err != nil {
 		return c, err

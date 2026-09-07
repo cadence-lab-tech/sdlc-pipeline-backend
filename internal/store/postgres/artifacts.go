@@ -78,6 +78,31 @@ func scanArtifact(row interface{ Scan(...any) error }) (domain.Artifact, error) 
 	return a, err
 }
 
+// ArtifactLink — связь артефакта с другим артефактом, документом проекта
+// или местом в коде.
+type ArtifactLink struct {
+	Rel              string     `json:"rel"`
+	TargetArtifactID *uuid.UUID `json:"target_artifact_id,omitempty"`
+	TargetDocumentID *uuid.UUID `json:"target_document_id,omitempty"`
+	TargetURI        string     `json:"target_uri,omitempty"`
+	Note             string     `json:"note,omitempty"`
+}
+
+// ArtifactCodeRef — объявленная зона задачи в коде.
+//
+// Дублирует artifact_links.target_uri намеренно: пересечение зоны задачи с
+// изменениями в main должно быть индексируемым джойном, а не разбором строк
+// URI на каждом прогоне детектора дрейфа.
+type ArtifactCodeRef struct {
+	Repository string `json:"repository"`
+	Path       string `json:"path"`
+	SymbolFQN  string `json:"symbol_fqn,omitempty"`
+	StartLine  *int   `json:"start_line,omitempty"`
+	EndLine    *int   `json:"end_line,omitempty"`
+	CommitSHA  string `json:"commit,omitempty"`
+	RefKind    string `json:"ref_kind"`
+}
+
 type CreateArtifactInput struct {
 	Task         domain.Task
 	StageRunID   *uuid.UUID
@@ -89,6 +114,8 @@ type CreateArtifactInput struct {
 	SupersedesID *uuid.UUID
 	Status       string
 	Meta         json.RawMessage
+	Links        []ArtifactLink
+	CodeRefs     []ArtifactCodeRef
 	ProducedBy   uuid.UUID
 }
 
@@ -148,6 +175,35 @@ func (s *Store) CreateArtifact(ctx context.Context, tx pgx.Tx, in CreateArtifact
 		return domain.Artifact{}, translate(err)
 	}
 
+	for _, l := range in.Links {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO artifact_links (artifact_id, rel, target_artifact_id,
+			                            target_document_id, target_uri, note)
+			VALUES ($1, $2, $3, $4, nullif($5, ''), nullif($6, ''))`,
+			id, l.Rel, l.TargetArtifactID, l.TargetDocumentID, l.TargetURI, l.Note); err != nil {
+			return domain.Artifact{}, translate(err)
+		}
+	}
+
+	for _, r := range in.CodeRefs {
+		repo, err := s.FindRepository(ctx, tx, in.Task.ProjectID, r.Repository)
+		if err != nil {
+			return domain.Artifact{}, err
+		}
+		refKind := r.RefKind
+		if refKind == "" {
+			refKind = "reads"
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO artifact_code_refs (artifact_id, task_id, repository_id, path,
+			                                symbol_fqn, start_line, end_line, commit_sha, ref_kind)
+			VALUES ($1, $2, $3, $4, nullif($5, ''), $6, $7, nullif($8, ''), $9)`,
+			id, in.Task.ID, repo.ID, r.Path, r.SymbolFQN, r.StartLine, r.EndLine,
+			r.CommitSHA, refKind); err != nil {
+			return domain.Artifact{}, translate(err)
+		}
+	}
+
 	a, err := scanArtifact(tx.QueryRow(ctx, artifactSelect+` WHERE a.id = $1`, id))
 	if err != nil {
 		return a, translate(err)
@@ -196,4 +252,22 @@ func (s *Store) ApproveArtifact(ctx context.Context, tx pgx.Tx, id, actor uuid.U
 		return apperr.Conflict("артефакт нельзя заапрувить в его текущем состоянии")
 	}
 	return nil
+}
+
+// LatestArtifactOfKind — актуальная версия артефакта этого kind в задаче.
+// Возвращает nil, если такого ещё не сдавали.
+func (s *Store) LatestArtifactOfKind(ctx context.Context, q Querier, taskID uuid.UUID, kind string) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := q.QueryRow(ctx, `
+		SELECT id FROM artifacts
+		WHERE task_id = $1 AND kind = $2 AND status <> 'superseded'
+		ORDER BY version DESC, created_at DESC
+		LIMIT 1`, taskID, kind).Scan(&id)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, translate(err)
+	}
+	return &id, nil
 }

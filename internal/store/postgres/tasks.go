@@ -256,19 +256,19 @@ func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uui
 		return domain.StageRun{}, err
 	}
 
-	var run domain.StageRun
-	err = tx.QueryRow(ctx, `
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO stage_runs (task_id, status_id, role_id, role_version_id, attempt,
 		                        state, rejected_from_run_id)
 		SELECT $1, $2, $3, $4,
 		       coalesce(max(attempt), 0) + 1, 'pending', $5
-		FROM stage_runs WHERE task_id = $1 AND status_id = $2
-		RETURNING id, task_id, status_id, role_id, role_version_id, attempt, state,
-		          claimed_by, claimed_at, lease_expires_at, entered_at, finished_at, outcome, summary`,
-		taskID, statusID, roleID, roleVersionID, rejectedFrom,
-	).Scan(&run.ID, &run.TaskID, &run.StatusID, &run.RoleID, &run.RoleVersionID,
-		&run.Attempt, &run.State, &run.ClaimedBy, &run.ClaimedAt, &run.LeaseExpires,
-		&run.EnteredAt, &run.FinishedAt, &run.Outcome, &run.Summary)
+		FROM stage_runs WHERE task_id = $1 AND status_id = $2 AND kind = 'stage'
+		RETURNING id`,
+		taskID, statusID, roleID, roleVersionID, rejectedFrom).Scan(&id); err != nil {
+		return domain.StageRun{}, translate(err)
+	}
+
+	run, err := scanStageRun(tx.QueryRow(ctx, stageRunSelect+` WHERE sr.id = $1`, id))
 	if err != nil {
 		return run, translate(err)
 	}
@@ -276,17 +276,27 @@ func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uui
 }
 
 const stageRunSelect = `
-	SELECT sr.id, sr.task_id, sr.status_id, ws.key, sr.role_id, sr.role_version_id,
-	       sr.attempt, sr.state, sr.claimed_by, sr.claimed_at, sr.lease_expires_at,
+	SELECT sr.id, sr.task_id, sr.status_id, ws.key, sr.kind, sr.role_id, ro.key,
+	       sr.role_version_id, sr.attempt, sr.state, sr.claimed_by, pr.handle,
+	       sr.claimed_at, sr.lease_expires_at, sr.heartbeat_at, sr.agent_session_ref,
+	       sr.parent_run_id, sr.gate_id, sr.rejected_from_run_id,
 	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary
 	FROM stage_runs sr
-	JOIN workflow_statuses ws ON ws.id = sr.status_id`
+	JOIN workflow_statuses ws ON ws.id = sr.status_id
+	LEFT JOIN roles ro       ON ro.id = sr.role_id
+	LEFT JOIN principals pr  ON pr.id = sr.claimed_by`
 
 func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) {
 	var r domain.StageRun
-	err := row.Scan(&r.ID, &r.TaskID, &r.StatusID, &r.StatusKey, &r.RoleID, &r.RoleVersionID,
-		&r.Attempt, &r.State, &r.ClaimedBy, &r.ClaimedAt, &r.LeaseExpires,
+	var roleKey *string
+	err := row.Scan(&r.ID, &r.TaskID, &r.StatusID, &r.StatusKey, &r.Kind, &r.RoleID, &roleKey,
+		&r.RoleVersionID, &r.Attempt, &r.State, &r.ClaimedBy, &r.ClaimedHandle,
+		&r.ClaimedAt, &r.LeaseExpires, &r.HeartbeatAt, &r.SessionRef,
+		&r.ParentRunID, &r.GateID, &r.RejectedFromRunID,
 		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary)
+	if roleKey != nil {
+		r.RoleKey = *roleKey
+	}
 	return r, err
 }
 
@@ -295,7 +305,7 @@ func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) 
 // неоднозначности: последняя попытка на статусе, где задача стоит сейчас.
 func (s *Store) CurrentStageRun(ctx context.Context, q Querier, taskID, statusID uuid.UUID) (domain.StageRun, error) {
 	r, err := scanStageRun(q.QueryRow(ctx, stageRunSelect+`
-		WHERE sr.task_id = $1 AND sr.status_id = $2
+		WHERE sr.task_id = $1 AND sr.status_id = $2 AND sr.kind = 'stage'
 		ORDER BY sr.attempt DESC LIMIT 1`, taskID, statusID))
 	if err != nil {
 		return r, notFound(err, "у задачи нет активной попытки на текущем статусе")
@@ -303,6 +313,8 @@ func (s *Store) CurrentStageRun(ctx context.Context, q Querier, taskID, statusID
 	return r, nil
 }
 
+// ListStageRuns отдаёт и этапы, и вложенные прогоны перепроверки: карточка
+// задачи показывает их вместе, а различает по kind и parent_run_id.
 func (s *Store) ListStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.StageRun, error) {
 	rows, err := q.Query(ctx, stageRunSelect+`
 		WHERE sr.task_id = $1 ORDER BY sr.entered_at`, taskID)
@@ -354,8 +366,9 @@ func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid
 
 func (s *Store) AddTaskRepository(ctx context.Context, tx pgx.Tx, t domain.Task, repoID uuid.UUID, stageRunID *uuid.UUID, actor uuid.UUID, note string) error {
 	if !t.MultiRepo() && len(t.Repositories) > 0 {
-		return apperr.New(apperr.CodeOutOfTaskScope,
-			"задача %s однорепозиторная: включите свойство multi_repo, чтобы расширить область", t.Key)
+		return apperr.New(apperr.CodeScopeExpansionForbidden,
+			"задача %s однорепозиторная: расширить область — решение человека, "+
+				"либо включите свойство multi_repo, либо заведите отдельную задачу", t.Key)
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO task_repositories (project_id, task_id, repository_id, is_primary,
