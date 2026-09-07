@@ -15,11 +15,11 @@ import (
 // ссылаются на её статусы и гейты. Изменение цикла — это новая версия
 // (workflows.version), ровно как правка артефакта — новая версия артефакта.
 
-const workflowCols = `id, project_id, name, version, state`
+const workflowCols = `id, project_id, name, version, state, task_types`
 
 func scanWorkflow(row interface{ Scan(...any) error }) (domain.Workflow, error) {
 	var wf domain.Workflow
-	err := row.Scan(&wf.ID, &wf.ProjectID, &wf.Name, &wf.Version, &wf.State)
+	err := row.Scan(&wf.ID, &wf.ProjectID, &wf.Name, &wf.Version, &wf.State, &wf.TaskTypes)
 	return wf, err
 }
 
@@ -71,16 +71,36 @@ func (s *Store) GetWorkflow(ctx context.Context, q Querier, id uuid.UUID) (domai
 
 // CreateWorkflow заводит черновик. Номер версии — следующий для этого имени:
 // «Стандартный цикл» v2 читается человеком лучше, чем сквозная нумерация.
-func (s *Store) CreateWorkflow(ctx context.Context, q Querier, projectID uuid.UUID, name string, createdBy uuid.UUID) (domain.Workflow, error) {
+func (s *Store) CreateWorkflow(ctx context.Context, q Querier, projectID uuid.UUID, name string, taskTypes []string, createdBy uuid.UUID) (domain.Workflow, error) {
+	if len(taskTypes) == 0 {
+		taskTypes = []string{domain.DefaultTaskType}
+	}
 	wf, err := scanWorkflow(q.QueryRow(ctx, `
-		INSERT INTO workflows (project_id, name, version, state, created_by)
-		SELECT $1, $2, coalesce(max(version), 0) + 1, 'draft', $3
+		INSERT INTO workflows (project_id, name, version, state, task_types, created_by)
+		SELECT $1, $2, coalesce(max(version), 0) + 1, 'draft', $3, $4
 		FROM workflows WHERE project_id = $1 AND name = $2
-		RETURNING `+workflowCols, projectID, name, createdBy))
+		RETURNING `+workflowCols, projectID, name, taskTypes, createdBy))
 	if err != nil {
 		return wf, translate(err)
 	}
 	return wf, nil
+}
+
+// RenameWorkflow переименовывает черновик. Версия при этом не пересчитывается:
+// нумерация идёт по имени, и переименование черновика — редкий случай правки
+// заголовка, а не заведение новой ветки версий.
+func (s *Store) RenameWorkflow(ctx context.Context, q Querier, id uuid.UUID, name string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE workflows SET name = $2, updated_at = now() WHERE id = $1`, id, name)
+	return translate(err)
+}
+
+// SetWorkflowTaskTypes меняет типы задач черновика. У активной версии их не
+// поменять: задачи уже привязаны к ней своим типом.
+func (s *Store) SetWorkflowTaskTypes(ctx context.Context, q Querier, id uuid.UUID, taskTypes []string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE workflows SET task_types = $2, updated_at = now() WHERE id = $1`, id, taskTypes)
+	return translate(err)
 }
 
 // CopyWorkflowContent переносит содержимое одной версии цикла в другую.
@@ -143,18 +163,32 @@ func (s *Store) SetWorkflowState(ctx context.Context, q Querier, id uuid.UUID, s
 // RetireActiveWorkflow отправляет текущую активную версию на покой.
 // Вызывается только вместе с активацией новой и в той же транзакции:
 // частичный уникальный индекс не даёт двум версиям быть активными.
-func (s *Store) RetireActiveWorkflow(ctx context.Context, q Querier, projectID uuid.UUID) (*uuid.UUID, error) {
-	var id uuid.UUID
-	err := q.QueryRow(ctx, `
-		UPDATE workflows SET state = 'retired', updated_at = now()
-		WHERE project_id = $1 AND state = 'active' RETURNING id`, projectID).Scan(&id)
-	if isNoRows(err) {
-		return nil, nil
+// RetireActiveWorkflows уводит на покой действующие циклы, которые ведут те же
+// типы задач, что и активируемая версия. Циклы других типов не трогаются: в
+// проекте с эпиками их несколько, и активация цикла эпиков не должна оставить
+// обычные задачи без цикла.
+func (s *Store) RetireActiveWorkflows(ctx context.Context, q Querier, projectID uuid.UUID, taskTypes []string) ([]uuid.UUID, error) {
+	if len(taskTypes) == 0 {
+		taskTypes = []string{domain.DefaultTaskType}
 	}
+	rows, err := q.Query(ctx, `
+		UPDATE workflows SET state = 'retired', updated_at = now()
+		WHERE project_id = $1 AND state = 'active' AND task_types && $2
+		RETURNING id`, projectID, taskTypes)
 	if err != nil {
 		return nil, translate(err)
 	}
-	return &id, nil
+	defer rows.Close()
+
+	out := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, id)
+	}
+	return out, translate(rows.Err())
 }
 
 // OpenTaskOnWorkflow — незакрытая задача, оставшаяся на прежней версии цикла.

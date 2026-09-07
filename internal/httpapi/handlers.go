@@ -72,11 +72,19 @@ func (s *Server) getProject(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Действующие циклы с типами задач, которые они ведут: по ним форма
+	// создания задачи понимает, какой тип вообще можно завести.
+	workflows, err := s.store.ListActiveWorkflows(ctx, q, project.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"project":            project,
 		"repositories":       repos,
 		"task_property_defs": props,
+		"active_workflows":   workflows,
 	})
 }
 
@@ -91,7 +99,9 @@ func (s *Server) getWorkflow(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	wf, err := s.store.GetActiveWorkflow(ctx, q, project.ID)
+	// Цикл выбирается типом задач: доска обычных задач и доска эпиков — это
+	// разные наборы статусов.
+	wf, err := s.store.GetActiveWorkflowForType(ctx, q, project.ID, c.Query("type"))
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -112,7 +122,8 @@ func (s *Server) listTasks(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	tasks, err := s.store.ListTasks(ctx, q, project.ID, postgres.ListTasksFilter{
 		StatusKey: c.Query("status"),
-		EpicKey:   c.Query("epic"),
+		ParentKey: c.Query("parent"),
+		Type:      c.Query("type"),
 		Limit:     limit,
 	})
 	if err != nil {
@@ -123,13 +134,18 @@ func (s *Server) listTasks(c *gin.Context) {
 }
 
 type createTaskRequest struct {
-	Title        string          `json:"title" binding:"required"`
-	Description  *string         `json:"description"`
-	EpicKey      string          `json:"epic_key"`
+	Title       string  `json:"title" binding:"required"`
+	Description *string `json:"description"`
+	// Ключ родительской задачи и тип: по типу выбирается цикл (решение 0024).
+	ParentKey    string          `json:"parent_key"`
+	Type         string          `json:"type"`
 	Priority     string          `json:"priority"`
+	Assignee     string          `json:"assignee"`
 	Labels       []string        `json:"labels"`
 	Properties   json.RawMessage `json:"properties"`
 	Repositories []string        `json:"repositories"`
+	// Ключи задач, которые новая блокирует.
+	Blocks []string `json:"blocks"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -138,16 +154,29 @@ func (s *Server) createTask(c *gin.Context) {
 		badRequest(c, s.log, err)
 		return
 	}
+	// Уровень актора решает, вправе ли он завести задачу где угодно или
+	// только дочернюю к той, которую держит: правило исполняет движок.
+	level, err := s.level(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	task, err := s.engine.CreateTask(c.Request.Context(), c.Param("projectKey"), actor(c).ID,
-		postgres.CreateTaskInput{
-			EpicKey:      req.EpicKey,
-			Title:        req.Title,
-			Description:  req.Description,
-			Priority:     req.Priority,
-			Labels:       req.Labels,
-			Properties:   req.Properties,
-			Repositories: req.Repositories,
+		workflow.CreateTaskInput{
+			CreateTaskInput: postgres.CreateTaskInput{
+				ParentKey:    req.ParentKey,
+				TaskType:     req.Type,
+				Title:        req.Title,
+				Description:  req.Description,
+				Priority:     req.Priority,
+				Labels:       req.Labels,
+				Properties:   req.Properties,
+				Repositories: req.Repositories,
+			},
+			AssigneeHandle: req.Assignee,
+			Blocks:         req.Blocks,
+			Level:          level,
 		})
 	if err != nil {
 		fail(c, s.log, err)
@@ -182,13 +211,129 @@ func (s *Server) getTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Дети, связи и стоимость едут вместе с задачей: карточка эпика — это
+	// дерево нарезки со счётом, а не отдельный экран.
+	children, err := s.store.ChildTasks(ctx, q, task.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	links, err := s.store.ListTaskLinks(ctx, q, task.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	usage, err := s.store.TaskUsage(ctx, q, task.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"task":        task,
 		"stage_runs":  runs,
 		"artifacts":   artifacts,
 		"transitions": transitions,
+		"children":    children,
+		"links":       links,
+		"usage":       usage,
 	})
+}
+
+type linkTasksRequest struct {
+	Task string `json:"task" binding:"required"`
+	Rel  string `json:"rel"`
+	Note string `json:"note"`
+	// true — снять связь, а не завести.
+	Remove bool `json:"remove"`
+}
+
+func (s *Server) linkTasks(c *gin.Context) {
+	var req linkTasksRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	if req.Rel == "" {
+		req.Rel = domain.TaskLinkBlocks
+	}
+	links, err := s.engine.LinkTasks(c.Request.Context(), c.Param("taskKey"), req.Task,
+		req.Rel, req.Note, actor(c).ID, req.Remove)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"links": links})
+}
+
+type assignRequest struct {
+	// Пустой хэндл снимает назначение.
+	Assignee string `json:"assignee"`
+}
+
+func (s *Server) assignTask(c *gin.Context) {
+	var req assignRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	task, err := s.engine.Assign(c.Request.Context(), c.Param("taskKey"), req.Assignee, actor(c).ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+type reportUsageRequest struct {
+	Model            string          `json:"model" binding:"required"`
+	InputTokens      *int64          `json:"input_tokens"`
+	OutputTokens     *int64          `json:"output_tokens"`
+	CacheReadTokens  *int64          `json:"cache_read_tokens"`
+	CacheWriteTokens *int64          `json:"cache_write_tokens"`
+	CostUSD          *float64        `json:"cost_usd"`
+	DurationMS       *int64          `json:"duration_ms"`
+	Details          json.RawMessage `json:"details"`
+}
+
+// reportUsage принимает отчёт о стоимости прогона. Сюда ходит раннер после
+// того, как запущенный им агент закончил работу (решение 0026).
+func (s *Server) reportUsage(c *gin.Context) {
+	var req reportUsageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+
+	in := workflow.ReportUsageInput{
+		Model: req.Model, InputTokens: req.InputTokens, OutputTokens: req.OutputTokens,
+		CacheReadTokens: req.CacheReadTokens, CacheWriteTokens: req.CacheWriteTokens,
+		CostUSD: req.CostUSD, DurationMS: req.DurationMS, Details: req.Details,
+	}
+	if raw := c.Param("runID"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			fail(c, s.log, apperr.InvalidInput("идентификатор прогона не UUID"))
+			return
+		}
+		in.StageRunID = &id
+	}
+
+	out, err := s.engine.ReportUsage(c.Request.Context(), c.Param("taskKey"), actor(c).ID, in)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusCreated, out)
+}
+
+func (s *Server) taskUsage(c *gin.Context) {
+	usage, err := s.engine.TaskUsage(c.Request.Context(), c.Param("taskKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, usage)
 }
 
 func (s *Server) listTransitions(c *gin.Context) {

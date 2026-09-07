@@ -340,6 +340,17 @@ func (a *Auth) Require(ctx context.Context, id Identity, projectID uuid.UUID, ne
 
 // ProjectRole — действующий уровень прав в проекте. Администратор системы
 // везде администратор; пустая строка — не участник.
+// Level — действующий уровень актора в проекте для правил, которые движок
+// применяет сам (например, «агент заводит только детей своей задачи»).
+// В режиме заголовка прав нет вовсе, и уровень максимальный: правило прав
+// выключено целиком, а не наполовину.
+func (a *Auth) Level(ctx context.Context, id Identity, projectID uuid.UUID) (domain.MemberRole, error) {
+	if !a.Enforced() {
+		return domain.MemberAdmin, nil
+	}
+	return a.ProjectRole(ctx, id, projectID)
+}
+
 func (a *Auth) ProjectRole(ctx context.Context, id Identity, projectID uuid.UUID) (domain.MemberRole, error) {
 	if id.Principal.IsAdmin {
 		return domain.MemberAdmin, nil

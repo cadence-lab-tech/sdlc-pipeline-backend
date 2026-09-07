@@ -106,8 +106,10 @@ func (s *Server) listQueue(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	runs, err := s.store.ListOpenRuns(ctx, q, project.ID,
-		c.Query("status"), c.Query("role"), limit)
+	runs, err := s.store.ListOpenRuns(ctx, q, project.ID, postgres.OpenRunsFilter{
+		StatusKey: c.Query("status"), RoleKey: c.Query("role"),
+		Viewer: actor(c).ID, Limit: limit,
+	})
 	if err != nil {
 		fail(c, s.log, err)
 		return

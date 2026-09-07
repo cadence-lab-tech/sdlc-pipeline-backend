@@ -125,7 +125,7 @@ func TestImportBundleIsIdempotentAndVersioned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exported.Workflow == nil || len(exported.Workflow.Statuses) == 0 {
+	if len(exported.Workflows) == 0 || len(exported.Workflows[0].Statuses) == 0 {
 		t.Fatal("экспорт без активного цикла")
 	}
 	foundDoc := false
@@ -139,19 +139,21 @@ func TestImportBundleIsIdempotentAndVersioned(t *testing.T) {
 	}
 
 	// Цикл из экспорта импортируется черновиком и проходит проверку графа.
-	wf := *exported.Workflow
+	// Связка первой версии несла цикл одиночным полем — она обязана применяться
+	// и после того, как формат стал списком.
+	wf := exported.Workflows[0]
 	wf.Name = "Перенесённый цикл"
 	report, err := authoring.Import(ctx, "SDLC", system.ID, Bundle{Version: 1, Workflow: &wf}, false)
 	if err != nil {
 		t.Fatalf("импорт цикла: %v", err)
 	}
-	if report.Workflow == nil || report.Workflow.Outcome != "draft_created" {
-		t.Fatalf("цикл: %+v", report.Workflow)
+	if len(report.Workflows) != 1 || report.Workflows[0].Outcome != "draft_created" {
+		t.Fatalf("цикл: %+v", report.Workflows)
 	}
-	if report.Validation == nil || !report.Validation.Valid {
-		t.Fatalf("перенесённый цикл не прошёл проверку: %+v", report.Validation)
+	if len(report.Validations) != 1 || !report.Validations[0].Valid {
+		t.Fatalf("перенесённый цикл не прошёл проверку: %+v", report.Validations)
 	}
-	id, _ := uuid.Parse(report.Workflow.ID)
+	id, _ := uuid.Parse(report.Workflows[0].ID)
 	head, err := store.WorkflowHead(ctx, store.DB(), id)
 	if err != nil || head.State != domain.WorkflowDraft {
 		t.Fatalf("импортированный цикл должен быть черновиком: %v %+v", err, head)

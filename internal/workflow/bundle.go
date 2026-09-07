@@ -28,7 +28,9 @@ import (
 )
 
 // BundleVersion — формат связки; растёт при несовместимых изменениях.
-const BundleVersion = 1
+// Вторая версия переносит несколько циклов: у проекта их столько, сколько
+// типов задач (решение 0024).
+const BundleVersion = 2
 
 type Bundle struct {
 	Version      int                `json:"version"`
@@ -36,7 +38,10 @@ type Bundle struct {
 	Repositories []BundleRepository `json:"repositories,omitempty"`
 	Roles        []BundleRole       `json:"roles,omitempty"`
 	Documents    []BundleDocument   `json:"documents,omitempty"`
-	Workflow     *BundleWorkflow    `json:"workflow,omitempty"`
+	Workflows    []BundleWorkflow   `json:"workflows,omitempty"`
+	// Связка первой версии несла ровно один цикл. Поле читается на импорте,
+	// чтобы старые связки продолжали применяться; экспорт его не пишет.
+	Workflow *BundleWorkflow `json:"workflow,omitempty"`
 }
 
 type BundleProject struct {
@@ -84,7 +89,9 @@ type BundleDocument struct {
 }
 
 type BundleWorkflow struct {
-	Name        string             `json:"name"`
+	Name string `json:"name"`
+	// Типы задач, которые ведёт цикл. Пусто — обычные задачи.
+	TaskTypes   []string           `json:"task_types,omitempty"`
 	Statuses    []BundleStatus     `json:"statuses"`
 	Transitions []BundleTransition `json:"transitions"`
 }
@@ -127,9 +134,9 @@ type ImportReport struct {
 	Repositories []ImportEntry `json:"repositories"`
 	Roles        []ImportEntry `json:"roles"`
 	Documents    []ImportEntry `json:"documents"`
-	Workflow     *ImportEntry  `json:"workflow,omitempty"`
-	// Проверка черновика цикла как графа, если цикл был в связке.
-	Validation *Validation `json:"workflow_validation,omitempty"`
+	Workflows    []ImportEntry `json:"workflows,omitempty"`
+	// Проверка каждого пришедшего цикла как графа, в том же порядке.
+	Validations []Validation `json:"workflow_validations,omitempty"`
 }
 
 type ImportEntry struct {
@@ -183,13 +190,13 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 			}
 			report.Documents = append(report.Documents, entry)
 		}
-		if b.Workflow != nil {
-			entry, validation, err := a.importWorkflow(ctx, tx, project.ID, actor, *b.Workflow)
+		for _, w := range b.workflows() {
+			entry, validation, err := a.importWorkflow(ctx, tx, project.ID, actor, w)
 			if err != nil {
-				return fmt.Errorf("цикл: %w", err)
+				return fmt.Errorf("цикл %q: %w", w.Name, err)
 			}
-			report.Workflow = &entry
-			report.Validation = &validation
+			report.Workflows = append(report.Workflows, entry)
+			report.Validations = append(report.Validations, validation)
 		}
 
 		if dryRun {
@@ -356,7 +363,7 @@ func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, ac
 	if w.Name == "" {
 		w.Name = "Импортированный цикл"
 	}
-	wf, err := a.store.CreateWorkflow(ctx, tx, projectID, w.Name, actor)
+	wf, err := a.store.CreateWorkflow(ctx, tx, projectID, w.Name, w.TaskTypes, actor)
 	if err != nil {
 		return ImportEntry{}, Validation{}, err
 	}
@@ -491,20 +498,36 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 		out.Documents = append(out.Documents, bd)
 	}
 
-	wf, err := a.store.GetActiveWorkflow(ctx, q, project.ID)
-	if apperr.As(err).Code == apperr.CodeNotFound {
-		return out, nil
-	}
+	// Циклов у проекта столько, сколько типов задач, и связка переносит их все:
+	// без цикла эпиков перенесённый проект не умеет планировать.
+	active, err := a.store.ListActiveWorkflows(ctx, q, project.ID)
 	if err != nil {
 		return out, err
 	}
-	out.Workflow = exportWorkflow(wf)
+	for _, head := range active {
+		wf, err := a.store.GetWorkflow(ctx, q, head.ID)
+		if err != nil {
+			return out, err
+		}
+		out.Workflows = append(out.Workflows, *exportWorkflow(wf))
+	}
 	return out, nil
+}
+
+// workflows сводит оба поля связки в один список: первая версия несла цикл
+// одиночным полем, вторая — списком.
+func (b Bundle) workflows() []BundleWorkflow {
+	out := append([]BundleWorkflow{}, b.Workflows...)
+	if b.Workflow != nil {
+		out = append(out, *b.Workflow)
+	}
+	return out
 }
 
 func exportWorkflow(wf domain.Workflow) *BundleWorkflow {
 	statusKey := map[uuid.UUID]string{}
-	bw := &BundleWorkflow{Name: wf.Name, Statuses: []BundleStatus{}, Transitions: []BundleTransition{}}
+	bw := &BundleWorkflow{Name: wf.Name, TaskTypes: wf.TaskTypes,
+		Statuses: []BundleStatus{}, Transitions: []BundleTransition{}}
 	for _, st := range wf.Statuses {
 		statusKey[st.ID] = st.Key
 		bs := BundleStatus{

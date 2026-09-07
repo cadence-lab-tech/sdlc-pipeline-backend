@@ -55,15 +55,16 @@ type evaluator func(ctx context.Context, q postgres.Querier, in EvalInput) (Gate
 
 func (e *Engine) registerEvaluators() {
 	e.evaluators = map[string]evaluator{
-		domain.GateArtifactsRequired: e.evalArtifactsRequired,
-		domain.GateChecklist:         e.evalChecklist,
-		domain.GateHumanApproval:     e.evalHumanApproval,
-		domain.GateRepoRefRequired:   e.evalRepoRefRequired,
-		domain.GateRepoScope:         e.evalRepoScope,
-		domain.GateDriftClear:        e.evalDriftClear,
-		domain.GateSchemaValidation:  e.evalSchemaValidation,
-		domain.GateAgentReview:       e.evalAgentReview,
-		domain.GateExternalCheck:     e.evalExternalCheck,
+		domain.GateArtifactsRequired:  e.evalArtifactsRequired,
+		domain.GateChecklist:          e.evalChecklist,
+		domain.GateHumanApproval:      e.evalHumanApproval,
+		domain.GateRepoRefRequired:    e.evalRepoRefRequired,
+		domain.GateRepoScope:          e.evalRepoScope,
+		domain.GateDriftClear:         e.evalDriftClear,
+		domain.GateSchemaValidation:   e.evalSchemaValidation,
+		domain.GateAgentReview:        e.evalAgentReview,
+		domain.GateExternalCheck:      e.evalExternalCheck,
+		domain.GateDependenciesClosed: e.evalDependenciesClosed,
 	}
 }
 
@@ -590,4 +591,67 @@ func (e *Engine) evalExternalCheck(ctx context.Context, q postgres.Querier, in E
 		out.Details = details
 		return out, nil
 	}
+}
+
+// ── dependencies_closed ─────────────────────────────────────────────────────
+
+type dependenciesConfig struct {
+	// children — дочерние задачи (всё поддерево), blockers — задачи, которые
+	// блокируют эту, both — и те и другие. По умолчанию children: гейт заводят
+	// прежде всего на эпик.
+	Scope string `json:"scope"`
+	// Считать ли отменённую задачу закрытой. По умолчанию нет: отменённый
+	// кусок эпика — повод посмотреть, не потерялась ли работа.
+	AllowCancelled bool `json:"allow_cancelled"`
+}
+
+// evalDependenciesClosed держит переход, пока не закрыто то, от чего задача
+// зависит: дети эпика или блокирующие задачи.
+//
+// Судит по категории статуса, а не по его ключу: какие статусы завёл проект,
+// движок не знает, а категория `done` есть у любого цикла — её требует
+// проверка цикла при активации.
+func (e *Engine) evalDependenciesClosed(ctx context.Context, q postgres.Querier, in EvalInput) (GateOutcome, error) {
+	var cfg dependenciesConfig
+	if err := json.Unmarshal(in.Gate.Config, &cfg); err != nil {
+		return GateOutcome{}, fmt.Errorf("конфигурация гейта %q: %w", in.Gate.Key, err)
+	}
+	children := cfg.Scope != "blockers"
+	blockers := cfg.Scope == "blockers" || cfg.Scope == "both"
+
+	deps, err := e.store.TaskDependencies(ctx, q, in.Task.ID, children, blockers)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+
+	open := []map[string]any{}
+	closed := 0
+	for _, d := range deps {
+		if d.Category == "done" || (cfg.AllowCancelled && d.Category == "cancelled") {
+			closed++
+			continue
+		}
+		open = append(open, map[string]any{
+			"key": d.Key, "title": d.Title, "status": d.StatusKey, "relation": d.Relation,
+		})
+	}
+
+	details := map[string]any{
+		"scope": cfg.Scope, "total": len(deps), "closed": closed, "open": open,
+	}
+	if len(open) == 0 {
+		out := base(in.Gate, domain.GateResultPassed, "")
+		out.Details = details
+		return out, nil
+	}
+
+	keys := make([]string, 0, len(open))
+	for _, d := range open {
+		keys = append(keys, d["key"].(string))
+	}
+	sort.Strings(keys)
+	out := base(in.Gate, domain.GateResultFailed,
+		"не закрыты задачи: "+strings.Join(keys, ", "))
+	out.Details = details
+	return out, nil
 }

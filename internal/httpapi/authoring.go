@@ -185,9 +185,11 @@ func (s *Server) listWorkflows(c *gin.Context) {
 
 type createWorkflowRequest struct {
 	Name string `json:"name"`
-	// "active" (по умолчанию) — копия работающего цикла, идентификатор версии —
-	// копия конкретной, "empty" — пустой черновик.
+	// "active" (по умолчанию) — копия работающего цикла тех же типов задач,
+	// идентификатор версии — копия конкретной, "empty" — пустой черновик.
 	From string `json:"from"`
+	// Типы задач, которые поведёт цикл. Пусто — обычные задачи.
+	TaskTypes []string `json:"task_types"`
 }
 
 func (s *Server) createWorkflow(c *gin.Context) {
@@ -195,12 +197,39 @@ func (s *Server) createWorkflow(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	wf, err := s.authoring.CreateDraft(c.Request.Context(),
-		c.Param("projectKey"), actor(c).ID, req.Name, req.From)
+		c.Param("projectKey"), actor(c).ID, workflow.DraftInput{
+			Name: req.Name, From: req.From, TaskTypes: req.TaskTypes,
+		})
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
 	c.JSON(http.StatusCreated, wf)
+}
+
+type updateWorkflowRequest struct {
+	Name string `json:"name"`
+	// Типы задач, которые поведёт цикл.
+	TaskTypes []string `json:"task_types"`
+}
+
+func (s *Server) updateWorkflowVersion(c *gin.Context) {
+	id, err := workflowID(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	var req updateWorkflowRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	wf, err := s.authoring.UpdateDraft(c.Request.Context(), id, req.Name, req.TaskTypes)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, wf)
 }
 
 // workflowID разбирает идентификатор версии цикла из пути.

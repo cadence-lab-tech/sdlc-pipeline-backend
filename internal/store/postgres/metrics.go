@@ -54,6 +54,80 @@ type ThroughputMetric struct {
 	ReviewFails  int     `json:"review_fails"`
 }
 
+// CostMetric — стоимость в одном разрезе: по статусу, по роли, по модели.
+// Считается по stage_run_usage: прогоны, о которых никто не отчитался, видны
+// отдельным счётчиком, а не растворяются в нулях (решение 0026).
+type CostMetric struct {
+	// status | role | model
+	Dimension string  `json:"dimension"`
+	Key       string  `json:"key"`
+	Name      string  `json:"name,omitempty"`
+	Runs      int     `json:"runs"`
+	Reported  int     `json:"reported_runs"`
+	Silent    int     `json:"silent_runs"`
+	CostUSD   float64 `json:"cost_usd"`
+	AvgUSD    float64 `json:"avg_cost_usd"`
+	Tokens    int64   `json:"tokens"`
+}
+
+// CostMetrics — стоимость за период в трёх разрезах сразу: по статусу, по
+// роли и по модели. Один запрос, потому что источник у всех трёх один.
+func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID, since time.Time) ([]CostMetric, error) {
+	rows, err := q.Query(ctx, `
+		WITH runs AS (
+		    SELECT sr.id, ws.key AS status_key, ws.name AS status_name,
+		           coalesce(ro.key, '') AS role_key, coalesce(ro.name, '') AS role_name
+		    FROM stage_runs sr
+		    JOIN tasks t ON t.id = sr.task_id
+		    JOIN workflow_statuses ws ON ws.id = sr.status_id
+		    LEFT JOIN roles ro ON ro.id = sr.role_id
+		    WHERE t.project_id = $1 AND sr.entered_at >= $2
+		), per_run AS (
+		    SELECT r.*, sum(u.cost_usd) AS cost,
+		           sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)) AS tokens
+		    FROM runs r LEFT JOIN stage_run_usage u ON u.run_id = r.id
+		    GROUP BY r.id, r.status_key, r.status_name, r.role_key, r.role_name
+		)
+		SELECT 'status', status_key, max(status_name), count(*),
+		       count(*) FILTER (WHERE cost IS NOT NULL),
+		       count(*) FILTER (WHERE cost IS NULL),
+		       coalesce(sum(cost), 0)::float8, coalesce(sum(tokens), 0)::bigint
+		FROM per_run GROUP BY status_key
+		UNION ALL
+		SELECT 'role', role_key, max(role_name), count(*),
+		       count(*) FILTER (WHERE cost IS NOT NULL),
+		       count(*) FILTER (WHERE cost IS NULL),
+		       coalesce(sum(cost), 0)::float8, coalesce(sum(tokens), 0)::bigint
+		FROM per_run WHERE role_key <> '' GROUP BY role_key
+		UNION ALL
+		SELECT 'model', u.model, '', count(DISTINCT u.run_id),
+		       count(DISTINCT u.run_id), 0,
+		       coalesce(sum(u.cost_usd), 0)::float8,
+		       coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)), 0)::bigint
+		FROM stage_run_usage u
+		JOIN runs r ON r.id = u.run_id
+		GROUP BY u.model
+		ORDER BY 1, 7 DESC, 2`, projectID, since)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []CostMetric{}
+	for rows.Next() {
+		var m CostMetric
+		if err := rows.Scan(&m.Dimension, &m.Key, &m.Name, &m.Runs, &m.Reported,
+			&m.Silent, &m.CostUSD, &m.Tokens); err != nil {
+			return nil, translate(err)
+		}
+		if m.Reported > 0 {
+			m.AvgUSD = m.CostUSD / float64(m.Reported)
+		}
+		out = append(out, m)
+	}
+	return out, translate(rows.Err())
+}
+
 // StatusMetrics — по статусам активного и прежних циклов, сгруппировано по
 // ключу статуса: задача, начатая на прошлой версии, доходит по ней, а метрика
 // про «аналитику» одна.

@@ -6,6 +6,9 @@ DECLARE
     sys        uuid;
     proj       uuid;
     wf         uuid;
+    wf_epic    uuid;
+    ep_plan    uuid; ep_decomp uuid; ep_progress uuid; ep_done uuid; ep_cancel uuid;
+    r_orchestrator uuid;
     st_new     uuid; st_ana uuid; st_arc uuid; st_dev uuid;
     st_rev     uuid; st_qa  uuid; st_done uuid; st_cancel uuid;
     r_analyst  uuid; r_architect uuid; r_developer uuid; r_reviewer uuid; r_qa uuid;
@@ -32,6 +35,17 @@ BEGIN
 
     -- Свойства задач. multi_repo системное: его поведение зашито в движок,
     -- проект может поменять только значение по умолчанию.
+    -- Тип задачи тоже системный: по нему выбирается цикл. Набор типов —
+    -- данные проекта, движок знает только про сам факт типа (решение 0024).
+    INSERT INTO task_property_defs
+        (project_id, key, name, description, value_type, default_value, enum_values,
+         is_system, position)
+    VALUES
+        (proj, 'type', 'Тип задачи',
+         'Определяет, по какому циклу идёт задача. Эпик оркестратор нарезает на '
+         'дочерние задачи, обычная задача проходит цикл разработки.',
+         'enum', '"task"'::jsonb, ARRAY['task', 'epic'], true, 0);
+
     INSERT INTO task_property_defs
         (project_id, key, name, description, value_type, default_value, is_system, position)
     VALUES
@@ -44,8 +58,8 @@ BEGIN
          'Подсказка ролям архитектора и разработчика.',
          'boolean', 'false'::jsonb, false, 2);
 
-    INSERT INTO workflows (project_id, name, version, state, created_by)
-    VALUES (proj, 'Default SDLC', 1, 'active', sys)
+    INSERT INTO workflows (project_id, name, version, state, task_types, created_by)
+    VALUES (proj, 'Default SDLC', 1, 'active', '{task}', sys)
     RETURNING id INTO wf;
 
     INSERT INTO workflow_statuses (workflow_id, key, name, category, position, is_initial, is_terminal, description) VALUES
@@ -73,13 +87,15 @@ BEGIN
         (proj, 'architect', 'Архитектор', 'Сопоставляет требования с текущей кодовой базой', sys),
         (proj, 'developer', 'Разработчик','Реализует по утверждённому плану', sys),
         (proj, 'reviewer',  'Ревьюер',    'Независимая перепроверка чужого результата', sys),
-        (proj, 'qa',        'QA',         'Проверяет результат против критериев приёмки', sys);
+        (proj, 'qa',        'QA',         'Проверяет результат против критериев приёмки', sys),
+        (proj, 'orchestrator', 'Оркестратор', 'Режет эпик на задачи и следит за порядком работ', sys);
 
     SELECT id INTO r_analyst   FROM roles WHERE project_id = proj AND key = 'analyst';
     SELECT id INTO r_architect FROM roles WHERE project_id = proj AND key = 'architect';
     SELECT id INTO r_developer FROM roles WHERE project_id = proj AND key = 'developer';
     SELECT id INTO r_reviewer  FROM roles WHERE project_id = proj AND key = 'reviewer';
     SELECT id INTO r_qa        FROM roles WHERE project_id = proj AND key = 'qa';
+    SELECT id INTO r_orchestrator FROM roles WHERE project_id = proj AND key = 'orchestrator';
 
     INSERT INTO role_versions (role_id, version, instructions, input_kinds, output_contract, context_budget, created_by) VALUES
         (r_analyst, 1,
@@ -136,7 +152,21 @@ BEGIN
          '- Не проверяй то, чего нет в критериях; недостающее — открытый вопрос.',
          '{analysis.acceptance_criteria,dev.change_summary,dev.test_report}',
          '[{"kind":"qa.report","title":"Отчёт QA","format":"markdown","required":true}]',
-         '{"rag_top_k":10}', sys);
+         '{"rag_top_k":10}', sys),
+
+        -- Оркестратор работает крупной моделью: разрезать эпик неверно дороже,
+        -- чем сделать неверно одну задачу. Саб-агентам достаются модели поменьше,
+        -- и это свойство их ролей, а не задачи (решение 0025).
+        (r_orchestrator, 1,
+         E'Ты оркестратор. Твоя работа — разрезать эпик на задачи, которые можно вести по одной.\n\n'
+         '- Каждая дочерняя задача должна быть проверяемой сама по себе и жить в своей области репозиториев.\n'
+         '- Задавай порядок связями blocks, а не порядком создания: движок читает связи, а не намерения.\n'
+         '- Не заводи задачи вне области эпика и не расширяй её: расширение области — решение человека.\n'
+         '- Заводи задачи тулом sdlc_create_task с parent — ключом этого эпика; работу за саб-агентов не делай.\n'
+         '- В разбивке объясни, почему граница между задачами проходит именно здесь.',
+         '{}',
+         '[{"kind":"planning.breakdown","title":"Разбивка эпика на задачи","format":"markdown","required":true}]',
+         '{"rag_top_k":15,"include_project_docs":true}', sys);
 
     -- Привязка ролей к статусам
     INSERT INTO status_roles (status_id, role_id, is_primary) VALUES
@@ -263,29 +293,95 @@ BEGIN
     FROM workflow_transitions
     WHERE workflow_id = wf AND kind = 'reject';
 
+    -- ── Цикл эпиков ─────────────────────────────────────────────────────────
+    -- Эпик идёт по своему циклу: у планирования другие статусы и другие гейты,
+    -- чем у разработки, и смешивать их в один цикл с ветвлением по типу значило
+    -- бы прятать условие внутрь данных цикла (решение 0024).
+    INSERT INTO workflows (project_id, name, version, state, task_types, created_by)
+    VALUES (proj, 'Epic planning', 1, 'active', '{epic}', sys)
+    RETURNING id INTO wf_epic;
+
+    INSERT INTO workflow_statuses (workflow_id, key, name, category, position, is_initial, is_terminal, description) VALUES
+        (wf_epic, 'planning',      'Planning',      'backlog',   1, true,  false, 'Эпик заведён, границы не определены'),
+        (wf_epic, 'decomposition', 'Decomposition', 'active',    2, false, false, 'Оркестратор режет эпик на задачи'),
+        -- waiting, а не active: работа идёт в дочерних задачах, в самом эпике
+        -- работать некому, и исполнителя здесь быть не должно.
+        (wf_epic, 'in_progress',   'In progress',   'waiting',   3, false, false, 'Дочерние задачи идут своими циклами'),
+        (wf_epic, 'done',          'Done',          'done',      4, false, true,  'Все дочерние задачи закрыты'),
+        (wf_epic, 'cancelled',     'Cancelled',     'cancelled', 5, false, true,  'Эпик снят');
+
+    SELECT id INTO ep_plan     FROM workflow_statuses WHERE workflow_id = wf_epic AND key = 'planning';
+    SELECT id INTO ep_decomp   FROM workflow_statuses WHERE workflow_id = wf_epic AND key = 'decomposition';
+    SELECT id INTO ep_progress FROM workflow_statuses WHERE workflow_id = wf_epic AND key = 'in_progress';
+    SELECT id INTO ep_done     FROM workflow_statuses WHERE workflow_id = wf_epic AND key = 'done';
+    SELECT id INTO ep_cancel   FROM workflow_statuses WHERE workflow_id = wf_epic AND key = 'cancelled';
+
+    INSERT INTO status_roles (status_id, role_id, is_primary) VALUES
+        (ep_decomp, r_orchestrator, true);
+
+    INSERT INTO workflow_transitions (workflow_id, key, name, from_status_id, to_status_id, kind, position) VALUES
+        (wf_epic, 'start',         'Отдать оркестратору', ep_plan,     ep_decomp,   'advance', 1),
+        (wf_epic, 'breakdown_done','Разбивка готова',     ep_decomp,   ep_progress, 'advance', 2),
+        (wf_epic, 'children_done', 'Закрыть эпик',        ep_progress, ep_done,     'advance', 3),
+        (wf_epic, 'replan',        'Вернуть на разбивку', ep_progress, ep_decomp,   'reject',  10);
+
+    INSERT INTO workflow_transitions (workflow_id, key, name, from_status_id, to_status_id, kind, position)
+    VALUES (wf_epic, 'cancel', 'Снять эпик', NULL, ep_cancel, 'cancel', 99);
+
+    INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
+    SELECT id, 'artifacts', 'Разбивка сдана', 'artifacts_required',
+           '{"kinds":["planning.breakdown"]}', true, 1
+    FROM workflow_transitions WHERE workflow_id = wf_epic AND key = 'breakdown_done';
+
+    -- Разбивка проходит те же гейты, что любая другая работа агента: человек
+    -- смотрит на границы задач до того, как по ним побегут саб-агенты.
+    INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
+    SELECT id, 'human_approval', 'Разбивку утвердил человек', 'human_approval',
+           '{"min_approvals":1}', true, 2
+    FROM workflow_transitions WHERE workflow_id = wf_epic AND key = 'breakdown_done';
+
+    -- Ради этого гейта и заведён эпик как задача: он держит закрытие, пока
+    -- открыт хоть один кусок нарезки.
+    INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
+    SELECT id, 'children', 'Все дочерние задачи закрыты', 'dependencies_closed',
+           '{"scope":"children","allow_cancelled":true}', true, 1
+    FROM workflow_transitions WHERE workflow_id = wf_epic AND key = 'children_done';
+
+    INSERT INTO gates (transition_id, key, name, type, config, blocking, position)
+    SELECT id, 'problem_report', 'Описание проблемы приложено', 'artifacts_required',
+           '{"kinds":["problem.report"]}', true, 1
+    FROM workflow_transitions WHERE workflow_id = wf_epic AND kind = 'reject';
+
     -- Демонстрационные задачи. Первые две однорепозиторные, третья охватывает
     -- бэкенд и фронтенд сразу — ровно тот случай, ради которого заведён multi_repo.
-    INSERT INTO epics (project_id, key, title, description, created_by)
-    VALUES (proj, 'SDLC-E1', 'Скелет системы', 'Первый сквозной проход цикла', sys)
-    RETURNING id INTO ep;
+    UPDATE projects SET task_counter = task_counter + 4 WHERE id = proj;
 
-    UPDATE projects SET task_counter = task_counter + 3 WHERE id = proj;
-
-    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
-    VALUES (proj, ep, 'SDLC-1', 1, 'REST API проектов и задач',
-            'Поднять Gin, миграции и CRUD.', wf, st_new, '{"multi_repo": false}', sys)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    VALUES (proj, 'SDLC-1', 1, 'REST API проектов и задач',
+            'Поднять Gin, миграции и CRUD.', wf, st_new,
+            '{"type": "task", "multi_repo": false}', sys)
     RETURNING id INTO t_be;
 
-    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
-    VALUES (proj, ep, 'SDLC-2', 2, 'Доска задач и карточка',
-            'Vite + React 19 + Astryx поверх REST.', wf, st_new, '{"multi_repo": false}', sys)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    VALUES (proj, 'SDLC-2', 2, 'Доска задач и карточка',
+            'Vite + React 19 + Astryx поверх REST.', wf, st_new,
+            '{"type": "task", "multi_repo": false}', sys)
     RETURNING id INTO t_fe;
 
-    INSERT INTO tasks (project_id, epic_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
-    VALUES (proj, ep, 'SDLC-3', 3, 'Признак мультирепозиторности в карточке задачи',
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    VALUES (proj, 'SDLC-3', 3, 'Признак мультирепозиторности в карточке задачи',
             'Добавить поле в ручку задачи на бэкенде и отобразить его в карточке на фронте.',
-            wf, st_new, '{"multi_repo": true, "needs_migration": true}', sys)
+            wf, st_new, '{"type": "task", "multi_repo": true, "needs_migration": true}', sys)
     RETURNING id INTO t_multi;
+
+    -- Эпик — такая же задача, только своего типа и на своём цикле.
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    VALUES (proj, 'SDLC-4', 4, 'Скелет системы',
+            'Первый сквозной проход цикла: бэкенд, фронтенд и мультирепозиторная задача.',
+            wf_epic, ep_plan, '{"type": "epic"}', sys)
+    RETURNING id INTO ep;
+
+    UPDATE tasks SET parent_id = ep WHERE id IN (t_be, t_fe, t_multi);
 
     INSERT INTO task_repositories (project_id, task_id, repository_id, is_primary, added_by) VALUES
         (proj, t_be,    repo_be, true,  sys),
@@ -303,11 +399,12 @@ BEGIN
     INSERT INTO stage_runs (task_id, status_id, attempt, state)
     VALUES (t_be, st_new, 1, 'pending'),
            (t_fe, st_new, 1, 'pending'),
-           (t_multi, st_new, 1, 'pending');
+           (t_multi, st_new, 1, 'pending'),
+           (ep, ep_plan, 1, 'pending');
 
     INSERT INTO task_events (task_id, stage_run_id, type, actor_id, payload)
     SELECT sr.task_id, sr.id, 'task.created', sys, '{"source":"seed"}'
-    FROM stage_runs sr WHERE sr.task_id IN (t_be, t_fe, t_multi);
+    FROM stage_runs sr WHERE sr.task_id IN (t_be, t_fe, t_multi, ep);
 
 END
 $seed$;

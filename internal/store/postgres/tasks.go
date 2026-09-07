@@ -13,26 +13,31 @@ import (
 )
 
 const taskSelect = `
-	SELECT t.id, t.project_id, p.key, t.epic_id, t.key, t.seq, t.title, t.description,
-	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id,
+	SELECT t.id, t.project_id, p.key, t.parent_id, parent.key, t.key, t.seq, t.title, t.description,
+	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id, assignee.handle,
 	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at
 	FROM tasks t
 	JOIN projects p ON p.id = t.project_id
-	JOIN workflow_statuses ws ON ws.id = t.status_id`
+	JOIN workflow_statuses ws ON ws.id = t.status_id
+	LEFT JOIN tasks parent ON parent.id = t.parent_id
+	LEFT JOIN principals assignee ON assignee.id = t.assignee_id`
 
 func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	var t domain.Task
-	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.EpicID, &t.Key, &t.Seq,
+	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.ParentID, &t.ParentKey, &t.Key, &t.Seq,
 		&t.Title, &t.Description, &t.WorkflowID, &t.StatusID, &t.StatusKey, &t.StatusName,
-		&t.Priority, &t.AssigneeID, &t.ExternalRef, &t.Labels, &t.Properties,
+		&t.Priority, &t.AssigneeID, &t.AssigneeHandle, &t.ExternalRef, &t.Labels, &t.Properties,
 		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt)
 	return t, err
 }
 
 type ListTasksFilter struct {
 	StatusKey string
-	EpicKey   string
-	Limit     int
+	// Ключ родительской задачи: дети эпика. Пусто — фильтра нет.
+	ParentKey string
+	// Тип задачи. Пусто — все типы: доска показывает и эпики, и задачи.
+	Type  string
+	Limit int
 }
 
 func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
@@ -41,12 +46,12 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 		limit = 200
 	}
 	rows, err := q.Query(ctx, taskSelect+`
-		LEFT JOIN epics e ON e.id = t.epic_id
 		WHERE t.project_id = $1
 		  AND ($2 = '' OR ws.key = $2)
-		  AND ($3 = '' OR e.key = $3)
+		  AND ($3 = '' OR parent.key = $3)
+		  AND ($4 = '' OR coalesce(t.properties->>'type', $5) = $4)
 		ORDER BY ws.position, t.seq
-		LIMIT $4`, projectID, f.StatusKey, f.EpicKey, limit)
+		LIMIT $6`, projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType, limit)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -142,13 +147,19 @@ func (s *Store) TaskRepositories(ctx context.Context, q Querier, taskID uuid.UUI
 }
 
 type CreateTaskInput struct {
-	ProjectID   uuid.UUID
-	EpicKey     string
+	ProjectID uuid.UUID
+	// Ключ родительской задачи: так оркестратор вешает нарезку на эпик.
+	ParentKey string
+	// Тип задачи. Пусто — тип из properties, а если и там пусто — обычная
+	// задача. По типу выбирается цикл (решение 0024).
+	TaskType    string
 	Title       string
 	Description *string
 	Priority    string
-	Labels      []string
-	Properties  json.RawMessage
+	// Адресное назначение: назначенную задачу заберёт только этот принципал.
+	AssigneeID *uuid.UUID
+	Labels     []string
+	Properties json.RawMessage
 	// Ссылки на репозитории: owner/name, просто name или role_hint.
 	// Область задачи — не украшение: на ней стоит гейт repo_scope и по ней
 	// детектор дрейфа понимает, за какими репозиториями следить.
@@ -171,7 +182,17 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 		return domain.Task{}, notFound(err, "проект не найден")
 	}
 
-	wf, err := s.GetActiveWorkflow(ctx, tx, in.ProjectID)
+	props, taskType, err := taskTypeInProperties(in.Properties, in.TaskType)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if err := s.checkTaskType(ctx, tx, in.ProjectID, taskType); err != nil {
+		return domain.Task{}, err
+	}
+
+	// Цикл выбирается типом задачи: эпик идёт по циклу планирования, задача —
+	// по циклу разработки, и это два разных набора статусов.
+	wf, err := s.GetActiveWorkflowForType(ctx, tx, in.ProjectID, taskType)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -180,24 +201,22 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 		return domain.Task{}, err
 	}
 
-	var epicID *uuid.UUID
-	if in.EpicKey != "" {
-		var id uuid.UUID
-		if err := tx.QueryRow(ctx,
-			`SELECT id FROM epics WHERE project_id = $1 AND key = $2`,
-			in.ProjectID, in.EpicKey).Scan(&id); err != nil {
-			return domain.Task{}, notFound(err, "эпик %q не найден", in.EpicKey)
+	var parentID *uuid.UUID
+	if in.ParentKey != "" {
+		parent, err := s.GetTaskByKey(ctx, tx, in.ParentKey)
+		if err != nil {
+			return domain.Task{}, err
 		}
-		epicID = &id
+		if parent.ProjectID != in.ProjectID {
+			return domain.Task{}, apperr.InvalidInput(
+				"родительская задача %q из другого проекта", in.ParentKey)
+		}
+		parentID = &parent.ID
 	}
 
 	priority := in.Priority
 	if priority == "" {
 		priority = "normal"
-	}
-	props := in.Properties
-	if len(props) == 0 {
-		props = json.RawMessage(`{}`)
 	}
 	labels := in.Labels
 	if labels == nil {
@@ -207,12 +226,13 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 	var taskID uuid.UUID
 	key := fmt.Sprintf("%s-%d", projectKey, seq)
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO tasks (project_id, epic_id, key, seq, title, description,
-		                   workflow_id, status_id, priority, labels, properties, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO tasks (project_id, parent_id, key, seq, title, description,
+		                   workflow_id, status_id, priority, assignee_id, labels,
+		                   properties, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id`,
-		in.ProjectID, epicID, key, seq, in.Title, in.Description,
-		wf.ID, initial.ID, priority, labels, props, in.CreatedBy,
+		in.ProjectID, parentID, key, seq, in.Title, in.Description,
+		wf.ID, initial.ID, priority, in.AssigneeID, labels, props, in.CreatedBy,
 	).Scan(&taskID); err != nil {
 		return domain.Task{}, translate(err)
 	}
@@ -377,4 +397,94 @@ func (s *Store) AddTaskRepository(ctx context.Context, tx pgx.Tx, t domain.Task,
 		ON CONFLICT (task_id, repository_id) DO NOTHING`,
 		t.ProjectID, t.ID, repoID, len(t.Repositories) == 0, stageRunID, actor, note)
 	return translate(err)
+}
+
+// taskTypeInProperties сводит тип задачи и её свойства в одно место: тип —
+// системное свойство, и хранить его отдельной колонкой значило бы держать два
+// источника правды об одном.
+func taskTypeInProperties(props json.RawMessage, taskType string) (json.RawMessage, string, error) {
+	values := map[string]json.RawMessage{}
+	if len(props) > 0 {
+		if err := json.Unmarshal(props, &values); err != nil {
+			return nil, "", apperr.InvalidInput("свойства задачи не объект JSON")
+		}
+	}
+
+	if taskType == "" {
+		if raw, ok := values["type"]; ok {
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, "", apperr.InvalidInput("свойство type должно быть строкой")
+			}
+			taskType = v
+		}
+	}
+	if taskType == "" {
+		taskType = domain.DefaultTaskType
+	}
+
+	encoded, err := json.Marshal(taskType)
+	if err != nil {
+		return nil, "", apperr.Internal(err, "тип задачи")
+	}
+	values["type"] = encoded
+
+	out, err := json.Marshal(values)
+	if err != nil {
+		return nil, "", apperr.Internal(err, "свойства задачи")
+	}
+	return out, taskType, nil
+}
+
+// checkTaskType сверяет тип с перечнем, объявленным проектом.
+func (s *Store) checkTaskType(ctx context.Context, q Querier, projectID uuid.UUID, taskType string) error {
+	values, err := s.TaskTypes(ctx, q, projectID)
+	if err != nil {
+		return err
+	}
+	for _, v := range values {
+		if v == taskType {
+			return nil
+		}
+	}
+	return apperr.InvalidInput("тип задачи %q не объявлен в проекте; заведены: %v", taskType, values)
+}
+
+// TaskTypes — типы задач, объявленные проектом. Набор типов — данные
+// (task_property_defs), а не список в коде: проект расширяет его сам.
+func (s *Store) TaskTypes(ctx context.Context, q Querier, projectID uuid.UUID) ([]string, error) {
+	var values []string
+	err := q.QueryRow(ctx, `
+		SELECT enum_values FROM task_property_defs
+		WHERE project_id = $1 AND key = 'type'`, projectID).Scan(&values)
+	if isNoRows(err) {
+		return []string{domain.DefaultTaskType}, nil
+	}
+	if err != nil {
+		return nil, translate(err)
+	}
+	if len(values) == 0 {
+		return []string{domain.DefaultTaskType}, nil
+	}
+	return values, nil
+}
+
+// ChildTasks — дочерние задачи, в порядке заведения. На них стоит гейт
+// dependencies_closed и по ним карточка эпика рисует дерево.
+func (s *Store) ChildTasks(ctx context.Context, q Querier, parentID uuid.UUID) ([]domain.Task, error) {
+	rows, err := q.Query(ctx, taskSelect+` WHERE t.parent_id = $1 ORDER BY t.seq`, parentID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.Task{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, t)
+	}
+	return out, translate(rows.Err())
 }

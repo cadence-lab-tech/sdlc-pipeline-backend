@@ -35,8 +35,12 @@ func commands() []command {
 	return []command{
 		{"whoami", "кто я и к какому проекту подключён", "sdlc whoami", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "sdlc queue [--role reviewer] [--status analysis]", cmdQueue},
-		{"tasks", "задачи проекта", "sdlc tasks [--status analysis]", cmdTasks},
+		{"tasks", "задачи проекта", "sdlc tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "sdlc show SDLC-42", cmdShow},
+		{"create", "завести задачу или эпик", "sdlc create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot]", cmdCreate},
+		{"relate", "связать задачи порядком или контекстом", "sdlc relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
+		{"assign", "назначить задачу исполнителю", "sdlc assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
+		{"usage", "отчитаться о стоимости прогона или показать её", "sdlc usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | sdlc usage SDLC-4 --show", cmdUsage},
 		{"claim", "забрать задачу и получить контекст этапа", "sdlc claim SDLC-42 [--session ref]", cmdClaim},
 		{"heartbeat", "продлить аренду", "sdlc heartbeat SDLC-42", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "sdlc release SDLC-42 [--note ...]", cmdRelease},
@@ -231,10 +235,12 @@ func cmdQueue(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdTasks(ctx context.Context, c *Client, args []string) error {
-	var projectFlag, status string
+	var projectFlag, status, taskType, parent string
 	fs, err := flags("tasks", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&status, "status", "", "фильтр по статусу")
+		fs.StringVar(&taskType, "type", "", "фильтр по типу задачи, например epic")
+		fs.StringVar(&parent, "parent", "", "только дочерние задачи этой")
 	})
 	if err != nil {
 		return err
@@ -247,6 +253,12 @@ func cmdTasks(ctx context.Context, c *Client, args []string) error {
 	q := url.Values{}
 	if status != "" {
 		q.Set("status", status)
+	}
+	if taskType != "" {
+		q.Set("type", taskType)
+	}
+	if parent != "" {
+		q.Set("parent", parent)
 	}
 
 	var out any

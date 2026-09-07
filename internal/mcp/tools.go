@@ -20,7 +20,8 @@ func (s *Server) registerTools() {
 		s.whoami)
 	add(s, "sdlc_list_tasks",
 		"Задачи проекта. claimable=true оставляет только то, что можно забрать прямо сейчас, "+
-			"с указанием роли, которой эта работа адресована.",
+			"с указанием роли, которой эта работа адресована; parent — нарезка эпика, "+
+			"type — только задачи этого типа. Задача, назначенная другому, показана, но не claimable.",
 		s.listTasks)
 	add(s, "sdlc_claim_task",
 		"Забрать задачу: выдаётся аренда, в ответ приезжают инструкция роли, результаты "+
@@ -97,7 +98,13 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 	if err != nil {
 		return fail(err)
 	}
-	wf, err := s.store.GetActiveWorkflow(ctx, q, project.ID)
+	// Циклов у проекта столько, сколько типов задач: оркестратору нужно
+	// знать, что цикл эпиков вообще есть (решение 0024).
+	active, err := s.store.ListActiveWorkflows(ctx, q, project.ID)
+	if err != nil {
+		return fail(err)
+	}
+	wf, err := s.store.GetActiveWorkflowForType(ctx, q, project.ID, domain.DefaultTaskType)
 	if err != nil {
 		return fail(err)
 	}
@@ -126,10 +133,11 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 		return fail(err)
 	}
 	view := map[string]any{
-		"actor":    map[string]any{"handle": me.Handle, "kind": me.Kind},
-		"project":  map[string]any{"key": project.Key, "name": project.Name},
-		"workflow": map[string]any{"name": wf.Name, "version": wf.Version, "statuses": statuses},
-		"roles":    roleViews,
+		"actor":     map[string]any{"handle": me.Handle, "kind": me.Kind},
+		"project":   map[string]any{"key": project.Key, "name": project.Name},
+		"workflow":  map[string]any{"name": wf.Name, "version": wf.Version, "statuses": statuses},
+		"workflows": workflowTypes(active),
+		"roles":     roleViews,
 		// В режиме заголовка актор — это то, чем представился клиент, а не
 		// то, что кто-то проверил (решение 0021).
 		"authenticated": id.Authenticated(),
@@ -148,6 +156,8 @@ type listTasksInput struct {
 	Status    string `json:"status,omitempty" jsonschema:"ключ статуса, например analysis"`
 	Role      string `json:"role,omitempty" jsonschema:"ключ роли: оставить только работу для неё"`
 	Claimable bool   `json:"claimable,omitempty" jsonschema:"только то, что можно забрать прямо сейчас"`
+	Parent    string `json:"parent,omitempty" jsonschema:"ключ родительской задачи: нарезка этого эпика"`
+	Type      string `json:"type,omitempty" jsonschema:"тип задачи, например epic"`
 	Limit     int    `json:"limit,omitempty"`
 }
 
@@ -167,7 +177,10 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 	}
 
 	if in.Claimable || in.Role != "" {
-		runs, err := s.store.ListOpenRuns(ctx, q, project.ID, in.Status, in.Role, in.Limit)
+		runs, err := s.store.ListOpenRuns(ctx, q, project.ID, postgres.OpenRunsFilter{
+			StatusKey: in.Status, RoleKey: in.Role,
+			Viewer: identity(ctx).Principal.ID, Limit: in.Limit,
+		})
 		if err != nil {
 			return fail(err)
 		}
@@ -176,12 +189,19 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 			if in.Claimable && !r.Claimable {
 				continue
 			}
+			if in.Parent != "" && (r.Task.ParentKey == nil || *r.Task.ParentKey != in.Parent) {
+				continue
+			}
+			if in.Type != "" && r.Task.Type() != in.Type {
+				continue
+			}
 			items = append(items, map[string]any{
 				"key": r.Task.Key, "title": r.Task.Title, "status": r.Task.StatusKey,
+				"type": r.Task.Type(), "parent": r.Task.ParentKey,
 				"stage_run_id": r.Run.ID, "stage_kind": r.Run.Kind, "state": r.Run.State,
 				"attempt": r.Run.Attempt, "role": r.RoleKey, "role_name": r.RoleName,
-				"claimable": r.Claimable,
-				"held_by":   r.Run.ClaimedHandle, "lease_expires_at": r.Run.LeaseExpires,
+				"claimable": r.Claimable, "assignee": r.Task.AssigneeHandle,
+				"held_by": r.Run.ClaimedHandle, "lease_expires_at": r.Run.LeaseExpires,
 				"repositories": repoNames(r.Task),
 			})
 		}
@@ -189,7 +209,7 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 	}
 
 	tasks, err := s.store.ListTasks(ctx, q, project.ID, postgres.ListTasksFilter{
-		StatusKey: in.Status, Limit: in.Limit,
+		StatusKey: in.Status, ParentKey: in.Parent, Type: in.Type, Limit: in.Limit,
 	})
 	if err != nil {
 		return fail(err)
@@ -198,11 +218,23 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 	for _, t := range tasks {
 		items = append(items, map[string]any{
 			"key": t.Key, "title": t.Title, "status": t.StatusKey,
+			"type": t.Type(), "parent": t.ParentKey, "assignee": t.AssigneeHandle,
 			"priority": t.Priority, "multi_repo": t.MultiRepo(),
 			"repositories": repoNames(t),
 		})
 	}
 	return ok(map[string]any{"tasks": items})
+}
+
+// workflowTypes — какой цикл ведёт какие типы задач.
+func workflowTypes(workflows []domain.Workflow) []map[string]any {
+	out := make([]map[string]any, 0, len(workflows))
+	for _, wf := range workflows {
+		out = append(out, map[string]any{
+			"name": wf.Name, "version": wf.Version, "task_types": wf.TaskTypes,
+		})
+	}
+	return out
 }
 
 func repoNames(t domain.Task) []string {

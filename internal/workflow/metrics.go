@@ -17,6 +17,8 @@ type Metrics struct {
 	Statuses   []postgres.StatusMetric   `json:"statuses"`
 	Gates      []postgres.GateMetric     `json:"gates"`
 	Drift      []postgres.DriftMetric    `json:"drift"`
+	// Стоимость по статусам, ролям и моделям (решение 0026).
+	Cost []postgres.CostMetric `json:"cost"`
 }
 
 // ProjectMetrics считает всё по накопленным таблицам. period — окно назад от
@@ -46,6 +48,9 @@ func (e *Engine) ProjectMetrics(ctx context.Context, projectKey string, period t
 		return out, err
 	}
 	if out.Drift, err = e.store.DriftMetrics(ctx, q, project.ID, out.Since); err != nil {
+		return out, err
+	}
+	if out.Cost, err = e.store.CostMetrics(ctx, q, project.ID, out.Since); err != nil {
 		return out, err
 	}
 	return out, nil

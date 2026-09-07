@@ -242,10 +242,25 @@ func (a *Authoring) role(ctx context.Context, q postgres.Querier, projectKey, ro
 
 // ── версии цикла ────────────────────────────────────────────────────────────
 
+// DraftInput — из чего собрать черновик цикла.
+type DraftInput struct {
+	Name string
+	// "active" (по умолчанию) — копия работающего цикла тех же типов задач,
+	// идентификатор версии — копия конкретной, "empty" — пустой черновик.
+	From string
+	// Типы задач, которые поведёт цикл. Пусто — обычные задачи.
+	TaskTypes []string
+}
+
 // CreateDraft заводит черновик цикла, обычно копией уже работающего:
 // с нуля цикл собирают один раз, дальше меняют один гейт из двадцати.
-func (a *Authoring) CreateDraft(ctx context.Context, projectKey string, actor uuid.UUID, name, from string) (domain.Workflow, error) {
+func (a *Authoring) CreateDraft(ctx context.Context, projectKey string, actor uuid.UUID, in DraftInput) (domain.Workflow, error) {
 	var out domain.Workflow
+	name, from := in.Name, in.From
+	taskTypes := in.TaskTypes
+	if len(taskTypes) == 0 {
+		taskTypes = []string{domain.DefaultTaskType}
+	}
 
 	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
 		project, err := a.store.GetProjectByKey(ctx, tx, projectKey)
@@ -258,7 +273,9 @@ func (a *Authoring) CreateDraft(ctx context.Context, projectKey string, actor uu
 		case from == "empty":
 			// Цикл с нуля: законный старт для проекта, у которого его ещё нет.
 		case from == "" || from == "active":
-			wf, err := a.store.GetActiveWorkflow(ctx, tx, project.ID)
+			// Копируется цикл того же типа задач: черновик цикла эпиков не
+			// должен начинаться с копии цикла разработки.
+			wf, err := a.store.GetActiveWorkflowForType(ctx, tx, project.ID, taskTypes[0])
 			if err != nil {
 				// Копировать нечего только если цикла в проекте вообще нет —
 				// и это не ошибка, если источник не потребовали явно.
@@ -291,7 +308,7 @@ func (a *Authoring) CreateDraft(ctx context.Context, projectKey string, actor uu
 			}
 		}
 
-		out, err = a.store.CreateWorkflow(ctx, tx, project.ID, name, actor)
+		out, err = a.store.CreateWorkflow(ctx, tx, project.ID, name, taskTypes, actor)
 		if err != nil {
 			return err
 		}
@@ -301,6 +318,33 @@ func (a *Authoring) CreateDraft(ctx context.Context, projectKey string, actor uu
 			}
 		}
 		out, err = a.store.GetWorkflow(ctx, tx, out.ID)
+		return err
+	})
+
+	return out, err
+}
+
+// UpdateDraft меняет имя черновика и типы задач, которые он поведёт.
+// Активную версию не тронуть: по ней прямо сейчас идут задачи своего типа.
+func (a *Authoring) UpdateDraft(ctx context.Context, id uuid.UUID, name string, taskTypes []string) (domain.Workflow, error) {
+	var out domain.Workflow
+
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		wf, err := a.draft(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if name != "" && name != wf.Name {
+			if err := a.store.RenameWorkflow(ctx, tx, wf.ID, name); err != nil {
+				return err
+			}
+		}
+		if len(taskTypes) > 0 {
+			if err := a.store.SetWorkflowTaskTypes(ctx, tx, wf.ID, taskTypes); err != nil {
+				return err
+			}
+		}
+		out, err = a.store.GetWorkflow(ctx, tx, wf.ID)
 		return err
 	})
 
@@ -528,8 +572,10 @@ func (a *Authoring) Validate(ctx context.Context, id uuid.UUID) (Validation, err
 // ActivationResult — что стало с циклом проекта после активации.
 type ActivationResult struct {
 	Workflow domain.Workflow `json:"workflow"`
-	// Версия, ушедшая на покой.
-	RetiredID *uuid.UUID `json:"retired_workflow_id,omitempty"`
+	// Версия, ушедшая на покой. Оставлено ради прежних клиентов; версий может
+	// быть несколько, если новый цикл ведёт несколько типов задач.
+	RetiredID *uuid.UUID  `json:"retired_workflow_id,omitempty"`
+	Retired   []uuid.UUID `json:"retired_workflow_ids,omitempty"`
 	// Задачи, которые доходят по прежней версии: задача идёт по тому циклу, на
 	// котором начата, и активация её не двигает.
 	OnPreviousVersion []postgres.OpenTaskOnWorkflow `json:"tasks_on_previous_version"`
@@ -561,23 +607,42 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 		}
 		res.Warnings = v.Warnings
 
-		retired, err := a.store.RetireActiveWorkflow(ctx, tx, wf.ProjectID)
+		// На покой уходят циклы тех же типов задач: активация цикла эпиков не
+		// должна оставить обычные задачи без цикла (решение 0024).
+		retired, err := a.store.RetireActiveWorkflows(ctx, tx, wf.ProjectID, wf.TaskTypes)
 		if err != nil {
 			return err
 		}
-		res.RetiredID = retired
+		res.Retired = retired
+		if len(retired) > 0 {
+			res.RetiredID = &retired[0]
+		}
 
 		if err := a.store.SetWorkflowState(ctx, tx, wf.ID, domain.WorkflowActive); err != nil {
 			return err
 		}
 
-		if retired != nil {
-			carried, err := a.store.OpenTasksOnWorkflow(ctx, tx, *retired)
+		for _, id := range retired {
+			carried, err := a.store.OpenTasksOnWorkflow(ctx, tx, id)
 			if err != nil {
 				return err
 			}
-			res.OnPreviousVersion = carried
+			res.OnPreviousVersion = append(res.OnPreviousVersion, carried...)
 			res.Warnings = append(res.Warnings, carriedOverWarnings(carried, full)...)
+		}
+
+		// Тип задачи, оставшийся без цикла, — не ошибка активации, но по нему
+		// нельзя завести задачу: проект узнает об этом здесь, а не в момент,
+		// когда кто-то попробует.
+		orphans, err := a.typesWithoutWorkflow(ctx, tx, wf.ProjectID)
+		if err != nil {
+			return err
+		}
+		for _, taskType := range orphans {
+			res.Warnings = append(res.Warnings, Problem{
+				Code: "task_type_without_workflow",
+				Message: fmt.Sprintf(
+					"тип задачи %q объявлен в проекте, но активного цикла для него нет", taskType)})
 		}
 
 		res.Workflow, err = a.store.GetWorkflow(ctx, tx, wf.ID)
@@ -590,6 +655,33 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			"version", res.Workflow.Version, "actor", actor)
 	}
 	return res, err
+}
+
+// typesWithoutWorkflow — типы задач, объявленные проектом, которые не ведёт
+// ни один действующий цикл.
+func (a *Authoring) typesWithoutWorkflow(ctx context.Context, q postgres.Querier, projectID uuid.UUID) ([]string, error) {
+	declared, err := a.store.TaskTypes(ctx, q, projectID)
+	if err != nil {
+		return nil, err
+	}
+	active, err := a.store.ListActiveWorkflows(ctx, q, projectID)
+	if err != nil {
+		return nil, err
+	}
+	covered := map[string]bool{}
+	for _, wf := range active {
+		for _, t := range wf.TaskTypes {
+			covered[t] = true
+		}
+	}
+
+	out := []string{}
+	for _, t := range declared {
+		if !covered[t] {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // carriedOverWarnings предупреждает про задачи, статуса которых в новой версии

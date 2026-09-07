@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -252,8 +253,25 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 	return out, err
 }
 
-// CreateTask заводит задачу и ставит её на начальный статус активного цикла.
-func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.UUID, in postgres.CreateTaskInput) (domain.Task, error) {
+// CreateTaskInput — заведение задачи движком: то же, что у хранилища, плюс
+// связи, назначение и уровень актора.
+type CreateTaskInput struct {
+	postgres.CreateTaskInput
+	// Хэндл принципала-исполнителя: оркестратор адресует нарезку конкретному
+	// раннеру или человеку.
+	AssigneeHandle string
+	// Ключи задач, которые новая задача блокирует: порядок работ оркестратор
+	// задаёт сразу при нарезке, а держит его гейт dependencies_closed.
+	Blocks []string
+	// Уровень актора в проекте. Ниже сопровождающего действует правило агента:
+	// заводить можно только детей задачи, которую он держит по аренде, и только
+	// внутри её области (решение 0024). Пусто — правило выключено: в режиме
+	// header прав нет вовсе.
+	Level domain.MemberRole
+}
+
+// CreateTask заводит задачу и ставит её на начальный статус цикла её типа.
+func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.UUID, in CreateTaskInput) (domain.Task, error) {
 	var out domain.Task
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -264,21 +282,202 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		in.ProjectID = project.ID
 		in.CreatedBy = actor
 
-		out, err = e.store.CreateTask(ctx, tx, in)
+		if in.AssigneeHandle != "" {
+			assignee, err := e.resolveAssignee(ctx, tx, in.AssigneeHandle)
+			if err != nil {
+				return err
+			}
+			in.AssigneeID = &assignee.ID
+		}
+		if err := e.agentMayCreate(ctx, tx, actor, in); err != nil {
+			return err
+		}
+
+		out, err = e.store.CreateTask(ctx, tx, in.CreateTaskInput)
 		if err != nil {
 			return err
+		}
+
+		blocked := []string{}
+		for _, key := range in.Blocks {
+			target, err := e.store.GetTaskByKey(ctx, tx, key)
+			if err != nil {
+				return err
+			}
+			if target.ProjectID != project.ID {
+				return apperr.InvalidInput("задача %q из другого проекта", key)
+			}
+			if _, err := e.store.LinkTasks(ctx, tx, out.ID, target.ID,
+				domain.TaskLinkBlocks, "", actor); err != nil {
+				return err
+			}
+			blocked = append(blocked, target.Key)
 		}
 
 		run, err := e.store.CurrentStageRun(ctx, tx, out.ID, out.StatusID)
 		if err != nil {
 			return err
 		}
+		payload := map[string]any{
+			"key": out.Key, "title": out.Title, "status": out.StatusKey, "type": out.Type(),
+		}
+		if out.ParentKey != nil {
+			payload["parent"] = *out.ParentKey
+		}
+		if len(blocked) > 0 {
+			payload["blocks"] = blocked
+		}
+		if in.AssigneeHandle != "" {
+			payload["assignee"] = in.AssigneeHandle
+		}
 		if err := e.store.AppendEvent(ctx, tx, out.ID, &run.ID, domain.EventTaskCreated, actor,
-			map[string]any{"key": out.Key, "title": out.Title, "status": out.StatusKey}); err != nil {
+			payload); err != nil {
 			return err
 		}
 		return e.store.AppendEvent(ctx, tx, out.ID, &run.ID, domain.EventStageEntered, actor,
 			map[string]any{"status": out.StatusKey, "attempt": run.Attempt})
+	})
+
+	return out, err
+}
+
+// agentMayCreate — рамка, в которой агент вправе заводить задачи.
+//
+// Оркестратор нарезает эпик, который держит: он не может завести задачу в
+// чужом эпике и не может расширить область — расширение области решает
+// человек (решение 0015). Сопровождающий и выше не ограничены ничем.
+func (e *Engine) agentMayCreate(ctx context.Context, q postgres.Querier, actor uuid.UUID, in CreateTaskInput) error {
+	if in.Level == "" || in.Level.Covers(domain.MemberMaintainer) {
+		return nil
+	}
+	if in.ParentKey == "" {
+		return apperr.Forbidden(
+			"агент заводит только дочерние задачи той, которую держит: укажите parent")
+	}
+
+	parent, err := e.store.GetTaskByKey(ctx, q, in.ParentKey)
+	if err != nil {
+		return err
+	}
+	run, err := e.store.CurrentStageRun(ctx, q, parent.ID, parent.StatusID)
+	if err != nil {
+		return err
+	}
+	if run.ClaimedBy == nil || *run.ClaimedBy != actor || !run.LeaseHeld(time.Now()) {
+		return apperr.Forbidden(
+			"задачу %s держите не вы: нарезать её на дочерние может только тот, кто её забрал",
+			parent.Key)
+	}
+
+	if len(in.Repositories) == 0 {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, r := range parent.Repositories {
+		allowed[r.Owner+"/"+r.Name] = true
+		allowed[r.Name] = true
+		if r.RoleHint != nil {
+			allowed[*r.RoleHint] = true
+		}
+	}
+	for _, ref := range in.Repositories {
+		if !allowed[ref] {
+			return apperr.New(apperr.CodeScopeExpansionForbidden,
+				"репозиторий %q вне области задачи %s: расширить область — решение человека",
+				ref, parent.Key)
+		}
+	}
+	return nil
+}
+
+// resolveAssignee находит исполнителя по хэндлу.
+//
+// Хэндл принимается и с видом принципала (agent:runner-bot), и без него:
+// первым его пишут люди и агенты, вторым он хранится. Нового принципала здесь
+// не заводят: назначение на несуществующего исполнителя — опечатка, а не
+// повод завести учётную запись.
+func (e *Engine) resolveAssignee(ctx context.Context, q postgres.Querier, raw string) (domain.Principal, error) {
+	_, handle := SplitHandle(raw, domain.PrincipalAgent)
+	return e.store.GetPrincipalByHandle(ctx, q, handle)
+}
+
+// LinkTasks связывает две задачи. Отношение blocks задаёт порядок работ, и
+// его читает гейт dependencies_closed; остальные отношения — контекст для
+// агента и человека.
+func (e *Engine) LinkTasks(ctx context.Context, fromKey, toKey, rel, note string, actor uuid.UUID, remove bool) ([]postgres.TaskLink, error) {
+	if !domain.ValidTaskLinkRel(rel) {
+		return nil, apperr.InvalidInput("отношение %q не поддерживается: %v", rel, domain.TaskLinkRels)
+	}
+
+	var out []postgres.TaskLink
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		from, err := e.store.GetTaskByKey(ctx, tx, fromKey)
+		if err != nil {
+			return err
+		}
+		to, err := e.store.GetTaskByKey(ctx, tx, toKey)
+		if err != nil {
+			return err
+		}
+		if from.ID == to.ID {
+			return apperr.InvalidInput("задачу нельзя связать с самой собой")
+		}
+		if from.ProjectID != to.ProjectID {
+			return apperr.InvalidInput("задачи из разных проектов")
+		}
+
+		if remove {
+			if err := e.store.UnlinkTasks(ctx, tx, from.ID, to.ID, rel); err != nil {
+				return err
+			}
+		} else if _, err := e.store.LinkTasks(ctx, tx, from.ID, to.ID, rel, note, actor); err != nil {
+			return err
+		}
+
+		event := "task.linked"
+		if remove {
+			event = "task.unlinked"
+		}
+		if err := e.store.AppendEvent(ctx, tx, from.ID, nil, event, actor,
+			map[string]any{"rel": rel, "task": to.Key, "note": note}); err != nil {
+			return err
+		}
+		out, err = e.store.ListTaskLinks(ctx, tx, from.ID)
+		return err
+	})
+
+	return out, err
+}
+
+// Assign меняет исполнителя задачи. Назначенную задачу заберёт только он:
+// так оркестратор адресует нарезку конкретному раннеру (решение 0025).
+func (e *Engine) Assign(ctx context.Context, taskKey, handle string, actor uuid.UUID) (domain.Task, error) {
+	var out domain.Task
+
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
+		if err != nil {
+			return err
+		}
+
+		var assignee *uuid.UUID
+		if handle != "" {
+			p, err := e.resolveAssignee(ctx, tx, handle)
+			if err != nil {
+				return err
+			}
+			assignee = &p.ID
+		}
+		if err := e.store.SetAssignee(ctx, tx, task.ID, assignee); err != nil {
+			return err
+		}
+		if err := e.store.AppendEvent(ctx, tx, task.ID, nil, "task.assigned", actor,
+			map[string]any{"assignee": handle}); err != nil {
+			return err
+		}
+
+		out, err = e.store.GetTaskByKey(ctx, tx, taskKey)
+		return err
 	})
 
 	return out, err

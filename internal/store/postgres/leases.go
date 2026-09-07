@@ -246,11 +246,22 @@ type OpenRun struct {
 	Claimable bool `json:"claimable"`
 }
 
+// OpenRunsFilter — рамки выборки «что сейчас в работе».
+type OpenRunsFilter struct {
+	StatusKey string
+	RoleKey   string
+	// Кто спрашивает: задача, назначенная другому, для него не claimable.
+	// uuid.Nil — назначение не учитывается.
+	Viewer uuid.UUID
+	Limit  int
+}
+
 // ListOpenRuns — незакрытые прогоны проекта: и этапы, и перепроверки.
 //
 // Фильтр по роли нужен агенту, подключённому одной ролью: список «что могу
 // забрать я» иначе пришлось бы собирать на его стороне.
-func (s *Store) ListOpenRuns(ctx context.Context, q Querier, projectID uuid.UUID, statusKey, roleKey string, limit int) ([]OpenRun, error) {
+func (s *Store) ListOpenRuns(ctx context.Context, q Querier, projectID uuid.UUID, f OpenRunsFilter) ([]OpenRun, error) {
+	statusKey, roleKey, limit := f.StatusKey, f.RoleKey, f.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -294,9 +305,12 @@ func (s *Store) ListOpenRuns(ctx context.Context, q Querier, projectID uuid.UUID
 		if err != nil {
 			return nil, err
 		}
+		// Назначенную задачу забирает только тот, на кого она назначена
+		// (решение 0025): для остальных она в списке видна, но не claimable.
+		mine := task.AssigneeID == nil || (f.Viewer != uuid.Nil && *task.AssigneeID == f.Viewer)
 		item := OpenRun{
 			Task: task, Run: run, RoleKey: run.RoleKey,
-			Claimable: run.RoleID != nil && !run.LeaseHeld(time.Now()),
+			Claimable: run.RoleID != nil && !run.LeaseHeld(time.Now()) && mine,
 		}
 		if run.RoleID != nil {
 			if err := q.QueryRow(ctx, `SELECT name FROM roles WHERE id = $1`, *run.RoleID).
@@ -318,4 +332,17 @@ func (s *Store) GetTaskByID(ctx context.Context, q Querier, taskID uuid.UUID) (d
 		return t, err
 	}
 	return t, nil
+}
+
+// LastRunClaimedBy — последний прогон задачи, который забирал этот актор.
+// Нужен отчёту о стоимости: раннер отчитывается, когда этап уже закрыт
+// переходом и текущий прогон принадлежит следующему статусу.
+func (s *Store) LastRunClaimedBy(ctx context.Context, q Querier, taskID, actor uuid.UUID) (domain.StageRun, error) {
+	run, err := scanStageRun(q.QueryRow(ctx, stageRunSelect+`
+		WHERE sr.task_id = $1 AND sr.claimed_by = $2
+		ORDER BY sr.claimed_at DESC LIMIT 1`, taskID, actor))
+	if err != nil {
+		return run, notFound(err, "вы не забирали ни одного этапа этой задачи")
+	}
+	return run, nil
 }

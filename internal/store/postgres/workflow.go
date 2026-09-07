@@ -8,17 +8,29 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
 )
 
-// GetActiveWorkflow отдаёт активную версию цикла проекта целиком: статусы с
-// ролями, переходы с гейтами. Собирается несколькими запросами, а не одним
-// join'ом — иначе строки размножаются по декартову произведению гейтов и ролей.
+// GetActiveWorkflow отдаёт действующий цикл обычных задач. Оставлен для тех,
+// кому тип не важен: доска по умолчанию, экспорт связки, каталог ролей.
 func (s *Store) GetActiveWorkflow(ctx context.Context, q Querier, projectID uuid.UUID) (domain.Workflow, error) {
-	var wf domain.Workflow
-	err := q.QueryRow(ctx, `
-		SELECT id, project_id, name, version, state
-		FROM workflows WHERE project_id = $1 AND state = 'active'`, projectID,
-	).Scan(&wf.ID, &wf.ProjectID, &wf.Name, &wf.Version, &wf.State)
+	return s.GetActiveWorkflowForType(ctx, q, projectID, domain.DefaultTaskType)
+}
+
+// GetActiveWorkflowForType отдаёт действующий цикл того типа задач целиком:
+// статусы с ролями, переходы с гейтами. Собирается несколькими запросами, а не
+// одним join'ом — иначе строки размножаются по декартову произведению гейтов
+// и ролей.
+//
+// Активных циклов в проекте столько, сколько типов задач, но на один тип —
+// ровно один (решение 0024), поэтому выбор однозначен.
+func (s *Store) GetActiveWorkflowForType(ctx context.Context, q Querier, projectID uuid.UUID, taskType string) (domain.Workflow, error) {
+	if taskType == "" {
+		taskType = domain.DefaultTaskType
+	}
+	wf, err := scanWorkflow(q.QueryRow(ctx, `SELECT `+workflowCols+`
+		FROM workflows
+		WHERE project_id = $1 AND state = 'active' AND $2 = ANY (task_types)`,
+		projectID, taskType))
 	if err != nil {
-		return wf, notFound(err, "у проекта нет активного цикла")
+		return wf, notFound(err, "у проекта нет активного цикла для задач типа %q", taskType)
 	}
 
 	if wf.Statuses, err = s.ListStatuses(ctx, q, wf.ID); err != nil {
@@ -28,6 +40,27 @@ func (s *Store) GetActiveWorkflow(ctx context.Context, q Querier, projectID uuid
 		return wf, err
 	}
 	return wf, nil
+}
+
+// ListActiveWorkflows — все действующие циклы проекта: по одному на тип задач.
+func (s *Store) ListActiveWorkflows(ctx context.Context, q Querier, projectID uuid.UUID) ([]domain.Workflow, error) {
+	rows, err := q.Query(ctx, `SELECT `+workflowCols+`
+		FROM workflows WHERE project_id = $1 AND state = 'active'
+		ORDER BY task_types, name`, projectID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.Workflow{}
+	for rows.Next() {
+		wf, err := scanWorkflow(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, wf)
+	}
+	return out, translate(rows.Err())
 }
 
 func (s *Store) ListStatuses(ctx context.Context, q Querier, workflowID uuid.UUID) ([]domain.Status, error) {

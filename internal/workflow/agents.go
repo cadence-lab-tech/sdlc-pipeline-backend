@@ -20,6 +20,10 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 )
 
+// UsageReportExpected едет в ответе на захват: по нему агент понимает, что
+// в конце этапа его ждут с отчётом о стоимости.
+const UsageReportExpected = "expected"
+
 // Lease — аренда: до какого момента задача закреплена за агентом и как часто
 // он обязан подтверждать, что жив.
 type Lease struct {
@@ -121,7 +125,10 @@ type TaskView struct {
 	// Системные свойства движок интерпретирует сам, проектные отдаются как
 	// есть — их смысл знает роль, а не движок.
 	Properties json.RawMessage `json:"properties"`
-	Epic       *string         `json:"epic,omitempty"`
+	// Тип задачи и родитель: по типу выбран цикл, по родителю агент понимает,
+	// что работает над куском эпика (решение 0024).
+	Type   string  `json:"type"`
+	Parent *string `json:"parent,omitempty"`
 }
 
 // StageView — состояние прогона для агента.
@@ -143,6 +150,9 @@ type ClaimResult struct {
 	Context    ClaimContext     `json:"context"`
 	GatesAhead []TransitionSpec `json:"gates_ahead"`
 	Lease      *Lease           `json:"lease,omitempty"`
+	// Напоминание отчитаться о стоимости прогона (решение 0026): сервер её не
+	// измеряет, а без отчёта прогон стоит «неизвестно».
+	UsageReport string `json:"usage_report,omitempty"`
 }
 
 // Claim закрепляет задачу за агентом и отдаёт ему контекст этапа.
@@ -182,6 +192,9 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		if err := claimable(run, actor); err != nil {
 			return err
 		}
+		if err := assignedTo(task, actor); err != nil {
+			return err
+		}
 		if err := roleAllowed(run, opts.AllowedRoles); err != nil {
 			return err
 		}
@@ -219,6 +232,7 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 			ExpiresAt:                expires,
 			HeartbeatIntervalSeconds: int(e.heartbeat.Seconds()),
 		}
+		out.UsageReport = UsageReportExpected
 		return nil
 	})
 
@@ -279,6 +293,23 @@ func claimable(run domain.StageRun, actor uuid.UUID) error {
 			})
 	}
 	return nil
+}
+
+// assignedTo отбивает захват задачи, назначенной другому.
+//
+// Назначение адресное: оркестратор нарезает эпик и указывает, кому какой
+// кусок (решение 0025). Пул раннеров — один принципал с несколькими токенами,
+// поэтому сравнение идёт по принципалу, а не по токену.
+func assignedTo(task domain.Task, actor uuid.UUID) error {
+	if task.AssigneeID == nil || *task.AssigneeID == actor {
+		return nil
+	}
+	handle := "другого исполнителя"
+	if task.AssigneeHandle != nil {
+		handle = *task.AssigneeHandle
+	}
+	return apperr.Forbidden("задача %s назначена на %s", task.Key, handle).
+		WithDetails(map[string]any{"assignee": task.AssigneeHandle})
 }
 
 // roleAllowed отбивает захват, если токен агента ограничен ролями, а прогон
@@ -412,17 +443,15 @@ func (e *Engine) State(ctx context.Context, taskKey string) (ClaimResult, error)
 func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun) (ClaimResult, error) {
 	out := ClaimResult{StageRunID: run.ID, Kind: run.Kind}
 
-	epic, err := e.epicKey(ctx, q, task)
-	if err != nil {
-		return out, err
-	}
 	out.Task = TaskView{
 		Key: task.Key, Title: task.Title, Description: task.Description,
 		Status: task.StatusKey, StatusName: task.StatusName, Attempt: run.Attempt,
 		Priority: task.Priority, Labels: task.Labels,
-		ExternalRef: task.ExternalRef, Properties: task.Properties, Epic: epic,
+		ExternalRef: task.ExternalRef, Properties: task.Properties,
+		Type: task.Type(), Parent: task.ParentKey,
 	}
 
+	var err error
 	if run.RoleVersionID != nil {
 		role, err := e.roleView(ctx, q, *run.RoleVersionID)
 		if err != nil {
@@ -438,17 +467,6 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 		return out, err
 	}
 	return out, nil
-}
-
-func (e *Engine) epicKey(ctx context.Context, q postgres.Querier, task domain.Task) (*string, error) {
-	if task.EpicID == nil {
-		return nil, nil
-	}
-	var key string
-	if err := q.QueryRow(ctx, `SELECT key FROM epics WHERE id = $1`, *task.EpicID).Scan(&key); err != nil {
-		return nil, nil
-	}
-	return &key, nil
 }
 
 func (e *Engine) roleView(ctx context.Context, q postgres.Querier, roleVersionID uuid.UUID) (*RoleView, error) {

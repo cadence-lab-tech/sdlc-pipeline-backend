@@ -83,7 +83,9 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 	}, nil)
 	s.registerTools()
 	s.registerCatalogTools()
+	s.registerOrchestrationTools()
 	s.registerPrompts()
+	s.registerWorkPrompt()
 	return s
 }
 

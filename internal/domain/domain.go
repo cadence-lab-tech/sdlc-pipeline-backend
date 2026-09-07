@@ -129,13 +129,17 @@ const (
 	WorkflowRetired = "retired"
 )
 
-// Workflow — версия цикла целиком. Активная ровно одна на проект.
+// Workflow — версия цикла целиком. Активных в проекте столько, сколько типов
+// задач, но на один тип — ровно один (решение 0024).
 type Workflow struct {
-	ID          uuid.UUID    `json:"id"`
-	ProjectID   uuid.UUID    `json:"project_id"`
-	Name        string       `json:"name"`
-	Version     int          `json:"version"`
-	State       string       `json:"state"`
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
+	Name      string    `json:"name"`
+	Version   int       `json:"version"`
+	State     string    `json:"state"`
+	// Типы задач, которые ведёт этот цикл. Движок знает про тип ровно одно:
+	// по нему выбирается цикл, а сам набор типов — данные проекта.
+	TaskTypes   []string     `json:"task_types"`
 	Statuses    []Status     `json:"statuses,omitempty"`
 	Transitions []Transition `json:"transitions,omitempty"`
 }
@@ -180,15 +184,16 @@ type Transition struct {
 // Типы гейтов. Движок не знает, что означает каждый статус, но знает набор
 // проверок, которые умеет исполнять.
 const (
-	GateArtifactsRequired = "artifacts_required"
-	GateSchemaValidation  = "schema_validation"
-	GateChecklist         = "checklist"
-	GateHumanApproval     = "human_approval"
-	GateAgentReview       = "agent_review"
-	GateExternalCheck     = "external_check"
-	GateRepoRefRequired   = "repo_ref_required"
-	GateDriftClear        = "drift_clear"
-	GateRepoScope         = "repo_scope"
+	GateArtifactsRequired  = "artifacts_required"
+	GateSchemaValidation   = "schema_validation"
+	GateChecklist          = "checklist"
+	GateHumanApproval      = "human_approval"
+	GateAgentReview        = "agent_review"
+	GateExternalCheck      = "external_check"
+	GateRepoRefRequired    = "repo_ref_required"
+	GateDriftClear         = "drift_clear"
+	GateRepoScope          = "repo_scope"
+	GateDependenciesClosed = "dependencies_closed"
 )
 
 type Gate struct {
@@ -232,22 +237,28 @@ type RoleVersion struct {
 }
 
 type Task struct {
-	ID          uuid.UUID       `json:"id"`
-	ProjectID   uuid.UUID       `json:"project_id"`
-	ProjectKey  string          `json:"project_key"`
-	EpicID      *uuid.UUID      `json:"epic_id,omitempty"`
-	Key         string          `json:"key"`
-	Seq         int             `json:"seq"`
-	Title       string          `json:"title"`
-	Description *string         `json:"description,omitempty"`
-	WorkflowID  uuid.UUID       `json:"workflow_id"`
-	StatusID    uuid.UUID       `json:"status_id"`
-	StatusKey   string          `json:"status_key"`
-	StatusName  string          `json:"status_name"`
-	Priority    string          `json:"priority"`
-	AssigneeID  *uuid.UUID      `json:"assignee_id,omitempty"`
-	ExternalRef json.RawMessage `json:"external_ref"`
-	Labels      []string        `json:"labels"`
+	ID         uuid.UUID `json:"id"`
+	ProjectID  uuid.UUID `json:"project_id"`
+	ProjectKey string    `json:"project_key"`
+	// Родительская задача: эпик для своих детей. Иерархия — ссылка, а не
+	// префикс в ключе, поэтому ключи остаются плоскими (SDLC-42).
+	ParentID    *uuid.UUID `json:"parent_id,omitempty"`
+	ParentKey   *string    `json:"parent_key,omitempty"`
+	Key         string     `json:"key"`
+	Seq         int        `json:"seq"`
+	Title       string     `json:"title"`
+	Description *string    `json:"description,omitempty"`
+	WorkflowID  uuid.UUID  `json:"workflow_id"`
+	StatusID    uuid.UUID  `json:"status_id"`
+	StatusKey   string     `json:"status_key"`
+	StatusName  string     `json:"status_name"`
+	Priority    string     `json:"priority"`
+	// Адресное назначение: назначенную задачу может забрать только этот
+	// принципал (решение 0025). Пусто — задача открыта любому подходящему.
+	AssigneeID     *uuid.UUID      `json:"assignee_id,omitempty"`
+	AssigneeHandle *string         `json:"assignee_handle,omitempty"`
+	ExternalRef    json.RawMessage `json:"external_ref"`
+	Labels         []string        `json:"labels"`
 	// Свойства задачи (решение 0015). Системное multi_repo движок читает сам,
 	// остальные отдаются агенту как контекст.
 	Properties   json.RawMessage  `json:"properties"`
@@ -255,6 +266,25 @@ type Task struct {
 	CreatedAt    time.Time        `json:"created_at"`
 	UpdatedAt    time.Time        `json:"updated_at"`
 	ClosedAt     *time.Time       `json:"closed_at,omitempty"`
+}
+
+// DefaultTaskType — тип задачи, если она его не называет. Набор типов
+// задаёт проект (task_property_defs.type), но какой-то тип у задачи есть
+// всегда: по нему выбирается цикл.
+const DefaultTaskType = "task"
+
+// Type — тип задачи: по нему задача привязана к своему циклу.
+func (t Task) Type() string {
+	var props struct {
+		Type string `json:"type"`
+	}
+	if len(t.Properties) > 0 {
+		_ = json.Unmarshal(t.Properties, &props)
+	}
+	if props.Type == "" {
+		return DefaultTaskType
+	}
+	return props.Type
 }
 
 // MultiRepo — разрешено ли задаче охватывать несколько репозиториев.
@@ -267,6 +297,31 @@ func (t Task) MultiRepo() bool {
 	}
 	_ = json.Unmarshal(t.Properties, &props)
 	return props.MultiRepo
+}
+
+// Отношения между задачами. blocks задаёт порядок работ и читается гейтом
+// dependencies_closed, остальные — контекст.
+const (
+	TaskLinkBlocks        = "blocks"
+	TaskLinkRelatesTo     = "relates_to"
+	TaskLinkDuplicates    = "duplicates"
+	TaskLinkSharesSurface = "shares_surface"
+	TaskLinkSplitFrom     = "split_from"
+)
+
+// TaskLinkRels — отношения, которые допускает схема.
+var TaskLinkRels = []string{
+	TaskLinkBlocks, TaskLinkRelatesTo, TaskLinkDuplicates,
+	TaskLinkSharesSurface, TaskLinkSplitFrom,
+}
+
+func ValidTaskLinkRel(rel string) bool {
+	for _, r := range TaskLinkRels {
+		if r == rel {
+			return true
+		}
+	}
+	return false
 }
 
 type TaskRepository struct {
@@ -361,6 +416,34 @@ func (r StageRun) Open() bool {
 	return false
 }
 
+// StageRunUsage — что стоила работа агента на прогоне этапа (решение 0026).
+// Числа необязательны: агент, запущенный руками, может не отчитаться, и тогда
+// прогон стоит «неизвестно», а не ноль.
+type StageRunUsage struct {
+	ID               uuid.UUID       `json:"id"`
+	RunID            uuid.UUID       `json:"run_id"`
+	Model            string          `json:"model"`
+	InputTokens      *int64          `json:"input_tokens,omitempty"`
+	OutputTokens     *int64          `json:"output_tokens,omitempty"`
+	CacheReadTokens  *int64          `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int64          `json:"cache_write_tokens,omitempty"`
+	CostUSD          *float64        `json:"cost_usd,omitempty"`
+	DurationMS       *int64          `json:"duration_ms,omitempty"`
+	ReportedBy       *uuid.UUID      `json:"reported_by,omitempty"`
+	ReportedAt       time.Time       `json:"reported_at"`
+	Details          json.RawMessage `json:"details"`
+}
+
+// UsageSummary — стоимость задачи: своя и вместе с дочерними задачами.
+type UsageSummary struct {
+	CostUSD        float64 `json:"cost_usd"`
+	SubtreeCostUSD float64 `json:"subtree_cost_usd"`
+	Tokens         int64   `json:"tokens"`
+	ReportedRuns   int     `json:"reported_runs"`
+	// Прогоны, о которых никто не отчитался: их стоимость неизвестна.
+	SilentRuns int `json:"silent_runs"`
+}
+
 // Результаты гейтов.
 const (
 	GateResultPending = "pending"
@@ -440,6 +523,7 @@ const (
 	EventRepoRefLinked     = "repo_ref.linked"
 	EventDriftDetected     = "drift.detected"
 	EventDriftResolved     = "drift.resolved"
+	EventUsageReported     = "usage.reported"
 )
 
 // ProjectDocument — материал проекта вне задач: API-registry, глоссарий,

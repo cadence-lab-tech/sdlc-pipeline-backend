@@ -75,7 +75,9 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/projects/:projectKey", viewer, s.getProject)
 		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)
 		v1.GET("/projects/:projectKey/tasks", viewer, s.listTasks)
-		v1.POST("/projects/:projectKey/tasks", maintainer, s.createTask)
+		// Заводить задачи вправе и агент, но только дочерние к той, которую он
+		// держит, и внутри её области — правило исполняет движок (решение 0024).
+		v1.POST("/projects/:projectKey/tasks", agent, s.createTask)
 
 		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
 		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)
@@ -114,6 +116,12 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/tasks/:taskKey", viewer, s.getTask)
 		v1.GET("/tasks/:taskKey/timeline", viewer, s.listEvents)
 		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
+		v1.POST("/tasks/:taskKey/links", agent, s.linkTasks)
+		v1.PUT("/tasks/:taskKey/assignee", agent, s.assignTask)
+		// Стоимость прогона: самоотчёт агента или раннера (решение 0026).
+		v1.GET("/tasks/:taskKey/usage", viewer, s.taskUsage)
+		v1.POST("/tasks/:taskKey/usage", agent, s.reportUsage)
+		v1.POST("/tasks/:taskKey/runs/:runID/usage", agent, s.reportUsage)
 
 		// Агентская часть: те же сервисы, что у MCP-тулов. Сюда ходят CLI и
 		// CI, локальный агент — в /mcp.
@@ -144,6 +152,9 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", maintainer, s.decideGate)
 
 		v1.GET("/workflows/:workflowID", viewer, s.getWorkflowVersion)
+		// Типы задач правятся только у черновика: у активной версии по ним уже
+		// разложены задачи.
+		v1.PATCH("/workflows/:workflowID", maintainer, s.updateWorkflowVersion)
 		v1.DELETE("/workflows/:workflowID", maintainer, s.deleteWorkflow)
 		v1.GET("/workflows/:workflowID/validation", viewer, s.validateWorkflow)
 		v1.POST("/workflows/:workflowID/activate", maintainer, s.activateWorkflow)

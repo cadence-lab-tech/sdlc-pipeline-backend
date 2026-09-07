@@ -5,11 +5,13 @@ VERSION ?= dev
 
 .PHONY: build run test test-integration lint tidy up down logs psql reset image
 
-# Три бинарника: сервис, фоновые задания и CLI для CI.
+# Четыре бинарника: сервис, фоновые задания, CLI для CI и раннер саб-агентов.
+# Раннер живёт не в образе, а там, где есть CLI агента и код (решение 0025).
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/api ./cmd/api
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/worker ./cmd/worker
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/sdlc ./cmd/sdlc
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN)/sdlc-runner ./cmd/sdlc-runner
 
 test:
 	go test ./...
