@@ -289,18 +289,32 @@ func (s *Store) RemoveMember(ctx context.Context, q Querier, projectID, principa
 	return nil
 }
 
-// CountAdmins — сколько администраторов у проекта. Последнего снять нельзя:
-// проект без администратора никто не сможет починить.
+// CountAdmins — сколько у проекта администраторов, считая полученных через
+// команду и лида команды-владельца. Последнего снять нельзя: проект без
+// администратора никто не сможет починить. Считать только поимённых значило
+// бы запрещать снятие там, где права всё равно есть у команды.
 func (s *Store) CountAdmins(ctx context.Context, q Querier, projectID uuid.UUID) (int, error) {
 	var n int
 	err := q.QueryRow(ctx, `
-		SELECT count(*) FROM project_members WHERE project_id = $1 AND role = 'admin'`,
-		projectID).Scan(&n)
+		SELECT count(*) FROM (
+			SELECT principal_id FROM project_members
+			WHERE project_id = $1 AND role = 'admin'
+			UNION
+			SELECT tm.principal_id FROM project_teams pt
+			JOIN team_members tm ON tm.team_id = pt.team_id
+			JOIN teams t ON t.id = pt.team_id
+			WHERE pt.project_id = $1 AND pt.level = 'admin' AND t.archived_at IS NULL
+			UNION
+			SELECT tm.principal_id FROM projects pr
+			JOIN team_members tm ON tm.team_id = pr.owner_team_id
+			WHERE pr.id = $1 AND tm.role = 'lead'
+		) admins`, projectID).Scan(&n)
 	return n, translate(err)
 }
 
-// ListProjectsFor — проекты, в которых состоит принципал. Администратор
-// видит все.
+// ListProjectsFor — проекты, доступные принципалу: где он участвует сам, где
+// участвует его команда и где его команда — владелец (решение 0027).
+// Администратор видит все.
 func (s *Store) ListProjectsFor(ctx context.Context, q Querier, p domain.Principal) ([]domain.Project, error) {
 	if p.IsAdmin {
 		return s.ListProjects(ctx, q)
@@ -308,7 +322,12 @@ func (s *Store) ListProjectsFor(ctx context.Context, q Querier, p domain.Princip
 	rows, err := q.Query(ctx, `SELECT `+projectCols+`
 		FROM projects
 		WHERE archived_at IS NULL
-		  AND id IN (SELECT project_id FROM project_members WHERE principal_id = $1)
+		  AND (id IN (SELECT project_id FROM project_members WHERE principal_id = $1)
+		    OR id IN (SELECT pt.project_id FROM project_teams pt
+		              JOIN team_members tm ON tm.team_id = pt.team_id
+		              WHERE tm.principal_id = $1)
+		    OR owner_team_id IN (SELECT team_id FROM team_members
+		                         WHERE principal_id = $1 AND role = 'lead'))
 		ORDER BY key`, p.ID)
 	if err != nil {
 		return nil, translate(err)

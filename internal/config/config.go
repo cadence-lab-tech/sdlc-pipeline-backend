@@ -78,6 +78,11 @@ type Config struct {
 	// некому выдать первый токен.
 	AdminHandle string
 	AdminToken  string
+	// Первая команда (решение 0027): её лидом становится администратор, и
+	// право заводить проекты у неё есть сразу. Пусто — команд нет, проекты
+	// заводит администратор системы.
+	BootstrapTeam     string
+	BootstrapTeamName string
 	// Актор по умолчанию в режиме header, если заголовка нет.
 	DefaultActor string
 
@@ -132,6 +137,8 @@ func Load() (Config, error) {
 		AuthMode:            env("SDLC_AUTH_MODE", ""),
 		AdminHandle:         env("SDLC_ADMIN_HANDLE", "admin"),
 		AdminToken:          env("SDLC_ADMIN_TOKEN", ""),
+		BootstrapTeam:       env("SDLC_BOOTSTRAP_TEAM", ""),
+		BootstrapTeamName:   env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
 		DefaultActor:        env("SDLC_DEFAULT_ACTOR", "anonymous"),
 		BlobDir:             env("SDLC_BLOB_DIR", ""),
 		BlobInlineMaxBytes:  256 << 10,

@@ -32,6 +32,9 @@ type createProjectRequest struct {
 	Key         string  `json:"key" binding:"required"`
 	Name        string  `json:"name" binding:"required"`
 	Description *string `json:"description"`
+	// Команда-владелец. Пусто — проект заводит администратор системы вне
+	// команд (решение 0027).
+	Team string `json:"team"`
 }
 
 func (s *Server) createProject(c *gin.Context) {
@@ -40,9 +43,17 @@ func (s *Server) createProject(c *gin.Context) {
 		badRequest(c, s.log, err)
 		return
 	}
+	// Право завести проект проверяет Auth: администратор системы или лид
+	// команды, которой это право выдано.
+	ownerTeam, err := s.auth.OwnerTeamFor(c.Request.Context(), identity(c), req.Team)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	project, err := s.engine.CreateProject(c.Request.Context(), actor(c).ID,
 		postgres.CreateProjectInput{
 			Key: req.Key, Name: req.Name, Description: req.Description,
+			OwnerTeamID: ownerTeam,
 		})
 	if err != nil {
 		fail(c, s.log, err)

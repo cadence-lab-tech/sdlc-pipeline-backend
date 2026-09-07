@@ -90,6 +90,9 @@ func run() error {
 	if err := auth.Bootstrap(ctx, cfg.AdminHandle, cfg.AdminToken); err != nil {
 		return err
 	}
+	if err := auth.BootstrapTeam(ctx, cfg.AdminHandle, cfg.BootstrapTeam, cfg.BootstrapTeamName); err != nil {
+		return err
+	}
 	switch {
 	case auth.Enforced():
 		log.Info("аутентификация по токенам", "admin", cfg.AdminHandle,

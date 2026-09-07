@@ -9,12 +9,16 @@ import (
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
 )
 
-const projectCols = `id, key, name, description, settings, created_at, updated_at, archived_at`
+// Ключ команды-владельца берётся подзапросом, а не джойном: projectCols
+// подставляется и в RETURNING, где джойна нет.
+const projectCols = `id, key, name, description, settings, owner_team_id,
+	(SELECT t.key FROM teams t WHERE t.id = projects.owner_team_id) AS owner_team_key,
+	created_at, updated_at, archived_at`
 
 func scanProject(row interface{ Scan(...any) error }) (domain.Project, error) {
 	var p domain.Project
 	err := row.Scan(&p.ID, &p.Key, &p.Name, &p.Description, &p.Settings,
-		&p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt)
+		&p.OwnerTeamID, &p.OwnerTeamKey, &p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt)
 	return p, err
 }
 
@@ -51,14 +55,17 @@ type CreateProjectInput struct {
 	Name        string
 	Description *string
 	CreatedBy   uuid.UUID
+	// Команда-владелец. Пусто у проекта, заведённого глобальным
+	// администратором вне команд.
+	OwnerTeamID *uuid.UUID
 }
 
 func (s *Store) CreateProject(ctx context.Context, q Querier, in CreateProjectInput) (domain.Project, error) {
 	p, err := scanProject(q.QueryRow(ctx, `
-		INSERT INTO projects (key, name, description, created_by)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO projects (key, name, description, created_by, owner_team_id)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING `+projectCols,
-		in.Key, in.Name, in.Description, in.CreatedBy))
+		in.Key, in.Name, in.Description, in.CreatedBy, in.OwnerTeamID))
 	if err != nil {
 		return p, translate(err)
 	}

@@ -1,0 +1,360 @@
+// Команды: группы принципалов с правами на проекты (решение 0027).
+//
+// Правила живут рядом с остальными правами, в Auth, а не в отдельном сервисе:
+// действующий уровень в проекте — это максимум из прямого участия и участия
+// через команду, и разносить половины этого правила по разным местам значило
+// бы считать права в двух местах.
+package workflow
+
+import (
+	"context"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+)
+
+// TeamDetail — команда вместе с составом и проектами: страница администратора
+// и `sdlc team show` показывают их вместе, и три запроса подряд сюда же.
+type TeamDetail struct {
+	Team     domain.Team          `json:"team"`
+	Members  []domain.TeamMember  `json:"members"`
+	Projects []domain.ProjectTeam `json:"projects"`
+}
+
+type CreateTeamInput struct {
+	Key               string
+	Name              string
+	Description       *string
+	CanCreateProjects bool
+}
+
+// UpdateTeamInput — nil-поля не меняются.
+type UpdateTeamInput struct {
+	Name              *string
+	Description       *string
+	CanCreateProjects *bool
+}
+
+// ListTeams — все команды администратору системы, свои — остальным.
+func (a *Auth) ListTeams(ctx context.Context, id Identity) ([]domain.Team, error) {
+	if !a.Enforced() || id.Principal.IsAdmin {
+		return a.store.ListTeams(ctx, a.store.DB(), nil)
+	}
+	return a.store.ListTeams(ctx, a.store.DB(), &id.Principal.ID)
+}
+
+func (a *Auth) GetTeam(ctx context.Context, id Identity, key string) (TeamDetail, error) {
+	q := a.store.DB()
+	team, err := a.store.GetTeamByKey(ctx, q, key)
+	if err != nil {
+		return TeamDetail{}, err
+	}
+	if _, err := a.teamRole(ctx, q, id, team.ID, false); err != nil {
+		return TeamDetail{}, err
+	}
+	members, err := a.store.ListTeamMembers(ctx, q, team.ID)
+	if err != nil {
+		return TeamDetail{}, err
+	}
+	projects, err := a.store.ListProjectTeams(ctx, q, nil, &team.ID)
+	if err != nil {
+		return TeamDetail{}, err
+	}
+	return TeamDetail{Team: team, Members: members, Projects: projects}, nil
+}
+
+// CreateTeam заводит команду и делает создателя её лидом: команда без лида не
+// сможет ни принять человека, ни завести проект.
+func (a *Auth) CreateTeam(ctx context.Context, id Identity, in CreateTeamInput) (domain.Team, error) {
+	if err := a.RequireAdmin(id); err != nil {
+		return domain.Team{}, err
+	}
+	key := strings.TrimSpace(in.Key)
+	if key == "" || strings.TrimSpace(in.Name) == "" {
+		return domain.Team{}, apperr.InvalidInput("у команды должны быть ключ и название")
+	}
+	var out domain.Team
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		team, err := a.store.CreateTeam(ctx, tx, postgres.CreateTeamInput{
+			Key: key, Name: in.Name, Description: in.Description,
+			CanCreateProjects: in.CanCreateProjects, CreatedBy: id.Principal.ID,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := a.store.SetTeamMember(ctx, tx, team.ID, id.Principal.ID,
+			domain.TeamRoleLead, id.Principal.ID); err != nil {
+			return err
+		}
+		out = team
+		return nil
+	})
+	return out, err
+}
+
+// UpdateTeam: название и описание правит лид, право заводить проекты —
+// только администратор системы. Иначе команда выдала бы это право себе сама.
+func (a *Auth) UpdateTeam(ctx context.Context, id Identity, key string, in UpdateTeamInput) (domain.Team, error) {
+	var out domain.Team
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		team, err := a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if _, err := a.teamRole(ctx, tx, id, team.ID, true); err != nil {
+			return err
+		}
+		if in.CanCreateProjects != nil && *in.CanCreateProjects != team.CanCreateProjects {
+			if err := a.RequireAdmin(id); err != nil {
+				return apperr.Forbidden("право заводить проекты выдаёт администратор системы")
+			}
+		}
+		out, err = a.store.UpdateTeam(ctx, tx, team.ID, postgres.UpdateTeamInput{
+			Name: in.Name, Description: in.Description, CanCreateProjects: in.CanCreateProjects,
+		})
+		return err
+	})
+	return out, err
+}
+
+func (a *Auth) ArchiveTeam(ctx context.Context, id Identity, key string) error {
+	if err := a.RequireAdmin(id); err != nil {
+		return err
+	}
+	q := a.store.DB()
+	team, err := a.store.GetTeamByKey(ctx, q, key)
+	if err != nil {
+		return err
+	}
+	return a.store.ArchiveTeam(ctx, q, team.ID)
+}
+
+// SetTeamMember добавляет принципала в команду или меняет его роль.
+// Принципал заводится, если его ещё нет: лид добавляет «user:alice» до того,
+// как та впервые войдёт.
+func (a *Auth) SetTeamMember(ctx context.Context, id Identity, key, principal string, role domain.TeamRole) (domain.TeamMember, error) {
+	if !role.Valid() {
+		return domain.TeamMember{}, apperr.InvalidInput("роль в команде: member или lead, а не %q", role)
+	}
+	var out domain.TeamMember
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		team, err := a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if _, err := a.teamRole(ctx, tx, id, team.ID, true); err != nil {
+			return err
+		}
+		kind, handle := SplitHandle(principal, domain.PrincipalUser)
+		p, err := a.store.ResolveActor(ctx, tx, handle, kind)
+		if err != nil {
+			return err
+		}
+		if role == domain.TeamRoleMember {
+			if err := a.guardLastLead(ctx, tx, team.ID, p.ID); err != nil {
+				return err
+			}
+		}
+		out, err = a.store.SetTeamMember(ctx, tx, team.ID, p.ID, role, id.Principal.ID)
+		return err
+	})
+	return out, err
+}
+
+func (a *Auth) RemoveTeamMember(ctx context.Context, id Identity, key, principal string) error {
+	return a.store.InTx(ctx, func(tx pgx.Tx) error {
+		team, err := a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if _, err := a.teamRole(ctx, tx, id, team.ID, true); err != nil {
+			return err
+		}
+		_, handle := SplitHandle(principal, domain.PrincipalUser)
+		p, err := a.store.GetPrincipalByHandle(ctx, tx, handle)
+		if err != nil {
+			return err
+		}
+		if err := a.guardLastLead(ctx, tx, team.ID, p.ID); err != nil {
+			return err
+		}
+		return a.store.RemoveTeamMember(ctx, tx, team.ID, p.ID)
+	})
+}
+
+// ── команды в проекте ───────────────────────────────────────────────────────
+
+func (a *Auth) ListProjectTeams(ctx context.Context, id Identity, projectKey string) ([]domain.ProjectTeam, error) {
+	q := a.store.DB()
+	project, err := a.store.GetProjectByKey(ctx, q, projectKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Require(ctx, id, project.ID, domain.MemberViewer); err != nil {
+		return nil, err
+	}
+	return a.store.ListProjectTeams(ctx, q, &project.ID, nil)
+}
+
+// SetProjectTeam выдаёт команде уровень в проекте. Право — у администратора
+// проекта: раздача доступа целой группе не мельче, чем поимённая.
+func (a *Auth) SetProjectTeam(ctx context.Context, id Identity, projectKey, teamKey string, level domain.MemberRole) (domain.ProjectTeam, error) {
+	if !level.Valid() {
+		return domain.ProjectTeam{}, apperr.InvalidInput(
+			"уровень участия: viewer, agent, maintainer или admin, а не %q", level)
+	}
+	var out domain.ProjectTeam
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		project, err := a.store.GetProjectByKey(ctx, tx, projectKey)
+		if err != nil {
+			return err
+		}
+		if err := a.Require(ctx, id, project.ID, domain.MemberAdmin); err != nil {
+			return err
+		}
+		team, err := a.store.GetTeamByKey(ctx, tx, teamKey)
+		if err != nil {
+			return err
+		}
+		out, err = a.store.SetProjectTeam(ctx, tx, project.ID, team.ID, level, id.Principal.ID)
+		return err
+	})
+	return out, err
+}
+
+func (a *Auth) RemoveProjectTeam(ctx context.Context, id Identity, projectKey, teamKey string) error {
+	return a.store.InTx(ctx, func(tx pgx.Tx) error {
+		project, err := a.store.GetProjectByKey(ctx, tx, projectKey)
+		if err != nil {
+			return err
+		}
+		if err := a.Require(ctx, id, project.ID, domain.MemberAdmin); err != nil {
+			return err
+		}
+		team, err := a.store.GetTeamByKey(ctx, tx, teamKey)
+		if err != nil {
+			return err
+		}
+		// Команда-владелец теряет участие, но не владение: проект остаётся
+		// её ответственностью, и лид сохраняет доступ.
+		return a.store.RemoveProjectTeam(ctx, tx, project.ID, team.ID)
+	})
+}
+
+// OwnerTeamFor проверяет право завести проект и отдаёт команду-владельца.
+//
+// Проект заводит администратор системы или лид команды, которой это право
+// выдано (`can_create_projects`). Команда указывается явно: человек может
+// быть лидом нескольких, и угадывать, чьим будет проект, нельзя.
+func (a *Auth) OwnerTeamFor(ctx context.Context, id Identity, teamKey string) (*uuid.UUID, error) {
+	teamKey = strings.TrimSpace(teamKey)
+	if teamKey == "" {
+		if err := a.RequireAdmin(id); err != nil {
+			return nil, apperr.Forbidden("проект без команды-владельца заводит администратор системы")
+		}
+		return nil, nil
+	}
+	q := a.store.DB()
+	team, err := a.store.GetTeamByKey(ctx, q, teamKey)
+	if err != nil {
+		return nil, err
+	}
+	if !a.Enforced() || id.Principal.IsAdmin {
+		return &team.ID, nil
+	}
+	role, err := a.store.TeamRoleOf(ctx, q, team.ID, id.Principal.ID)
+	if err != nil {
+		return nil, err
+	}
+	if role != domain.TeamRoleLead {
+		return nil, apperr.Forbidden("проект команде заводит её лид")
+	}
+	if !team.CanCreateProjects {
+		return nil, apperr.Forbidden("команде %q не выдано право заводить проекты", team.Key)
+	}
+	return &team.ID, nil
+}
+
+// BootstrapTeam заводит первую команду и делает администратора её лидом:
+// в пустом инстансе иначе некому завести ни команду, ни проект под ней.
+// Повторный старт с тем же ключом ничего не меняет — как и бутстрап токена.
+func (a *Auth) BootstrapTeam(ctx context.Context, adminHandle, key, name string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if strings.TrimSpace(name) == "" {
+		name = key
+	}
+	return a.store.InTx(ctx, func(tx pgx.Tx) error {
+		admin, err := a.store.ResolveActor(ctx, tx, adminHandle, domain.PrincipalUser)
+		if err != nil {
+			return err
+		}
+		team, err := a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			if apperr.As(err).Code != apperr.CodeNotFound {
+				return err
+			}
+			// Право заводить проекты у первой команды есть по определению:
+			// без него инстанс остаётся пустым до ручного вмешательства.
+			team, err = a.store.CreateTeam(ctx, tx, postgres.CreateTeamInput{
+				Key: key, Name: name, CanCreateProjects: true, CreatedBy: admin.ID,
+			})
+			if err != nil {
+				return err
+			}
+		}
+		role, err := a.store.TeamRoleOf(ctx, tx, team.ID, admin.ID)
+		if err != nil || role == domain.TeamRoleLead {
+			return err
+		}
+		_, err = a.store.SetTeamMember(ctx, tx, team.ID, admin.ID, domain.TeamRoleLead, admin.ID)
+		return err
+	})
+}
+
+// ── общее ───────────────────────────────────────────────────────────────────
+
+// teamRole проверяет доступ к команде и отдаёт роль актора в ней. lead —
+// нужны ли права лида; иначе достаточно состоять в команде.
+func (a *Auth) teamRole(ctx context.Context, q postgres.Querier, id Identity, teamID uuid.UUID, lead bool) (domain.TeamRole, error) {
+	if !a.Enforced() || id.Principal.IsAdmin {
+		return domain.TeamRoleLead, nil
+	}
+	role, err := a.store.TeamRoleOf(ctx, q, teamID, id.Principal.ID)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case role == "":
+		return "", apperr.Forbidden("нет доступа к команде")
+	case lead && role != domain.TeamRoleLead:
+		return "", apperr.Forbidden("это делает лид команды")
+	}
+	return role, nil
+}
+
+// guardLastLead не даёт оставить команду без лида.
+func (a *Auth) guardLastLead(ctx context.Context, q postgres.Querier, teamID, principalID uuid.UUID) error {
+	role, err := a.store.TeamRoleOf(ctx, q, teamID, principalID)
+	if err != nil {
+		return err
+	}
+	if role != domain.TeamRoleLead {
+		return nil
+	}
+	n, err := a.store.CountTeamLeads(ctx, q, teamID)
+	if err != nil {
+		return err
+	}
+	if n <= 1 {
+		return apperr.Conflict("это последний лид команды; сначала назначьте другого")
+	}
+	return nil
+}

@@ -76,6 +76,55 @@ type ProjectMember struct {
 	CreatedAt   time.Time     `json:"created_at"`
 }
 
+// Роль в команде. Состав команды ведёт `lead`, он же заводит её проекты;
+// уровень прав в проекте отсюда не выводится — его даёт участие команды в
+// проекте (решение 0027).
+type TeamRole string
+
+const (
+	TeamRoleMember TeamRole = "member"
+	TeamRoleLead   TeamRole = "lead"
+)
+
+func (r TeamRole) Valid() bool { return r == TeamRoleMember || r == TeamRoleLead }
+
+// Team — группа принципалов уровня инстанса. Команда участвует в проектах
+// целиком, поэтому уход человека — одна строка, а не обход всех проектов.
+type Team struct {
+	ID          uuid.UUID `json:"id"`
+	Key         string    `json:"key"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	// Право заводить проекты принадлежит команде, а не человеку: лид
+	// меняется, команда остаётся.
+	CanCreateProjects bool       `json:"can_create_projects"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
+}
+
+type TeamMember struct {
+	TeamID      uuid.UUID     `json:"team_id"`
+	TeamKey     string        `json:"team_key"`
+	PrincipalID uuid.UUID     `json:"principal_id"`
+	Handle      string        `json:"handle"`
+	Kind        PrincipalKind `json:"kind"`
+	DisplayName string        `json:"display_name"`
+	Role        TeamRole      `json:"role"`
+	CreatedAt   time.Time     `json:"created_at"`
+}
+
+// ProjectTeam — участие команды в проекте теми же уровнями, что у человека.
+type ProjectTeam struct {
+	ProjectID  uuid.UUID  `json:"project_id"`
+	ProjectKey string     `json:"project_key"`
+	TeamID     uuid.UUID  `json:"team_id"`
+	TeamKey    string     `json:"team_key"`
+	TeamName   string     `json:"team_name"`
+	Level      MemberRole `json:"level"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
 // AccessToken — предъявляемый токен. Сам токен в базе не хранится, только
 // его хеш; целиком он показывается один раз при выдаче.
 type AccessToken struct {
@@ -103,9 +152,13 @@ type Project struct {
 	Name        string          `json:"name"`
 	Description *string         `json:"description,omitempty"`
 	Settings    json.RawMessage `json:"settings"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
-	ArchivedAt  *time.Time      `json:"archived_at,omitempty"`
+	// Команда-владелец: её лид — администратор проекта по умолчанию.
+	// Пусто у проектов, заведённых глобальным администратором.
+	OwnerTeamID  *uuid.UUID `json:"owner_team_id,omitempty"`
+	OwnerTeamKey *string    `json:"owner_team_key,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 }
 
 type Repository struct {

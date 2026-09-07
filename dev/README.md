@@ -239,6 +239,8 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 | `SDLC_AUTH_MODE` | `header` в development, иначе `token` | `header` — актор из заголовка без проверки прав; `token` — только токены |
 | `SDLC_ADMIN_HANDLE` | `admin` | хэндл первого администратора |
 | `SDLC_ADMIN_TOKEN` | пусто | его токен; заводится на старте, при рестарте не дублируется |
+| `SDLC_BOOTSTRAP_TEAM` | пусто | ключ первой команды: администратор становится её лидом, право заводить проекты у неё есть сразу |
+| `SDLC_BOOTSTRAP_TEAM_NAME` | ключ команды | её название |
 | `SDLC_DEFAULT_ACTOR` | `anonymous` | актор без заголовка (режим `header`) |
 | `SDLC_BLOB_DIR` | пусто | каталог для вынесенного содержимого; пусто — всё inline |
 | `SDLC_BLOB_INLINE_MAX_BYTES` | `262144` | до этого размера содержимое лежит в базе |

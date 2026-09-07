@@ -355,7 +355,9 @@ func (a *Auth) ProjectRole(ctx context.Context, id Identity, projectID uuid.UUID
 	if id.Principal.IsAdmin {
 		return domain.MemberAdmin, nil
 	}
-	return a.store.MemberRole(ctx, a.store.DB(), projectID, id.Principal.ID)
+	// Максимум из прямого участия, участия через команды и владения командой
+	// (решение 0027) — одним запросом: проверка прав идёт на каждый запрос.
+	return a.store.EffectiveRole(ctx, a.store.DB(), projectID, id.Principal.ID)
 }
 
 // AllowedRoles — какие роли специалистов агент может забирать. nil — любые.
@@ -468,16 +470,24 @@ type Me struct {
 	Principal     domain.Principal       `json:"principal"`
 	Token         *domain.AccessToken    `json:"token,omitempty"`
 	Memberships   []domain.ProjectMember `json:"memberships"`
+	// Команды показываются отдельно от участия в проектах: права из них
+	// приходят в проекты, которых в memberships нет.
+	Teams []domain.TeamMember `json:"teams"`
 }
 
 func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
-	memberships, err := a.store.Memberships(ctx, a.store.DB(), id.Principal.ID)
+	q := a.store.DB()
+	memberships, err := a.store.Memberships(ctx, q, id.Principal.ID)
+	if err != nil {
+		return Me{}, err
+	}
+	teams, err := a.store.TeamsOf(ctx, q, id.Principal.ID)
 	if err != nil {
 		return Me{}, err
 	}
 	return Me{
 		Mode: a.mode, Authenticated: id.Authenticated(),
-		Principal: id.Principal, Token: id.Token, Memberships: memberships,
+		Principal: id.Principal, Token: id.Token, Memberships: memberships, Teams: teams,
 	}, nil
 }
 

@@ -70,14 +70,30 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/auth/tokens", s.issueToken)
 		v1.DELETE("/auth/tokens/:tokenID", s.revokeToken)
 
+		// Команды: группы принципалов с правами на проекты (решение 0027).
+		// Права разные у каждой ручки — их проверяет сам сервис.
+		v1.GET("/teams", s.listTeams)
+		v1.POST("/teams", s.createTeam)
+		v1.GET("/teams/:teamKey", s.getTeam)
+		v1.PATCH("/teams/:teamKey", s.updateTeam)
+		v1.DELETE("/teams/:teamKey", s.archiveTeam)
+		v1.PUT("/teams/:teamKey/members", s.setTeamMember)
+		v1.DELETE("/teams/:teamKey/members/:handle", s.removeTeamMember)
+
 		v1.GET("/projects", s.listProjects)
-		v1.POST("/projects", s.requireAdmin(), s.createProject)
+		// Проект заводит администратор системы или лид команды с правом на
+		// это, поэтому guard'а по уровню здесь нет: проверка внутри.
+		v1.POST("/projects", s.createProject)
 		v1.GET("/projects/:projectKey", viewer, s.getProject)
 		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)
 		v1.GET("/projects/:projectKey/tasks", viewer, s.listTasks)
 		// Заводить задачи вправе и агент, но только дочерние к той, которую он
 		// держит, и внутри её области — правило исполняет движок (решение 0024).
 		v1.POST("/projects/:projectKey/tasks", agent, s.createTask)
+
+		v1.GET("/projects/:projectKey/teams", viewer, s.listProjectTeams)
+		v1.PUT("/projects/:projectKey/teams", maintainer, s.setProjectTeam)
+		v1.DELETE("/projects/:projectKey/teams/:teamKey", maintainer, s.removeProjectTeam)
 
 		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
 		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)
