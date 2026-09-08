@@ -1,0 +1,163 @@
+# Продовый стек sdlc-pipeline на одной машине.
+#
+# Лежит на сервере в /opt/sdlc вместе с Caddyfile и .env; образы собирают
+# workflow'ы двух репозиториев и кладут в GHCR. Выкладка — deploy.sh.
+#
+# Наружу торчит только Caddy. Postgres, api, воркер и интерфейс общаются по
+# внутренней docker-сети и портов на хост не публикуют: пробросить 5432 на
+# машину с белым IP означает отдать базу интернету.
+
+name: sdlc
+
+services:
+  postgres:
+    # Тот же образ, что в dev/: схема требует pgvector.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Схему накатывает сам api при старте (SDLC_AUTO_MIGRATE): миграции
+  # встроены в бинарник и разъехаться с версией сервиса не могут.
+  api:
+    image: ${IMAGE_BACKEND}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SDLC_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      SDLC_HTTP_ADDR: ":8080"
+      SDLC_ENV: production
+      SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
+      SDLC_AUTO_MIGRATE: "true"
+      SDLC_SEED: ${SDLC_SEED:-}
+      # В проде гейт неизвестного типа обязан валить переход.
+      SDLC_STRICT_GATES: "true"
+      # Только токены и сессии: режим header — для отладки цикла у себя.
+      SDLC_AUTH_MODE: token
+      SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
+      SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN}
+      SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}
+      SDLC_BOOTSTRAP_TEAM_NAME: ${SDLC_BOOTSTRAP_TEAM_NAME:-}
+      SDLC_PROJECT_CREATION: ${SDLC_PROJECT_CREATION:-open}
+      SDLC_SESSION_TTL: ${SDLC_SESSION_TTL:-12h}
+      # Вход людей: GitHub и, если есть, корпоративный провайдер.
+      SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}
+      SDLC_GITHUB_APP_CLIENT_ID: ${SDLC_GITHUB_APP_CLIENT_ID:-}
+      SDLC_GITHUB_APP_CLIENT_SECRET: ${SDLC_GITHUB_APP_CLIENT_SECRET:-}
+      SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
+      SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
+      SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}
+      # Доступ к репозиториям: GitHub App (ключ лежит в secrets/) либо токен.
+      SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
+      SDLC_GITHUB_APP_ID: ${SDLC_GITHUB_APP_ID:-}
+      SDLC_GITHUB_APP_KEY_FILE: ${SDLC_GITHUB_APP_KEY_FILE:-}
+      SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
+      SDLC_GITHUB_WEBHOOK_SECRET: ${SDLC_GITHUB_WEBHOOK_SECRET:-}
+      # Крупное содержимое артефактов: бакет S3, а при пустом бакете — том.
+      SDLC_BLOB_DIR: /blobs
+      SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
+      SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
+      SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
+      SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
+      SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+      SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
+      SDLC_MCP_ENABLED: "true"
+      SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
+      SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
+      # Эмбеддинги: без ключа поиск остаётся полнотекстовым — это рабочий
+      # режим, а не поломка. Модель обязана совпадать с воркером.
+      SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+      SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
+    volumes:
+      - blobs:/blobs
+      - ./secrets:/secrets:ro
+    healthcheck:
+      # В образе нет shell и curl — пробу делает сам бинарник.
+      test: ["CMD", "/api", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Фоновые задания: аренды, индексация с детектором дрейфа, состояние PR,
+  # векторизация. Тот же образ, другой entrypoint. Миграции не катит.
+  worker:
+    image: ${IMAGE_BACKEND}
+    restart: unless-stopped
+    entrypoint: ["/worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SDLC_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      SDLC_ENV: production
+      SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
+      SDLC_AUTO_MIGRATE: "false"
+      # Обе величины обязаны совпадать с api: воркер решает, что аренда
+      # протухла, по тем же правилам, по которым api её выдаёт.
+      SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
+      SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
+      SDLC_LEASE_SWEEP_INTERVAL: ${SDLC_LEASE_SWEEP_INTERVAL:-1m}
+      SDLC_INDEX_ENABLED: ${SDLC_INDEX_ENABLED:-true}
+      SDLC_INDEX_INTERVAL: ${SDLC_INDEX_INTERVAL:-5m}
+      SDLC_INDEX_POLL_INTERVAL: ${SDLC_INDEX_POLL_INTERVAL:-15s}
+      SDLC_INDEX_RETAIN_RUNS: ${SDLC_INDEX_RETAIN_RUNS:-5}
+      SDLC_BLOB_DIR: /blobs
+      SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
+      SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
+      SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
+      SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
+      SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+      SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
+      SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
+      SDLC_GITHUB_APP_ID: ${SDLC_GITHUB_APP_ID:-}
+      SDLC_GITHUB_APP_KEY_FILE: ${SDLC_GITHUB_APP_KEY_FILE:-}
+      SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
+      SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+      SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-voyage-code-3}
+    volumes:
+      - blobs:/blobs
+      - ./secrets:/secrets:ro
+
+  # Интерфейс — статика в Caddy на 80-м порту внутренней сети. Сборка
+  # в репозитории интерфейса (Dockerfile там же).
+  ui:
+    image: ${IMAGE_FRONTEND}
+    restart: unless-stopped
+
+  # Единственная точка входа: TLS, интерфейс, /v1, /mcp и /webhooks.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SDLC_DOMAIN: ${SDLC_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Здесь живут выписанные сертификаты. Без этого тома каждый
+      # `docker compose down` заставляет Let's Encrypt выписывать их заново,
+      # а у него недельные лимиты на домен.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, ui]
+
+volumes:
+  pgdata:
+  # Вынесенное содержимое при пустом SDLC_BLOB_S3_BUCKET; общий для api и воркера.
+  blobs:
+  caddy_data:
+  caddy_config:

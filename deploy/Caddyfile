@@ -1,0 +1,28 @@
+# TLS Caddy выписывает и продлевает сам: от него нужны A-запись на этот
+# сервер и доступные снаружи порты 80 и 443.
+{
+	email {$ACME_EMAIL}
+}
+
+# Один домен на всё. Интерфейс и API на одном origin — браузеру не нужен
+# CORS, а агентам и CLI — второй адрес.
+{$SDLC_DOMAIN} {
+	encode zstd gzip
+
+	# То, что обслуживает сервис. Список префиксов — это роутер httpapi:
+	# /v1 — REST, /mcp — агенты, /webhooks — GitHub, /healthz и /readyz —
+	# пробы. Всё остальное — интерфейс.
+	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz
+	handle @backend {
+		# MCP отвечает потоком (SSE): буферизация ответа сломала бы его.
+		reverse_proxy api:8080 {
+			flush_interval -1
+		}
+	}
+
+	# Интерфейс отдаёт свой Caddy (см. Dockerfile интерфейса) с откатом на
+	# index.html: маршруты вроде /projects/SDLC/tasks/42 живут в React Router.
+	handle {
+		reverse_proxy ui:80
+	}
+}
