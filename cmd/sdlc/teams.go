@@ -210,10 +210,11 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 
 	case "grant":
 		key, tail := popTask(rest)
-		var projectFlag, level string
+		var projectFlag, level, roles string
 		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.StringVar(&level, "level", "", "уровень: viewer, agent, maintainer, admin")
+			fs.StringVar(&roles, "roles", "", "роли специалистов через запятую для участников команды; пусто — любые")
 		})
 		if err != nil {
 			return err
@@ -228,7 +229,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		var out any
 		if err := c.do(ctx, "PUT", "/projects/"+url.PathEscape(projectKey)+"/teams",
-			map[string]any{"team": key, "level": level}, &out); err != nil {
+			map[string]any{"team": key, "level": level, "role_keys": splitCSV(roles)}, &out); err != nil {
 			return err
 		}
 		return print(out)

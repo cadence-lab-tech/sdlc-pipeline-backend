@@ -106,6 +106,20 @@ func (s *Server) allow(ctx context.Context, need domain.MemberRole) error {
 	return s.auth.Require(ctx, identity(ctx), project.ID, need)
 }
 
+// allowedRoles — роли специалистов, доступные актору в проекте подключения:
+// рамки участия, суженные токеном (решение 0030).
+func (s *Server) allowedRoles(ctx context.Context) ([]string, error) {
+	key, err := projectKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.store.GetProjectByKey(ctx, s.store.DB(), key)
+	if err != nil {
+		return nil, err
+	}
+	return s.auth.AllowedRoles(ctx, identity(ctx), project.ID)
+}
+
 // Handler отдаёт HTTP-обработчик MCP. Проект и актор кладёт в контекст
 // вызывающий транспорт: сервер один на процесс, а привязка — на запрос.
 func (s *Server) Handler() http.Handler {

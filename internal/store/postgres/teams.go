@@ -220,7 +220,7 @@ func (s *Store) CountTeamLeads(ctx context.Context, q Querier, teamID uuid.UUID)
 // ── участие команды в проекте ───────────────────────────────────────────────
 
 const projectTeamSelect = `
-	SELECT pt.project_id, pr.key, pt.team_id, t.key, t.name, pt.level, pt.created_at
+	SELECT pt.project_id, pr.key, pt.team_id, t.key, t.name, pt.level, pt.role_keys, pt.created_at
 	FROM project_teams pt
 	JOIN teams t ON t.id = pt.team_id
 	JOIN projects pr ON pr.id = pt.project_id`
@@ -228,7 +228,7 @@ const projectTeamSelect = `
 func scanProjectTeam(row interface{ Scan(...any) error }) (domain.ProjectTeam, error) {
 	var pt domain.ProjectTeam
 	err := row.Scan(&pt.ProjectID, &pt.ProjectKey, &pt.TeamID, &pt.TeamKey, &pt.TeamName,
-		&pt.Level, &pt.CreatedAt)
+		&pt.Level, &pt.RoleKeys, &pt.CreatedAt)
 	return pt, err
 }
 
@@ -254,12 +254,15 @@ func (s *Store) ListProjectTeams(ctx context.Context, q Querier, projectID, team
 	return out, translate(rows.Err())
 }
 
-func (s *Store) SetProjectTeam(ctx context.Context, q Querier, projectID, teamID uuid.UUID, level domain.MemberRole, addedBy uuid.UUID) (domain.ProjectTeam, error) {
+// SetProjectTeam выдаёт команде уровень и набор ролей специалистов
+// (решение 0030); roleKeys nil — любые роли.
+func (s *Store) SetProjectTeam(ctx context.Context, q Querier, projectID, teamID uuid.UUID, level domain.MemberRole, roleKeys []string, addedBy uuid.UUID) (domain.ProjectTeam, error) {
 	_, err := q.Exec(ctx, `
-		INSERT INTO project_teams (project_id, team_id, level, added_by)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (project_id, team_id) DO UPDATE SET level = EXCLUDED.level`,
-		projectID, teamID, level, addedBy)
+		INSERT INTO project_teams (project_id, team_id, level, role_keys, added_by)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (project_id, team_id) DO UPDATE
+		SET level = EXCLUDED.level, role_keys = EXCLUDED.role_keys`,
+		projectID, teamID, level, roleKeys, addedBy)
 	if err != nil {
 		return domain.ProjectTeam{}, translate(err)
 	}

@@ -58,8 +58,8 @@ func commands() []command {
 
 		{"me", "кто я по токену, где состою", "sdlc me", cmdMe},
 		{"token", "выдать, перечислить или отозвать токен", "sdlc token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | sdlc token list [--project SDLC] | sdlc token revoke <id>", cmdToken},
-		{"members", "участники проекта и их уровни", "sdlc members [list] | sdlc members set user:alice maintainer | sdlc members remove user:alice", cmdMembers},
-		{"team", "команды: состав, группы провайдера, права на проекты", "sdlc team list | sdlc team show platform | sdlc team create platform --name Платформа [--can-create-projects] | sdlc team add platform user:alice --role lead | sdlc team groups platform --set sdlc-platform | sdlc team grant platform --project SDLC --level maintainer", cmdTeam},
+		{"members", "участники проекта и их уровни", "sdlc members [list] | sdlc members set user:alice agent [--roles developer,reviewer] | sdlc members remove user:alice", cmdMembers},
+		{"team", "команды: состав, группы провайдера, права на проекты", "sdlc team list | sdlc team show platform | sdlc team create platform --name Платформа [--can-create-projects] | sdlc team add platform user:alice --role lead | sdlc team groups platform --set sdlc-platform | sdlc team grant platform --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
 		{"project", "проекты: список, создание, команды и доступ к GitHub", "sdlc project list | sdlc project create ACME --name \"Проект\" [--team platform] | sdlc project teams | sdlc project github --installation 42 | sdlc project github --check", cmdProject},
 
 		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "sdlc export [--project SDLC] > bundle.json", cmdExport},

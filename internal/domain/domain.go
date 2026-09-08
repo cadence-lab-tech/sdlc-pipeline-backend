@@ -73,7 +73,10 @@ type ProjectMember struct {
 	Kind        PrincipalKind `json:"kind"`
 	DisplayName string        `json:"display_name"`
 	Role        MemberRole    `json:"role"`
-	CreatedAt   time.Time     `json:"created_at"`
+	// Роли специалистов, которые участник может забирать (решение 0030).
+	// nil — любые роли проекта; пустой список — ни одной.
+	RoleKeys  []string  `json:"role_keys"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Роль в команде. Состав команды ведёт `lead`, он же заводит её проекты;
@@ -122,7 +125,9 @@ type ProjectTeam struct {
 	TeamKey    string     `json:"team_key"`
 	TeamName   string     `json:"team_name"`
 	Level      MemberRole `json:"level"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// Роли специалистов для участников команды; nil — любые.
+	RoleKeys  []string  `json:"role_keys"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Виды токенов.

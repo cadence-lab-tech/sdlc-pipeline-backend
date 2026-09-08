@@ -62,6 +62,14 @@ services:
       SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
       SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN:-}
       SDLC_DEFAULT_ACTOR: ${SDLC_DEFAULT_ACTOR:-local-dev}
+      # Кто заводит проекты (решение 0030): open — любой вошедший, teams —
+      # администратор системы и лиды команд с правом на это.
+      SDLC_PROJECT_CREATION: ${SDLC_PROJECT_CREATION:-open}
+      # Вход через GitHub: OAuth-учётные данные того же GitHub App. Без них
+      # страница входа показывает только провайдера и токен.
+      SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}
+      SDLC_GITHUB_APP_CLIENT_ID: ${SDLC_GITHUB_APP_CLIENT_ID:-}
+      SDLC_GITHUB_APP_CLIENT_SECRET: ${SDLC_GITHUB_APP_CLIENT_SECRET:-}
       # Вебхуки GitHub: без секрета ручка /webhooks/github выключена.
       SDLC_GITHUB_WEBHOOK_SECRET: ${SDLC_GITHUB_WEBHOOK_SECRET:-}
       # Крупное содержимое артефактов и документов уходит на том, в базе

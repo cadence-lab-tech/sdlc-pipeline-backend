@@ -97,10 +97,11 @@ func cmdToken(ctx context.Context, c *Client, args []string) error {
 
 func cmdMembers(ctx context.Context, c *Client, args []string) error {
 	sub, rest := popTask(args)
-	var projectFlag string
+	var projectFlag, roles string
 	parse := func(name string, positional int) ([]string, error) {
 		fs := flag.NewFlagSet("members", flag.ContinueOnError)
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+		fs.StringVar(&roles, "roles", "", "роли специалистов через запятую, которые участник может забирать; пусто — любые")
 		// Позиционные аргументы идут до флагов: "members set user:alice admin --project X".
 		pos := []string{}
 		for len(rest) > 0 && !strings.HasPrefix(rest[0], "-") && len(pos) < positional {
@@ -128,7 +129,7 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 		}
 		var out any
 		if err := c.do(ctx, "PUT", "/projects/"+key+"/members",
-			map[string]any{"principal": pos[0], "role": pos[1]}, &out); err != nil {
+			map[string]any{"principal": pos[0], "role": pos[1], "role_keys": splitCSV(roles)}, &out); err != nil {
 			return err
 		}
 		return print(out)

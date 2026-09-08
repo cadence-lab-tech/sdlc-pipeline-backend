@@ -179,10 +179,14 @@ export SDLC_TOKEN=sdlc_замените_на_длинный_секрет SDLC_PR
 ./bin/sdlc token create --name ci-reviewer --for agent:reviewer-bot --roles reviewer
 ```
 
-Токен агента привязан к проекту и, если задан `--roles`, позволяет забирать
-только этапы этих ролей: токен ревьюера не заберёт этап разработчика. Сам
-токен показывается один раз при выдаче; в базе лежит хеш. Локальный агент
-подключается с ним же:
+Какие роли специалистов участник может забирать, задаёт администратор проекта
+на участии ([решение 0030](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0030-member-roles-github-login-open-projects.md)):
+`sdlc members set user:alice agent --roles developer,reviewer`; без `--roles` —
+любые. Команде роли выдаются так же: `sdlc team grant platform --project SDLC
+--level agent --roles reviewer`. Токен может только сузить эти рамки: `--roles`
+у токена пересекается с ролями участника, и токен ревьюера не заберёт этап
+разработчика. Сам токен показывается один раз при выдаче; в базе лежит хеш.
+Локальный агент подключается с ним же:
 
 ```bash
 claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
@@ -191,6 +195,22 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 
 Гейт `human_approval` в любом режиме закрывает только принципал вида `user`:
 агент, даже сопровождающий, поставить апрув не может.
+
+**Вход через GitHub.** У GitHub App в настройках есть раздел OAuth: Client ID
+и Client secret, callback URL — `https://<адрес интерфейса>/login/github`.
+С `SDLC_GITHUB_APP_CLIENT_ID` и `SDLC_GITHUB_APP_CLIENT_SECRET` на странице
+входа появляется кнопка «Войти через GitHub»: браузер уходит за кодом
+авторизации, бэкенд меняет его на профиль (`POST /v1/auth/github/login`) и
+выдаёт ту же сессию, что и провайдер OIDC. Принципал ключуется идентификатором
+GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. Токен
+пользователя нигде не хранится: репозитории читаются установкой приложения,
+а не от имени вошедшего. Вошедший впервые ни в одном проекте не состоит —
+доступ ему выдаёт администратор проекта.
+
+**Создание проектов.** По умолчанию (`SDLC_PROJECT_CREATION=open`) проект
+заводит любой вошедший — из интерфейса или `sdlc project create`; создатель
+становится его администратором и сам добавляет коллег. `teams` возвращает
+правило фазы 6: администратор системы и лиды команд с правом на это.
 
 ## Перенос правил в проект
 
@@ -278,6 +298,10 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 | `SDLC_ADMIN_TOKEN` | пусто | его токен; заводится на старте, при рестарте не дублируется |
 | `SDLC_BOOTSTRAP_TEAM` | пусто | ключ первой команды: администратор становится её лидом, право заводить проекты у неё есть сразу |
 | `SDLC_BOOTSTRAP_TEAM_NAME` | ключ команды | её название |
+| `SDLC_PROJECT_CREATION` | `open` | кто заводит проекты: `open` — любой вошедший, создатель становится администратором проекта; `teams` — администратор системы и лиды команд с правом на это |
+| `SDLC_GITHUB_APP_CLIENT_ID` | пусто | Client ID GitHub App для входа людей через GitHub; задаётся вместе с секретом |
+| `SDLC_GITHUB_APP_CLIENT_SECRET` | пусто | Client secret того же приложения — обмен кода авторизации делает бэкенд |
+| `SDLC_GITHUB_URL` | `https://github.com` | адрес сайта GitHub: там живёт `/login/oauth`; у GitHub Enterprise отличается от адреса API |
 | `SDLC_OIDC_ISSUER` | пусто | адрес корпоративного провайдера; пусто — вход только по выданным токенам |
 | `SDLC_OIDC_CLIENT_ID` | пусто | идентификатор приложения у провайдера; им же проверяется аудитория ID-токена |
 | `SDLC_OIDC_GROUPS_CLAIM` | `groups` | клейм с группами: по нему синхронизируется состав команд |

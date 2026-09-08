@@ -208,6 +208,8 @@ func (s *Server) listProjectTeams(c *gin.Context) {
 type setProjectTeamRequest struct {
 	Team  string `json:"team" binding:"required"`
 	Level string `json:"level" binding:"required"`
+	// Роли специалистов для участников команды; пусто — любые.
+	RoleKeys []string `json:"role_keys"`
 }
 
 func (s *Server) setProjectTeam(c *gin.Context) {
@@ -217,7 +219,7 @@ func (s *Server) setProjectTeam(c *gin.Context) {
 		return
 	}
 	pt, err := s.auth.SetProjectTeam(c.Request.Context(), identity(c), c.Param("projectKey"),
-		req.Team, domain.MemberRole(req.Level))
+		req.Team, domain.MemberRole(req.Level), roleKeysOf(req.RoleKeys))
 	if err != nil {
 		fail(c, s.log, err)
 		return

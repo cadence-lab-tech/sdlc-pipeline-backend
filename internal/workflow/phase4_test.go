@@ -209,7 +209,11 @@ func TestTokensAndPermissions(t *testing.T) {
 	if _, err := engine.Execute(ctx, "SDLC-1", "start", admin.Principal.ID, ""); err != nil {
 		t.Fatalf("старт задачи: %v", err)
 	}
-	_, err = engine.ClaimWith(ctx, "SDLC-1", bot.Principal.ID, "test", ClaimOptions{AllowedRoles: bot.AllowedRoles()})
+	allowed, err := auth.AllowedRoles(ctx, bot, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.ClaimWith(ctx, "SDLC-1", bot.Principal.ID, "test", ClaimOptions{AllowedRoles: allowed})
 	if apperr.As(err).Code != apperr.CodeForbidden {
 		t.Fatalf("захват чужой роли: %v", err)
 	}
@@ -219,7 +223,7 @@ func TestTokensAndPermissions(t *testing.T) {
 	if err := auth.Require(ctx, stranger, pid, domain.MemberViewer); apperr.As(err).Code != apperr.CodeForbidden {
 		t.Fatalf("посторонний: %v", err)
 	}
-	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:stranger", domain.MemberViewer); err != nil {
+	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:stranger", domain.MemberViewer, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := auth.Require(ctx, stranger, pid, domain.MemberViewer); err != nil {
@@ -248,7 +252,7 @@ func TestTokensAndPermissions(t *testing.T) {
 	}
 
 	// Последнего администратора проекта снять нельзя.
-	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:owner", domain.MemberAdmin); err != nil {
+	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:owner", domain.MemberAdmin, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := auth.RemoveMember(ctx, admin, "SDLC", "user:owner"); apperr.As(err).Code != apperr.CodeConflict {

@@ -112,12 +112,51 @@ func (s *Server) oidcLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, session)
 }
 
+// ── вход через GitHub ───────────────────────────────────────────────────────
+
+// githubSettings отдаёт странице входа адрес авторизации и идентификатор
+// клиента. Ручка открытая, как и у провайдера.
+func (s *Server) githubSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, s.auth.GitHubSettings())
+}
+
+type githubLoginRequest struct {
+	Code string `json:"code" binding:"required"`
+	// Адрес возврата, с которым код был запрошен: GitHub сверяет его при
+	// обмене.
+	RedirectURI string `json:"redirect_uri"`
+}
+
+// githubLogin меняет код авторизации на сессию.
+func (s *Server) githubLogin(c *gin.Context) {
+	var req githubLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	session, err := s.auth.LoginGitHub(c.Request.Context(), req.Code, req.RedirectURI)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, session)
+}
+
 func (s *Server) logout(c *gin.Context) {
 	if err := s.auth.Logout(c.Request.Context(), identity(c)); err != nil {
 		fail(c, s.log, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// roleKeysOf приводит список из запроса к договорённости хранилища: пустой
+// список значит «любые роли», то есть NULL.
+func roleKeysOf(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
 }
 
 // ── доступ к GitHub у проекта ───────────────────────────────────────────────
@@ -171,6 +210,9 @@ func (s *Server) listMembers(c *gin.Context) {
 type setMemberRequest struct {
 	Principal string `json:"principal" binding:"required"`
 	Role      string `json:"role" binding:"required"`
+	// Роли специалистов, которые участник может забирать; пусто — любые
+	// (решение 0030).
+	RoleKeys []string `json:"role_keys"`
 }
 
 func (s *Server) setMember(c *gin.Context) {
@@ -180,7 +222,7 @@ func (s *Server) setMember(c *gin.Context) {
 		return
 	}
 	m, err := s.auth.SetMember(c.Request.Context(), identity(c), c.Param("projectKey"),
-		req.Principal, domain.MemberRole(req.Role))
+		req.Principal, domain.MemberRole(req.Role), roleKeysOf(req.RoleKeys))
 	if err != nil {
 		fail(c, s.log, err)
 		return

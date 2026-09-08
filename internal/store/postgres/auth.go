@@ -224,7 +224,7 @@ func (s *Store) UpsertBootstrapToken(ctx context.Context, q Querier, principalID
 
 const memberSelect = `
 	SELECT m.project_id, pr.key, m.principal_id, p.handle, p.kind, p.display_name,
-	       m.role, m.created_at
+	       m.role, m.role_keys, m.created_at
 	FROM project_members m
 	JOIN principals p ON p.id = m.principal_id
 	JOIN projects pr ON pr.id = m.project_id`
@@ -232,7 +232,7 @@ const memberSelect = `
 func scanMember(row interface{ Scan(...any) error }) (domain.ProjectMember, error) {
 	var m domain.ProjectMember
 	err := row.Scan(&m.ProjectID, &m.ProjectKey, &m.PrincipalID, &m.Handle, &m.Kind,
-		&m.DisplayName, &m.Role, &m.CreatedAt)
+		&m.DisplayName, &m.Role, &m.RoleKeys, &m.CreatedAt)
 	return m, err
 }
 
@@ -304,6 +304,61 @@ func (s *Store) SetMember(ctx context.Context, q Querier, projectID, principalID
 		return m, translate(err)
 	}
 	return m, nil
+}
+
+// SetMemberRoles ограничивает участника набором ролей специалистов
+// (решение 0030). nil снимает ограничение; уровень не трогается.
+func (s *Store) SetMemberRoles(ctx context.Context, q Querier, projectID, principalID uuid.UUID, roleKeys []string) error {
+	tag, err := q.Exec(ctx, `
+		UPDATE project_members SET role_keys = $3
+		WHERE project_id = $1 AND principal_id = $2`, projectID, principalID, roleKeys)
+	if err != nil {
+		return translate(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.NotFound("участник не найден")
+	}
+	return nil
+}
+
+// RoleGrant — один путь, которым принципал получил уровень в проекте, вместе
+// с ролями специалистов, разрешёнными на этом пути.
+type RoleGrant struct {
+	Level    domain.MemberRole
+	RoleKeys []string
+}
+
+// RoleGrants — все пути принципала в проект: поимённое участие, команды,
+// лидерство в команде-владельце. По ним считается, какие роли специалистов
+// он может забирать (решение 0030); сами уровни складывает EffectiveRole.
+func (s *Store) RoleGrants(ctx context.Context, q Querier, projectID, principalID uuid.UUID) ([]RoleGrant, error) {
+	rows, err := q.Query(ctx, `
+		SELECT role, role_keys FROM project_members
+		WHERE project_id = $1 AND principal_id = $2
+		UNION ALL
+		SELECT pt.level, pt.role_keys FROM project_teams pt
+		JOIN team_members tm ON tm.team_id = pt.team_id
+		JOIN teams t ON t.id = pt.team_id
+		WHERE pt.project_id = $1 AND tm.principal_id = $2 AND t.archived_at IS NULL
+		UNION ALL
+		SELECT 'admin', NULL FROM projects pr
+		JOIN team_members tm ON tm.team_id = pr.owner_team_id
+		WHERE pr.id = $1 AND tm.principal_id = $2 AND tm.role = 'lead'`,
+		projectID, principalID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []RoleGrant{}
+	for rows.Next() {
+		var g RoleGrant
+		if err := rows.Scan(&g.Level, &g.RoleKeys); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, g)
+	}
+	return out, translate(rows.Err())
 }
 
 func (s *Store) RemoveMember(ctx context.Context, q Querier, projectID, principalID uuid.UUID) error {

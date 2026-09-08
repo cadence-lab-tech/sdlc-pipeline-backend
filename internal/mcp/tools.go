@@ -144,7 +144,11 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 		"auth_mode":     s.auth.Mode(),
 		"access_level":  level,
 	}
-	if allowed := id.AllowedRoles(); allowed != nil {
+	allowed, err := s.auth.AllowedRoles(ctx, id, project.ID)
+	if err != nil {
+		return fail(err)
+	}
+	if allowed != nil {
 		view["allowed_roles"] = allowed
 	}
 	return ok(view)
@@ -259,8 +263,12 @@ func (s *Server) claimTask(ctx context.Context, in claimInput) (*sdk.CallToolRes
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
+	allowed, err := s.allowedRoles(ctx)
+	if err != nil {
+		return fail(err)
+	}
 	res, err := s.engine.ClaimWith(ctx, in.TaskKey, actor(ctx).ID, in.SessionRef,
-		workflow.ClaimOptions{AllowedRoles: identity(ctx).AllowedRoles()})
+		workflow.ClaimOptions{AllowedRoles: allowed})
 	if err != nil {
 		return fail(err)
 	}

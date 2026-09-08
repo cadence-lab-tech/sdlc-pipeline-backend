@@ -100,7 +100,7 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 		t.Fatalf("команда без участия в проекте не должна давать доступ: %v", err)
 	}
 
-	if _, err := auth.SetProjectTeam(ctx, admin, "SDLC", "platform", domain.MemberMaintainer); err != nil {
+	if _, err := auth.SetProjectTeam(ctx, admin, "SDLC", "platform", domain.MemberMaintainer, nil); err != nil {
 		t.Fatalf("выдача команде уровня в проекте: %v", err)
 	}
 	if err := auth.Require(ctx, alice, pid, domain.MemberMaintainer); err != nil {
@@ -109,7 +109,7 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 
 	// Поимённое участие ниже командного не понижает права: уровень — максимум
 	// из двух путей, а не последний назначенный.
-	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberViewer); err != nil {
+	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberViewer, nil); err != nil {
 		t.Fatal(err)
 	}
 	role, err := auth.ProjectRole(ctx, alice, pid)
@@ -121,7 +121,7 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 	}
 
 	// Обратное тоже верно: поимённый admin выше командного maintainer.
-	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberAdmin); err != nil {
+	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberAdmin, nil); err != nil {
 		t.Fatal(err)
 	}
 	if role, err = auth.ProjectRole(ctx, alice, pid); err != nil || role != domain.MemberAdmin {
@@ -129,7 +129,7 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 	}
 
 	// Проект виден по участию команды, а не только по поимённому.
-	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberViewer); err != nil {
+	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:alice", domain.MemberViewer, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := auth.RemoveMember(ctx, admin, "SDLC", "user:alice"); err != nil {
@@ -342,7 +342,7 @@ func TestOIDCLoginIssuesSessionAndSyncsTeams(t *testing.T) {
 	if _, err := auth.SetTeamIdPGroups(ctx, admin, "platform", []string{"sdlc-platform"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.SetProjectTeam(ctx, admin, "SDLC", "platform", domain.MemberMaintainer); err != nil {
+	if _, err := auth.SetProjectTeam(ctx, admin, "SDLC", "platform", domain.MemberMaintainer, nil); err != nil {
 		t.Fatal(err)
 	}
 

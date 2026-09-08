@@ -201,9 +201,10 @@ func (a *Auth) ListProjectTeams(ctx context.Context, id Identity, projectKey str
 	return a.store.ListProjectTeams(ctx, q, &project.ID, nil)
 }
 
-// SetProjectTeam выдаёт команде уровень в проекте. Право — у администратора
-// проекта: раздача доступа целой группе не мельче, чем поимённая.
-func (a *Auth) SetProjectTeam(ctx context.Context, id Identity, projectKey, teamKey string, level domain.MemberRole) (domain.ProjectTeam, error) {
+// SetProjectTeam выдаёт команде уровень и роли специалистов в проекте
+// (roleKeys nil — любые, решение 0030). Право — у администратора проекта:
+// раздача доступа целой группе не мельче, чем поимённая.
+func (a *Auth) SetProjectTeam(ctx context.Context, id Identity, projectKey, teamKey string, level domain.MemberRole, roleKeys []string) (domain.ProjectTeam, error) {
 	if !level.Valid() {
 		return domain.ProjectTeam{}, apperr.InvalidInput(
 			"уровень участия: viewer, agent, maintainer или admin, а не %q", level)
@@ -221,7 +222,10 @@ func (a *Auth) SetProjectTeam(ctx context.Context, id Identity, projectKey, team
 		if err != nil {
 			return err
 		}
-		out, err = a.store.SetProjectTeam(ctx, tx, project.ID, team.ID, level, id.Principal.ID)
+		if err := a.checkRoleKeys(ctx, tx, project.ID, roleKeys); err != nil {
+			return err
+		}
+		out, err = a.store.SetProjectTeam(ctx, tx, project.ID, team.ID, level, roleKeys, id.Principal.ID)
 		return err
 	})
 	return out, err
@@ -254,6 +258,11 @@ func (a *Auth) RemoveProjectTeam(ctx context.Context, id Identity, projectKey, t
 func (a *Auth) OwnerTeamFor(ctx context.Context, id Identity, teamKey string) (*uuid.UUID, error) {
 	teamKey = strings.TrimSpace(teamKey)
 	if teamKey == "" {
+		// Открытое создание (решение 0030): проект без команды-владельца
+		// достаётся создателю — CreateProject делает его администратором.
+		if a.openProjects {
+			return nil, nil
+		}
 		if err := a.RequireAdmin(id); err != nil {
 			return nil, apperr.Forbidden("проект без команды-владельца заводит администратор системы")
 		}

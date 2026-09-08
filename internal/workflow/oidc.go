@@ -92,7 +92,10 @@ func (a *Auth) Login(ctx context.Context, idToken string) (Session, error) {
 
 	// Принципал резолвится до транзакции: занятый хэндл — это отбитый уникальный
 	// индекс, после которого транзакция уже не принимает вторую попытку.
-	p, err := a.resolveIdP(ctx, claims)
+	p, err := a.resolveIdP(ctx, postgres.IdPPrincipalInput{
+		Subject: claims.Subject, Handle: handleFromClaims(claims),
+		DisplayName: claims.Name, Email: claims.Email,
+	})
 	if err != nil {
 		return Session{}, err
 	}
@@ -128,15 +131,12 @@ func (a *Auth) Logout(ctx context.Context, id Identity) error {
 	return a.store.RevokeToken(ctx, a.store.DB(), id.Token.ID)
 }
 
-// resolveIdP находит принципала по `sub` или заводит его. Занятый хэндл не
-// повод отказать во входе: человек в этом не виноват, и различить его
-// позволяет `sub`.
-func (a *Auth) resolveIdP(ctx context.Context, claims oidc.Claims) (domain.Principal, error) {
+// resolveIdP находит принципала по ключу у провайдера или заводит его.
+// Занятый хэндл не повод отказать во входе: человек в этом не виноват, и
+// различить его позволяет ключ. Общий для OIDC и GitHub: провайдеры разные,
+// принципал один и тот же.
+func (a *Auth) resolveIdP(ctx context.Context, in postgres.IdPPrincipalInput) (domain.Principal, error) {
 	q := a.store.DB()
-	in := postgres.IdPPrincipalInput{
-		Subject: claims.Subject, Handle: handleFromClaims(claims),
-		DisplayName: claims.Name, Email: claims.Email,
-	}
 	p, err := a.store.UpsertIdPPrincipal(ctx, q, in)
 	if err == nil {
 		return p, nil
@@ -144,7 +144,7 @@ func (a *Auth) resolveIdP(ctx context.Context, claims oidc.Claims) (domain.Princ
 	if apperr.As(err).Code != apperr.CodeConflict {
 		return p, err
 	}
-	in.Handle = in.Handle + "-" + shortSubject(claims.Subject)
+	in.Handle = in.Handle + "-" + shortSubject(in.Subject)
 	return a.store.UpsertIdPPrincipal(ctx, q, in)
 }
 

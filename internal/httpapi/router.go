@@ -62,6 +62,10 @@ func (s *Server) Handler() http.Handler {
 	// ID-токен провайдера, а не свой.
 	r.GET("/v1/auth/oidc", s.oidcSettings)
 	r.POST("/v1/auth/oidc/login", s.oidcLogin)
+	// Вход через GitHub (решение 0030): код авторизации меняет бэкенд —
+	// секрет клиента живёт у него.
+	r.GET("/v1/auth/github", s.githubSettings)
+	r.POST("/v1/auth/github/login", s.githubLogin)
 
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)
@@ -99,8 +103,9 @@ func (s *Server) Handler() http.Handler {
 		v1.PUT("/teams/:teamKey/budgets", s.setTeamBudget)
 
 		v1.GET("/projects", s.listProjects)
-		// Проект заводит администратор системы или лид команды с правом на
-		// это, поэтому guard'а по уровню здесь нет: проверка внутри.
+		// Кто может завести проект, решает Auth: любой вошедший при открытом
+		// создании, иначе администратор системы или лид команды с правом на
+		// это. Guard'а по уровню здесь нет: проверка внутри.
 		v1.POST("/projects", s.createProject)
 		v1.GET("/projects/:projectKey", viewer, s.getProject)
 		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)

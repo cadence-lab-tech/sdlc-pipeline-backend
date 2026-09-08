@@ -51,6 +51,13 @@ type Config struct {
 	GitHubAppID      string
 	GitHubAppKeyFile string
 	GitHubToken      string
+	// Вход людей через GitHub (решение 0030): OAuth-учётные данные того же
+	// приложения. Секрет клиента — второй секрет GitHub, и живёт он здесь
+	// же, в окружении. Адрес сайта нужен GitHub Enterprise: у него
+	// /login/oauth живёт не там, где API.
+	GitHubWebURL          string
+	GitHubAppClientID     string
+	GitHubAppClientSecret string
 
 	// Индексация репозиториев. Кодовая база под задачами двигается непрерывно,
 	// поэтому прогон наследует у предыдущего всё, что не изменилось, и
@@ -95,6 +102,10 @@ type Config struct {
 	OIDCIssuer      string
 	OIDCClientID    string
 	OIDCGroupsClaim string
+	// Кто заводит проекты (решение 0030): open — любой вошедший, создатель
+	// становится администратором проекта; teams — администратор системы и
+	// лиды команд с правом на это (решение 0027).
+	ProjectCreation string
 	// Срок жизни сессии: она отзывается выходом, но и сама протухает —
 	// вкладку, забытую открытой на неделю, входом заново не считают.
 	SessionTTL time.Duration
@@ -128,44 +139,48 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:           env("SDLC_HTTP_ADDR", ":8080"),
-		ShutdownTimeout:    15 * time.Second,
-		RequestTimeout:     30 * time.Second,
-		DatabaseURL:        env("SDLC_DATABASE_URL", ""),
-		MaxConns:           10,
-		ConnectTimeout:     30 * time.Second,
-		AutoMigrate:        true,
-		StrictGates:        false,
-		LeaseTTL:           30 * time.Minute,
-		HeartbeatInterval:  5 * time.Minute,
-		LeaseSweepInterval: time.Minute,
-		MCPEnabled:         true,
-		GitHubAPIURL:       env("SDLC_GITHUB_API_URL", "https://api.github.com"),
-		GitHubAppID:        env("SDLC_GITHUB_APP_ID", ""),
-		GitHubAppKeyFile:   env("SDLC_GITHUB_APP_KEY_FILE", ""),
-		GitHubToken:        env("SDLC_GITHUB_TOKEN", ""),
-		IndexEnabled:       true,
-		IndexInterval:      5 * time.Minute,
-		IndexStuckAfter:    30 * time.Minute,
-		IndexMaxFileBytes:  512 << 10,
-		IndexMaxFiles:      20000,
-		ChunkMaxChars:      1600,
-		EmbeddingProvider:  env("SDLC_EMBEDDINGS_PROVIDER", ""),
-		EmbeddingModel:     env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
-		EmbeddingBatch:     96,
-		VoyageAPIURL:       env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
-		VoyageAPIKey:       env("SDLC_VOYAGE_API_KEY", ""),
-		AuthMode:           env("SDLC_AUTH_MODE", ""),
-		AdminHandle:        env("SDLC_ADMIN_HANDLE", "admin"),
-		AdminToken:         env("SDLC_ADMIN_TOKEN", ""),
-		BootstrapTeam:      env("SDLC_BOOTSTRAP_TEAM", ""),
-		BootstrapTeamName:  env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
-		OIDCIssuer:         env("SDLC_OIDC_ISSUER", ""),
-		OIDCClientID:       env("SDLC_OIDC_CLIENT_ID", ""),
-		OIDCGroupsClaim:    env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
-		SessionTTL:         12 * time.Hour,
-		DefaultActor:       env("SDLC_DEFAULT_ACTOR", "anonymous"),
-		BlobDir:            env("SDLC_BLOB_DIR", ""),
+		HTTPAddr:              env("SDLC_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:       15 * time.Second,
+		RequestTimeout:        30 * time.Second,
+		DatabaseURL:           env("SDLC_DATABASE_URL", ""),
+		MaxConns:              10,
+		ConnectTimeout:        30 * time.Second,
+		AutoMigrate:           true,
+		StrictGates:           false,
+		LeaseTTL:              30 * time.Minute,
+		HeartbeatInterval:     5 * time.Minute,
+		LeaseSweepInterval:    time.Minute,
+		MCPEnabled:            true,
+		GitHubAPIURL:          env("SDLC_GITHUB_API_URL", "https://api.github.com"),
+		GitHubAppID:           env("SDLC_GITHUB_APP_ID", ""),
+		GitHubAppKeyFile:      env("SDLC_GITHUB_APP_KEY_FILE", ""),
+		GitHubToken:           env("SDLC_GITHUB_TOKEN", ""),
+		GitHubWebURL:          env("SDLC_GITHUB_URL", "https://github.com"),
+		GitHubAppClientID:     env("SDLC_GITHUB_APP_CLIENT_ID", ""),
+		GitHubAppClientSecret: env("SDLC_GITHUB_APP_CLIENT_SECRET", ""),
+		ProjectCreation:       env("SDLC_PROJECT_CREATION", "open"),
+		IndexEnabled:          true,
+		IndexInterval:         5 * time.Minute,
+		IndexStuckAfter:       30 * time.Minute,
+		IndexMaxFileBytes:     512 << 10,
+		IndexMaxFiles:         20000,
+		ChunkMaxChars:         1600,
+		EmbeddingProvider:     env("SDLC_EMBEDDINGS_PROVIDER", ""),
+		EmbeddingModel:        env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
+		EmbeddingBatch:        96,
+		VoyageAPIURL:          env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
+		VoyageAPIKey:          env("SDLC_VOYAGE_API_KEY", ""),
+		AuthMode:              env("SDLC_AUTH_MODE", ""),
+		AdminHandle:           env("SDLC_ADMIN_HANDLE", "admin"),
+		AdminToken:            env("SDLC_ADMIN_TOKEN", ""),
+		BootstrapTeam:         env("SDLC_BOOTSTRAP_TEAM", ""),
+		BootstrapTeamName:     env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
+		OIDCIssuer:            env("SDLC_OIDC_ISSUER", ""),
+		OIDCClientID:          env("SDLC_OIDC_CLIENT_ID", ""),
+		OIDCGroupsClaim:       env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
+		SessionTTL:            12 * time.Hour,
+		DefaultActor:          env("SDLC_DEFAULT_ACTOR", "anonymous"),
+		BlobDir:               env("SDLC_BLOB_DIR", ""),
 		BlobS3: blobstore.S3Config{
 			Endpoint:     env("SDLC_BLOB_S3_ENDPOINT", ""),
 			Region:       env("SDLC_BLOB_S3_REGION", env("AWS_REGION", "")),
@@ -268,6 +283,14 @@ func Load() (Config, error) {
 	case "header", "token":
 	default:
 		return c, fmt.Errorf("SDLC_AUTH_MODE: %q — не header или token", c.AuthMode)
+	}
+	switch c.ProjectCreation {
+	case "open", "teams":
+	default:
+		return c, fmt.Errorf("SDLC_PROJECT_CREATION: %q — не open или teams", c.ProjectCreation)
+	}
+	if (c.GitHubAppClientID == "") != (c.GitHubAppClientSecret == "") {
+		return c, fmt.Errorf("SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET задаются вместе")
 	}
 	if c.AuthMode == "token" && c.AdminToken == "" {
 		if c.Env == "development" {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
 	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -62,10 +63,15 @@ type Auth struct {
 	store *postgres.Store
 	log   *slog.Logger
 	mode  string
+	// Проект заводит любой вошедший (решение 0030). Выключено — только
+	// администратор системы и лид команды с правом на это (решение 0027).
+	openProjects bool
 	// Вход через корпоративный провайдер (решение 0027). nil — вход только
 	// по выданным токенам, как в фазе 4.
 	oidc       *oidc.Verifier
 	sessionTTL time.Duration
+	// Вход через GitHub (решение 0030). nil — выключен.
+	github *github.OAuth
 }
 
 func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {
@@ -77,6 +83,17 @@ func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {
 
 // Mode — режим аутентификации, как его видит клиент.
 func (a *Auth) Mode() string { return a.mode }
+
+// OpenProjectCreation включает или выключает создание проектов любым
+// вошедшим. Создатель становится администратором проекта, команды остаются
+// необязательным слоем поверх (решение 0030).
+func (a *Auth) OpenProjectCreation(open bool) *Auth {
+	a.openProjects = open
+	return a
+}
+
+// ProjectsOpen — может ли любой вошедший завести проект.
+func (a *Auth) ProjectsOpen() bool { return a.openProjects }
 
 // Enforced — проверяются ли права.
 func (a *Auth) Enforced() bool { return a.mode == AuthToken }
@@ -365,12 +382,75 @@ func (a *Auth) ProjectRole(ctx context.Context, id Identity, projectID uuid.UUID
 	return a.store.EffectiveRole(ctx, a.store.DB(), projectID, id.Principal.ID)
 }
 
-// AllowedRoles — какие роли специалистов агент может забирать. nil — любые.
-func (id Identity) AllowedRoles() []string {
+// TokenRoles — роли специалистов, которыми ограничен предъявленный токен.
+// nil — токен не ограничивает.
+func (id Identity) TokenRoles() []string {
 	if id.Token == nil || len(id.Token.RoleKeys) == 0 {
 		return nil
 	}
 	return id.Token.RoleKeys
+}
+
+// AllowedRoles — какие роли специалистов актор может забирать в проекте
+// (решение 0030): пересечение того, что разрешено участнику, и того, чем
+// ограничен токен. nil — любые. Участие считается по путям, дающим уровень
+// agent и выше: путь с NULL разрешает всё, остальные складываются.
+//
+// В режиме заголовка участия нет, и рамки задаёт только токен — как в фазе 4.
+// Администратор системы участником не является, и его тоже держит только
+// токен: иначе привязанный к роли токен администратора ничего не значил бы.
+func (a *Auth) AllowedRoles(ctx context.Context, id Identity, projectID uuid.UUID) ([]string, error) {
+	fromToken := id.TokenRoles()
+	if !a.Enforced() || id.Principal.IsAdmin {
+		return fromToken, nil
+	}
+	grants, err := a.store.RoleGrants(ctx, a.store.DB(), projectID, id.Principal.ID)
+	if err != nil {
+		return nil, err
+	}
+	return intersectRoles(memberRoles(grants), fromToken), nil
+}
+
+// memberRoles сводит пути участия к одному набору: nil — любые роли.
+func memberRoles(grants []postgres.RoleGrant) []string {
+	union := []string{}
+	seen := map[string]bool{}
+	for _, g := range grants {
+		if !g.Level.Covers(domain.MemberAgent) {
+			continue
+		}
+		if g.RoleKeys == nil {
+			return nil
+		}
+		for _, key := range g.RoleKeys {
+			if !seen[key] {
+				seen[key] = true
+				union = append(union, key)
+			}
+		}
+	}
+	return union
+}
+
+// intersectRoles пересекает два набора, где nil означает «любые».
+func intersectRoles(a, b []string) []string {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	}
+	allowed := map[string]bool{}
+	for _, key := range b {
+		allowed[key] = true
+	}
+	out := []string{}
+	for _, key := range a {
+		if allowed[key] {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // VisibleProjects — проекты, доступные актору. Без проверки прав — все.
@@ -405,10 +485,11 @@ func (a *Auth) ListMembers(ctx context.Context, id Identity, projectKey string) 
 	return a.store.ListMembers(ctx, q, project.ID)
 }
 
-// SetMember добавляет участника или меняет его уровень. Принципал заводится,
-// если его ещё нет: администратор добавляет «user:alice» до того, как та
-// впервые придёт с токеном.
-func (a *Auth) SetMember(ctx context.Context, id Identity, projectKey, principal string, role domain.MemberRole) (domain.ProjectMember, error) {
+// SetMember добавляет участника или меняет его уровень и роли специалистов.
+// Принципал заводится, если его ещё нет: администратор добавляет «user:alice»
+// до того, как та впервые придёт с токеном. roleKeys nil — любые роли
+// (решение 0030); заданные роли обязаны существовать в проекте.
+func (a *Auth) SetMember(ctx context.Context, id Identity, projectKey, principal string, role domain.MemberRole, roleKeys []string) (domain.ProjectMember, error) {
 	if !role.Valid() {
 		return domain.ProjectMember{}, apperr.InvalidInput(
 			"уровень участия: viewer, agent, maintainer или admin, а не %q", role)
@@ -432,10 +513,33 @@ func (a *Auth) SetMember(ctx context.Context, id Identity, projectKey, principal
 				return err
 			}
 		}
+		if err := a.checkRoleKeys(ctx, tx, project.ID, roleKeys); err != nil {
+			return err
+		}
+		if _, err := a.store.SetMember(ctx, tx, project.ID, p.ID, role, id.Principal.ID); err != nil {
+			return err
+		}
+		if err := a.store.SetMemberRoles(ctx, tx, project.ID, p.ID, roleKeys); err != nil {
+			return err
+		}
 		out, err = a.store.SetMember(ctx, tx, project.ID, p.ID, role, id.Principal.ID)
 		return err
 	})
 	return out, err
+}
+
+// checkRoleKeys отбивает ссылку на несуществующую роль: опечатка в ключе
+// иначе молча запретила бы агенту всю работу.
+func (a *Auth) checkRoleKeys(ctx context.Context, q postgres.Querier, projectID uuid.UUID, roleKeys []string) error {
+	for _, key := range roleKeys {
+		if strings.TrimSpace(key) == "" {
+			return apperr.InvalidInput("пустой ключ роли")
+		}
+		if _, err := a.store.GetRoleByKey(ctx, q, projectID, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *Auth) RemoveMember(ctx context.Context, id Identity, projectKey, principal string) error {
@@ -488,6 +592,10 @@ type Me struct {
 	// Команды показываются отдельно от участия в проектах: права из них
 	// приходят в проекты, которых в memberships нет.
 	Teams []domain.TeamMember `json:"teams"`
+	// Может ли актор завести проект: открытое создание, администратор
+	// системы или лид команды с правом на это. Интерфейсу это нужно, чтобы
+	// показать кнопку тому, у кого она сработает.
+	CanCreateProjects bool `json:"can_create_projects"`
 }
 
 func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
@@ -500,9 +608,26 @@ func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
 	if err != nil {
 		return Me{}, err
 	}
+	canCreate := a.openProjects || !a.Enforced() || id.Principal.IsAdmin
+	if !canCreate {
+		for _, t := range teams {
+			if t.Role != domain.TeamRoleLead {
+				continue
+			}
+			team, err := a.store.GetTeamByKey(ctx, q, t.TeamKey)
+			if err != nil {
+				return Me{}, err
+			}
+			if team.CanCreateProjects {
+				canCreate = true
+				break
+			}
+		}
+	}
 	return Me{
 		Mode: a.mode, Authenticated: id.Authenticated(),
 		Principal: id.Principal, Token: id.Token, Memberships: memberships, Teams: teams,
+		CanCreateProjects: canCreate,
 	}, nil
 }
 

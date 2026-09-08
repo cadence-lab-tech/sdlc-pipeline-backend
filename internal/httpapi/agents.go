@@ -25,8 +25,18 @@ func (s *Server) claimTask(c *gin.Context) {
 	var req claimRequest
 	_ = c.ShouldBindJSON(&req)
 
+	projectID, err := s.projectOf(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	allowed, err := s.auth.AllowedRoles(c.Request.Context(), identity(c), projectID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	res, err := s.engine.ClaimWith(c.Request.Context(), c.Param("taskKey"), actor(c).ID, req.SessionRef,
-		workflow.ClaimOptions{AllowedRoles: identity(c).AllowedRoles()})
+		workflow.ClaimOptions{AllowedRoles: allowed})
 	if err != nil {
 		fail(c, s.log, err)
 		return

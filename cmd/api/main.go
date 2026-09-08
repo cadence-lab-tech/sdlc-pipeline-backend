@@ -102,7 +102,8 @@ func run() error {
 			"пропускают переход — режим отладки цикла, не для продакшена")
 	}
 
-	auth := workflow.NewAuth(store, log, cfg.AuthMode)
+	auth := workflow.NewAuth(store, log, cfg.AuthMode).
+		OpenProjectCreation(cfg.ProjectCreation == "open")
 	if err := auth.Bootstrap(ctx, cfg.AdminHandle, cfg.AdminToken); err != nil {
 		return err
 	}
@@ -117,9 +118,15 @@ func run() error {
 		log.Info("вход через корпоративный провайдер", "issuer", cfg.OIDCIssuer,
 			"session_ttl", cfg.SessionTTL)
 	}
+	if cfg.GitHubAppClientID != "" {
+		auth.UseGitHub(github.NewOAuth(cfg.GitHubWebURL, cfg.GitHubAPIURL,
+			cfg.GitHubAppClientID, cfg.GitHubAppClientSecret), cfg.SessionTTL)
+		log.Info("вход через GitHub", "client_id", cfg.GitHubAppClientID)
+	}
 	switch {
 	case auth.Enforced():
 		log.Info("аутентификация по токенам", "admin", cfg.AdminHandle,
+			"project_creation", cfg.ProjectCreation,
 			"bootstrap_token", cfg.AdminToken != "")
 	default:
 		log.Warn("SDLC_AUTH_MODE=header: актор берётся из заголовка, права не " +
