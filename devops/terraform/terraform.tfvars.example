@@ -8,8 +8,8 @@ project_name = "sdlc-pipeline"
 location          = "ru-1"
 availability_zone = "spb-3"
 
-# SSD-50: 2 vCPU, 4 ГБ, 50 ГБ. Другие — ./devops/bin/twc-get.sh presets/servers
-server_preset_id = 2579
+# Cloud-50: 2 vCPU, 4 ГБ, 50 ГБ NVMe. Другие — ./devops/bin/twc-get.sh presets/servers
+server_preset_id = 2453
 
 # Публичная половина ключа, приватная — в секрете SSH_KEY обоих репозиториев.
 ssh_public_key = "ssh-ed25519 AAAA... sdlc-deploy"
@@ -20,4 +20,6 @@ domain      = "sdlc.example.ru"
 manage_dns  = true
 domain_zone = "example.ru"
 
-manage_s3 = true
+# Standard 10GB. Пресеты за 1 ₽ — промо, один на аккаунт.
+manage_s3    = true
+s3_preset_id = 4621

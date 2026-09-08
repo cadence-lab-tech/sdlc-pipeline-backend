@@ -61,7 +61,9 @@ case "$cmd" in
     # Сервис пишет JSON с "level":"ERROR", Postgres — FATAL. Caddy тоже пишет
     # JSON, и в информационных строках бывает поле "error" — например, при
     # первом выпуске сертификата. Это норма, поэтому level=info отбрасываем.
-    remote "docker compose logs --no-color --tail $lines 2>&1 | grep -iE '\"level\":\"(error|warn)\"|fatal|panic|exited with' | grep -v '\"level\":\"info\"' || echo 'ошибок в последних $lines строках нет'"
+    # Три предупреждения ниже — норма при запуске без TLS на внутренних портах
+    # и при старте Postgres; без исключения они забивают каждый срез.
+    remote "docker compose logs --no-color --tail $lines 2>&1 | grep -iE '\"level\":\"(error|warn)\"|fatal|panic|exited with' | grep -vE '\"level\":\"info\"|skipped because it requires TLS|no automatic HTTPS|logical replication launcher' || echo 'ошибок в последних $lines строках нет'"
     ;;
 
   health)

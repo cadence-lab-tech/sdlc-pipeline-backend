@@ -1,5 +1,5 @@
 variable "project_name" {
-  description = "Имя проекта в панели Timeweb и префикс в именах ресурсов."
+  description = "Префикс в именах ресурсов в панели Timeweb."
   type        = string
   default     = "sdlc-pipeline"
 }
@@ -7,7 +7,7 @@ variable "project_name" {
 # --- размещение -------------------------------------------------------------
 
 variable "location" {
-  description = "Регион ЦОДа. S3 у Timeweb есть только в ru-1, см. s3_location."
+  description = "Регион ЦОДа. S3 у Timeweb есть только в ru-1: пресеты хранилища привязаны к нему."
   type        = string
   default     = "ru-1"
 
@@ -33,12 +33,13 @@ variable "server_preset_id" {
   description = <<-EOT
     Тариф машины. Пресет, а не конфигуратор: за те же деньги даёт больше диска,
     и цена видна заранее. Список с ценами — `./devops/bin/twc-get.sh
-    presets/servers`. По умолчанию SSD-50 в ru-1: 2 vCPU, 4 ГБ, 50 ГБ.
+    presets/servers`. По умолчанию Cloud-50 в ru-1: 2 vCPU, 4 ГБ, 50 ГБ NVMe.
+    Линейка SSD (SSD-50, дешевле) на момент создания отвечала «No free node».
     Postgres с pgvector, сервис, воркер и два прокси — четыре гигабайта не
     запас, а рабочий минимум: индексация репозиториев держит дельты в памяти.
   EOT
   type        = number
-  default     = 2579
+  default     = 2453
 }
 
 variable "os_name" {
@@ -110,19 +111,15 @@ variable "manage_s3" {
   default     = true
 }
 
-variable "s3_location" {
+variable "s3_preset_id" {
   description = <<-EOT
-    Локация хранилища. Отдельная переменная, а не var.location: S3 у Timeweb
-    есть только в ru-1, и при переезде машины в другую зону бакет остаётся.
+    Пресет хранилища — единственный способ сайзинга S3 у Timeweb. Список —
+    `./devops/bin/twc-get.sh presets/storages`. Пресеты за 1 ₽ — промо, и он
+    один на аккаунт: второй бакет на нём не создаётся («Promo storage already
+    exists»). По умолчанию Standard 10GB в ru-1.
   EOT
-  type        = string
-  default     = "ru-1"
-}
-
-variable "s3_max_price" {
-  description = "Верхняя граница цены пресета хранилища, ₽/мес. Пресеты — единственный способ сайзинга S3."
   type        = number
-  default     = 500
+  default     = 4621
 }
 
 variable "attach_floating_ip" {

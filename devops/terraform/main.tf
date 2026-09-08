@@ -1,20 +1,15 @@
 /*
- * Инфраструктура sdlc-pipeline в Timeweb Cloud: отдельный проект в панели,
- * одна машина, плавающий IPv4, файрвол, A-запись и бакет под содержимое
- * артефактов.
+ * Инфраструктура sdlc-pipeline в Timeweb Cloud: одна машина, плавающий IPv4,
+ * файрвол, A-запись и бакет под содержимое артефактов.
  *
  * Чего здесь нет и быть не может: содержимого /opt/sdlc/.env. Секреты
  * приложения кладёт на машину devops/bin/bootstrap-env.sh один раз;
  * Terraform их не знает — иначе они окажутся в state в открытом виде.
  */
 
-# Свой проект в панели: ресурсы sdlc не смешиваются с остальными на аккаунте,
-# и счёт по ним виден отдельно. Файрвол и плавающий IP проектов не знают —
-# у них нет project_id, они остаются в общем.
-resource "twc_project" "main" {
-  name        = var.project_name
-  description = "SDLC Pipeline. Managed by Terraform (backend/devops/terraform)"
-}
+# Ресурсы заводятся в общем проекте аккаунта: отдельный проект в панели —
+# ручной перенос, Terraform его не описывает (у файрвола и плавающего IP
+# project_id нет вовсе, и половина ресурсов всё равно осталась бы в общем).
 
 data "twc_os" "main" {
   name    = var.os_name
@@ -27,10 +22,9 @@ resource "twc_ssh_key" "deploy" {
 }
 
 resource "twc_server" "main" {
-  name       = var.project_name
-  hostname   = var.project_name
-  comment    = "Managed by Terraform (backend/devops/terraform)"
-  project_id = twc_project.main.id
+  name     = var.project_name
+  hostname = var.project_name
+  comment  = "Managed by Terraform (backend/devops/terraform)"
 
   os_id     = data.twc_os.main.id
   preset_id = var.server_preset_id
@@ -150,24 +144,13 @@ resource "twc_dns_rr" "main" {
 
 # --- объектное хранилище под содержимое артефактов ---------------------------
 
-data "twc_s3_preset" "main" {
-  count    = var.manage_s3 ? 1 : 0
-  location = var.s3_location
-
-  price_filter {
-    from = 0
-    to   = var.s3_max_price
-  }
-}
-
 resource "twc_s3_bucket" "blobs" {
   count = var.manage_s3 ? 1 : 0
 
   name        = "${var.project_name}-blobs"
   description = "Содержимое артефактов и документов (SDLC_BLOB_S3_*). Managed by Terraform"
-  project_id  = twc_project.main.id
   # Приватный: содержимое читает и пишет только сервис своими ключами,
   # наружу ссылки не уходят — интерфейс получает содержимое через API.
   type      = "private"
-  preset_id = data.twc_s3_preset.main[0].id
+  preset_id = var.s3_preset_id
 }

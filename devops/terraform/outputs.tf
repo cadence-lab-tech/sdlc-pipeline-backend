@@ -1,8 +1,3 @@
-output "project_id" {
-  description = "ID проекта в панели Timeweb."
-  value       = twc_project.main.id
-}
-
 output "server_id" {
   description = "ID машины: twc-get.sh servers/<id>."
   value       = twc_server.main.id
