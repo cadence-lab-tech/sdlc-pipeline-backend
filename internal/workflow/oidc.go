@@ -239,6 +239,21 @@ func shortSubject(subject string) string {
 
 // ── сопоставление групп командам ────────────────────────────────────────────
 
+// TeamIdPGroups — группы провайдера, ведущие в команду. Читает участник
+// команды: видеть, откуда берётся её состав, важно и лиду, и обычному
+// участнику; правит только администратор системы.
+func (a *Auth) TeamIdPGroups(ctx context.Context, id Identity, key string) ([]string, error) {
+	q := a.store.DB()
+	team, err := a.store.GetTeamByKey(ctx, q, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.teamRole(ctx, q, id, team.ID, false); err != nil {
+		return nil, err
+	}
+	return a.store.ListTeamIdPGroups(ctx, q, team.ID)
+}
+
 // SetTeamIdPGroups задаёт группы провайдера, ведущие в команду. Это настройка
 // доступа целой группы людей, поэтому право — у администратора системы.
 func (a *Auth) SetTeamIdPGroups(ctx context.Context, id Identity, key string, groups []string) ([]string, error) {

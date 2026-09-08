@@ -118,6 +118,15 @@ type setTeamGroupsRequest struct {
 	Groups []string `json:"groups"`
 }
 
+func (s *Server) teamIdPGroups(c *gin.Context) {
+	groups, err := s.auth.TeamIdPGroups(c.Request.Context(), identity(c), c.Param("teamKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"groups": groups})
+}
+
 func (s *Server) setTeamIdPGroups(c *gin.Context) {
 	var req setTeamGroupsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -139,6 +148,17 @@ func (s *Server) removeTeamMember(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// listPrincipals — все, кто заведён в системе. Права проверяет сервис:
+// список общесистемный, и уровня в проекте для него мало.
+func (s *Server) listPrincipals(c *gin.Context) {
+	principals, err := s.auth.ListPrincipals(c.Request.Context(), identity(c), c.Query("q"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"principals": principals})
 }
 
 // ── квоты по стоимости ──────────────────────────────────────────────────────

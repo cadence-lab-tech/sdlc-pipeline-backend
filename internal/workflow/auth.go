@@ -381,6 +381,16 @@ func (a *Auth) VisibleProjects(ctx context.Context, id Identity) ([]domain.Proje
 	return a.store.ListProjectsFor(ctx, a.store.DB(), id.Principal)
 }
 
+// ListPrincipals — все заведённые в системе. Спрашивает страница
+// администратора: чтобы добавить человека в команду, его надо в чём-то
+// выбрать. Список общесистемный, поэтому и права общесистемные.
+func (a *Auth) ListPrincipals(ctx context.Context, id Identity, search string) ([]domain.Principal, error) {
+	if err := a.RequireAdmin(id); err != nil {
+		return nil, err
+	}
+	return a.store.ListPrincipals(ctx, a.store.DB(), search)
+}
+
 // ── участники ───────────────────────────────────────────────────────────────
 
 func (a *Auth) ListMembers(ctx context.Context, id Identity, projectKey string) ([]domain.ProjectMember, error) {

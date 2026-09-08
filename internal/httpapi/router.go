@@ -81,6 +81,9 @@ func (s *Server) Handler() http.Handler {
 
 		// Команды: группы принципалов с правами на проекты (решение 0027).
 		// Права разные у каждой ручки — их проверяет сам сервис.
+		// Кто заведён в системе: список для страницы администратора.
+		v1.GET("/principals", s.listPrincipals)
+
 		v1.GET("/teams", s.listTeams)
 		v1.POST("/teams", s.createTeam)
 		v1.GET("/teams/:teamKey", s.getTeam)
@@ -88,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 		v1.DELETE("/teams/:teamKey", s.archiveTeam)
 		v1.PUT("/teams/:teamKey/members", s.setTeamMember)
 		v1.DELETE("/teams/:teamKey/members/:handle", s.removeTeamMember)
+		v1.GET("/teams/:teamKey/idp-groups", s.teamIdPGroups)
 		v1.PUT("/teams/:teamKey/idp-groups", s.setTeamIdPGroups)
 		// Квоты по стоимости: предел ставит администратор системы, расход
 		// видят участники команды.

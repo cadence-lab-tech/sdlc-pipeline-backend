@@ -39,6 +39,30 @@ func (s *Store) GetPrincipalByHandle(ctx context.Context, q Querier, handle stri
 	return p, nil
 }
 
+// ListPrincipals — все, кто заведён в системе: люди, агенты, сервисы.
+// Нужен странице администратора, чтобы добавить человека в команду до того,
+// как он впервые придёт с токеном. Фильтр по подстроке идёт и по хэндлу, и по
+// имени: администратор ищет по тому, что помнит.
+func (s *Store) ListPrincipals(ctx context.Context, q Querier, search string) ([]domain.Principal, error) {
+	rows, err := q.Query(ctx, `SELECT `+principalCols+` FROM principals
+		WHERE $1 = '' OR handle ILIKE '%' || $1 || '%' OR display_name ILIKE '%' || $1 || '%'
+		ORDER BY is_admin DESC, handle`, search)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.Principal{}
+	for rows.Next() {
+		p, err := scanPrincipal(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, p)
+	}
+	return out, translate(rows.Err())
+}
+
 // SetAdmin выдаёт или снимает глобальные права администратора.
 func (s *Store) SetAdmin(ctx context.Context, q Querier, id uuid.UUID, admin bool) error {
 	_, err := q.Exec(ctx, `UPDATE principals SET is_admin = $2 WHERE id = $1`, id, admin)

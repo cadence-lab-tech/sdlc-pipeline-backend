@@ -51,6 +51,36 @@ func adminIdentity(t *testing.T, ctx context.Context, auth *Auth) Identity {
 	return id
 }
 
+// Список принципалов нужен странице администратора: человека добавляют в
+// команду до того, как он впервые придёт с токеном. Список общесистемный,
+// поэтому и права на него общесистемные.
+func TestPrincipalListIsForAdminsOnly(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, auth, _ := setupPhase4(t, AuthToken)
+	admin := adminIdentity(t, ctx, auth)
+	alice := identityOf(t, store, "user:alice")
+
+	all, err := auth.ListPrincipals(ctx, admin, "")
+	if err != nil {
+		t.Fatalf("список принципалов: %v", err)
+	}
+	if len(all) < 2 {
+		t.Fatalf("в списке %d принципалов, ожидали хотя бы администратора и alice", len(all))
+	}
+
+	found, err := auth.ListPrincipals(ctx, admin, "ali")
+	if err != nil {
+		t.Fatalf("поиск по подстроке: %v", err)
+	}
+	if len(found) != 1 || found[0].ID != alice.Principal.ID {
+		t.Fatalf("поиск нашёл не то: %+v", found)
+	}
+
+	if _, err := auth.ListPrincipals(ctx, alice, ""); apperr.As(err).Code != apperr.CodeForbidden {
+		t.Fatalf("участник не администратор: ожидали отказ, получили %v", err)
+	}
+}
+
 func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 	ctx := context.Background()
 	store, _, _, auth, _ := setupPhase4(t, AuthToken)
