@@ -1,0 +1,23 @@
+# cp terraform.tfvars.example terraform.tfvars — в git не едет.
+# Токен сюда НЕ пишем: он приходит из TWC_TOKEN (devops/.env).
+
+project_name = "sdlc-pipeline"
+
+# ru-1 живёт в зоне spb-3. Пара обязана совпадать, и менять зону нельзя:
+# провайдер пересоздаст сервер вместе с базой.
+location          = "ru-1"
+availability_zone = "spb-3"
+
+# SSD-50: 2 vCPU, 4 ГБ, 50 ГБ. Другие — ./devops/bin/twc-get.sh presets/servers
+server_preset_id = 2579
+
+# Публичная половина ключа, приватная — в секрете SSH_KEY обоих репозиториев.
+ssh_public_key = "ssh-ed25519 AAAA... sdlc-deploy"
+
+# Один адрес на интерфейс, API и MCP. Зона обслуживается NS Timeweb —
+# запись ставит Terraform. На чужих NS: manage_dns = false и A-запись руками.
+domain      = "sdlc.example.ru"
+manage_dns  = true
+domain_zone = "example.ru"
+
+manage_s3 = true

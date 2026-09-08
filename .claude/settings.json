@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(./devops/bin/remote-read.sh:*)",
+      "Bash(./devops/bin/diagnose.sh:*)",
+      "Bash(./devops/bin/twc-get.sh:*)",
+      "Bash(./devops/bin/tf.sh plan:*)",
+      "Bash(./devops/bin/tf.sh show:*)",
+      "Bash(./devops/bin/tf.sh output:*)",
+      "Bash(./devops/bin/tf.sh validate:*)",
+      "Bash(./devops/bin/tf.sh fmt:*)",
+      "Bash(./devops/bin/tf.sh version:*)",
+      "Bash(./devops/bin/tf.sh state list:*)",
+      "Bash(./devops/bin/tf.sh state show:*)",
+      "Bash(./devops/bin/tf.sh providers:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh secret list:*)",
+      "Bash(gh variable list:*)"
+    ],
+    "ask": [
+      "Bash(./devops/bin/remote-run.sh:*)",
+      "Bash(./devops/bin/bootstrap-env.sh:*)",
+      "Bash(./devops/bin/tf.sh:*)",
+      "Bash(terraform:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(gh workflow run:*)",
+      "Bash(gh secret set:*)"
+    ]
+  }
+}

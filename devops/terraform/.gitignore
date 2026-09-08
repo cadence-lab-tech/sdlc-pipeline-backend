@@ -1,0 +1,9 @@
+# State содержит ключи S3 и отпечатки — в git ему нельзя.
+# .terraform.lock.hcl, наоборот, коммитится: он пинует версию и хеши
+# провайдера, иначе у каждого своя.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

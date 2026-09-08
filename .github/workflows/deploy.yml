@@ -1,0 +1,139 @@
+# Сборка образа сервиса и выкладка на единственную машину в Timeweb.
+#
+# Образ один на api, воркер и CLI (см. Dockerfile). Интерфейс живёт в своём
+# репозитории и выкладывается своим workflow'ом тем же deploy.sh — с другим
+# именем образа; deploy.sh выстраивает их в очередь через flock.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    # Документы и devops/ в образ не попадают: правка README или Terraform
+    # не должна пересобирать и перекатывать сервис.
+    paths-ignore:
+      - "docs/**"
+      - "devops/**"
+      - "README.md"
+      - "CLAUDE.md"
+      - ".claude/**"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Готовый тег образа для отката (короткий SHA). Пусто — собрать текущий main."
+        required: false
+
+# Две выкладки одновременно из этого репозитория — гонка за .env.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # При откате собирать нечего: образ с этим тегом уже в реестре.
+    if: ${{ !inputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      registry: ${{ steps.meta.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: |
+          echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          # GHCR не принимает заглавные буквы в имени образа, а логин
+          # владельца репозитория — stepaKaziatko.
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Тот же Dockerfile, что у make image. Кэш слоёв в GitHub: выкачка
+      # модулей Go — самый долгий шаг, и повторять его на каждый коммит незачем.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend:${{ steps.meta.outputs.tag }}
+          build-args: VERSION=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [build]
+    # Пока машина не настроена (нет переменной SDLC_DOMAIN — она ставится
+    # вместе с секретами ssh), выкладки нет: образ собирается и лежит в GHCR,
+    # прогон остаётся зелёным. Секреты в условии job'а недоступны, переменные
+    # — да, поэтому гейт именно на ней.
+    # Откат идёт мимо сборки, поэтому always() плюс явная проверка провала.
+    if: ${{ always() && vars.SDLC_DOMAIN != '' && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ssh-ключ
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Хост пинуется секретом, а не ssh-keyscan на каждый запуск:
+          # keyscan доверяет кому угодно, кто ответит на этот IP.
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # Конфигурация стека живёт в репозитории, а на сервере только её копия:
+      # правка compose должна доезжать выкладкой, а не руками через ssh.
+      - name: перелить конфигурацию
+        env:
+          TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+        run: |
+          scp -P "${{ vars.SSH_PORT || 22 }}" \
+            deploy/docker-compose.yml deploy/Caddyfile \
+            deploy/deploy.sh deploy/backup.sh \
+            "$TARGET:/opt/sdlc/"
+          ssh -p "${{ vars.SSH_PORT || 22 }}" "$TARGET" \
+            "chmod +x /opt/sdlc/deploy.sh /opt/sdlc/backup.sh"
+
+      # Пакеты в GHCR приватные. Токен этого прогона умеет читать пакет,
+      # привязанный к репозиторию, — им и логинимся на машине, через stdin,
+      # чтобы он не мелькнул в списке процессов. Живёт он до конца прогона;
+      # выкладка руками после этого требует своего docker login.
+      - name: выложить
+        env:
+          TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          TAG: ${{ inputs.tag || needs.build.outputs.tag }}
+          REGISTRY: ${{ needs.build.outputs.registry || 'ghcr.io/stepakaziatko' }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh -p "${{ vars.SSH_PORT || 22 }}" "$TARGET" \
+            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+          ssh -p "${{ vars.SSH_PORT || 22 }}" "$TARGET" \
+            "REGISTRY='$REGISTRY' /opt/sdlc/deploy.sh backend '$TAG'"
+
+      # Зелёный deploy означал бы «образ уехал». Живо ли то, что уехало,
+      # спрашиваем у боевого адреса: между контейнером и коллегой стоят Caddy,
+      # домен и база, и всё это ломается тихо.
+      - name: проверить снаружи
+        run: |
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${{ vars.SDLC_DOMAIN }}/readyz" || true)
+            [ "$code" = 200 ] && { echo "readyz: $code"; exit 0; }
+            sleep 5
+          done
+          echo "✗ https://${{ vars.SDLC_DOMAIN }}/readyz не ответил 200 (последний код: $code)"
+          echo "  откат: gh workflow run deploy.yml -f tag=<предыдущий короткий SHA>"
+          exit 1

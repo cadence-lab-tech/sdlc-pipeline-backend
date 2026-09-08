@@ -1,0 +1,80 @@
+#cloud-config
+# Первичная настройка машины. Отрабатывает ОДИН раз, при создании сервера:
+# правка этого файла на живую ничего не меняет (в main.tf стоит
+# ignore_changes), изменения накатываются руками или пересозданием машины.
+#
+# Всё, что здесь есть, повторяет deploy/README.md §1 — но выполняется само,
+# чтобы «подготовка сервера» не была списком команд, который каждый раз
+# выполняют чуть по-разному.
+
+package_update: true
+package_upgrade: true
+
+# Группу заводим отдельно и ДО пользователя. Docker её создаёт сам, но только
+# в runcmd — много позже модуля users. Без этой секции useradd падает на
+# «group 'docker' does not exist», и пользователь deploy не создаётся вовсе.
+groups:
+  - docker
+
+users:
+  # Отдельный пользователь для выкладки: пускать CI рутом по ssh незачем.
+  # Группа docker без sudo — этого хватает для docker compose и не хватает
+  # для всего остального.
+  - name: deploy
+    groups: [docker]
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+write_files:
+  # Логи докера по умолчанию не ротируются вообще и молча съедают диск.
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "10" }
+      }
+
+  # Вход по паролю выключаем сразу: машина с белым IP собирает переборы
+  # с первого часа жизни.
+  - path: /etc/ssh/sshd_config.d/99-sdlc.conf
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+      KbdInteractiveAuthentication no
+
+  # Ночной дамп базы. Задание заводится сразу, а сам скрипт приезжает
+  # с первой выкладкой — отсюда проверка на исполнимость.
+  - path: /etc/cron.d/sdlc-backup
+    content: |
+      SHELL=/bin/bash
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      0 3 * * * root [ -x /opt/sdlc/backup.sh ] && /opt/sdlc/backup.sh >> /var/log/sdlc-backup.log 2>&1
+    permissions: "0644"
+
+runcmd:
+  # Docker из официального репозитория: в apt Ubuntu лежит docker.io — он
+  # старее и без плагина compose v2, на котором собран весь deploy/.
+  - [sh, -c, "curl -fsSL https://get.docker.com | sh"]
+  - [systemctl, enable, --now, docker]
+  - [systemctl, restart, docker]
+  - [systemctl, restart, ssh]
+
+  # secrets/ — каталог под файлы вроде ключа GitHub App: compose монтирует
+  # его целиком, и пустой каталог не ломает запуск, в отличие от
+  # отсутствующего файла.
+  - [mkdir, -p, /opt/sdlc/backups, /opt/sdlc/secrets]
+  - [chown, -R, "deploy:deploy", /opt/sdlc]
+  - [chmod, "0700", /opt/sdlc/secrets]
+
+  # Файрвол Timeweb уже стоит перед машиной (twc_firewall в main.tf), но ufw
+  # закрывает и то, что могло бы открыться изнутри — например, порт базы,
+  # если кто-то однажды добавит его в compose.
+  - [ufw, allow, OpenSSH]
+  - [ufw, allow, "80"]
+  - [ufw, allow, "443"]
+  - [ufw, --force, enable]
+
+  # Метка: по ней remote-read.sh отличает подготовленную машину от чужой.
+  - [sh, -c, "echo sdlc > /etc/sdlc-host"]
