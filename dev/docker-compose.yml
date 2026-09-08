@@ -68,6 +68,15 @@ services:
       # остаётся адрес. Том общий с воркером: он читает документы при
       # векторизации.
       SDLC_BLOB_DIR: /blobs
+      # Объектное хранилище вместо тома: нужно, когда реплик api несколько и
+      # общего тома между ними нет. Заданный бакет перекрывает SDLC_BLOB_DIR.
+      # Локально поднимается профилем s3, см. dev/README.md.
+      SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
+      SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
+      SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
+      SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
+      SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+      SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
       # MCP-сервер для локальных агентов: /mcp/projects/{PROJECT}.
       SDLC_MCP_ENABLED: ${SDLC_MCP_ENABLED:-true}
       # Аренда задачи: сколько живёт без heartbeat и как часто его слать.
@@ -129,6 +138,14 @@ services:
       SDLC_INDEX_POLL_INTERVAL: ${SDLC_INDEX_POLL_INTERVAL:-15s}
       SDLC_INDEX_RETAIN_RUNS: ${SDLC_INDEX_RETAIN_RUNS:-5}
       SDLC_BLOB_DIR: /blobs
+      # То же хранилище, что у api: воркер читает вынесенное содержимое при
+      # векторизации, и разъехаться им нельзя.
+      SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
+      SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
+      SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
+      SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
+      SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+      SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
       SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
       SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
       # Те же настройки эмбеддингов, что у api: индекс считает воркер, вектор
@@ -139,6 +156,47 @@ services:
     volumes:
       - blobs:/blobs
     restart: unless-stopped
+
+  # Объектное хранилище для проверки S3-режима: docker compose --profile s3 up -d
+  # Само по себе ничего не меняет — api и воркер пойдут в него, только когда
+  # в dev/.env задан SDLC_BLOB_S3_BUCKET (см. dev/README.md).
+  minio:
+    image: minio/minio:latest
+    container_name: sdlc-minio
+    profiles: ["s3"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-sdlc}
+      MINIO_ROOT_PASSWORD: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-sdlcsdlc}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio:/data
+    restart: unless-stopped
+
+  # Бакет заводится отдельным шагом: сервис сам его не создаёт, а получать
+  # NoSuchBucket на первом же артефакте неинтересно.
+  minio-init:
+    image: minio/mc:latest
+    container_name: sdlc-minio-init
+    profiles: ["s3"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "local/$${SDLC_BLOB_S3_BUCKET:-sdlc-blobs}"
+    environment:
+      MINIO_ROOT_USER: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-sdlc}
+      MINIO_ROOT_PASSWORD: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-sdlcsdlc}
+      SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
 
   # Просмотр базы руками: docker compose --profile tools up -d
   adminer:
@@ -158,3 +216,4 @@ volumes:
   pgdata:
   # Вынесенное содержимое артефактов и документов; общий для api и воркера.
   blobs:
+  minio:

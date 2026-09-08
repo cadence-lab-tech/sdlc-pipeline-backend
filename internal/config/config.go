@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
 )
 
 type Config struct {
@@ -104,6 +106,10 @@ type Config struct {
 	BlobDir            string
 	BlobInlineMaxBytes int
 	BlobMaxBytes       int
+	// Объектное хранилище вместо каталога: нужно, когда реплик API несколько
+	// и общего тома между ними нет. Заданный бакет перекрывает BlobDir.
+	// Ключи доступа берутся из окружения и в базу не попадают.
+	BlobS3 blobstore.S3Config
 
 	// Вебхуки GitHub: без секрета ручка выключена — принимать неподписанные
 	// события значит позволить кому угодно ставить прогоны в очередь.
@@ -122,44 +128,53 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:            env("SDLC_HTTP_ADDR", ":8080"),
-		ShutdownTimeout:     15 * time.Second,
-		RequestTimeout:      30 * time.Second,
-		DatabaseURL:         env("SDLC_DATABASE_URL", ""),
-		MaxConns:            10,
-		ConnectTimeout:      30 * time.Second,
-		AutoMigrate:         true,
-		StrictGates:         false,
-		LeaseTTL:            30 * time.Minute,
-		HeartbeatInterval:   5 * time.Minute,
-		LeaseSweepInterval:  time.Minute,
-		MCPEnabled:          true,
-		GitHubAPIURL:        env("SDLC_GITHUB_API_URL", "https://api.github.com"),
-		GitHubAppID:         env("SDLC_GITHUB_APP_ID", ""),
-		GitHubAppKeyFile:    env("SDLC_GITHUB_APP_KEY_FILE", ""),
-		GitHubToken:         env("SDLC_GITHUB_TOKEN", ""),
-		IndexEnabled:        true,
-		IndexInterval:       5 * time.Minute,
-		IndexStuckAfter:     30 * time.Minute,
-		IndexMaxFileBytes:   512 << 10,
-		IndexMaxFiles:       20000,
-		ChunkMaxChars:       1600,
-		EmbeddingProvider:   env("SDLC_EMBEDDINGS_PROVIDER", ""),
-		EmbeddingModel:      env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
-		EmbeddingBatch:      96,
-		VoyageAPIURL:        env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
-		VoyageAPIKey:        env("SDLC_VOYAGE_API_KEY", ""),
-		AuthMode:            env("SDLC_AUTH_MODE", ""),
-		AdminHandle:         env("SDLC_ADMIN_HANDLE", "admin"),
-		AdminToken:          env("SDLC_ADMIN_TOKEN", ""),
-		BootstrapTeam:       env("SDLC_BOOTSTRAP_TEAM", ""),
-		BootstrapTeamName:   env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
-		OIDCIssuer:          env("SDLC_OIDC_ISSUER", ""),
-		OIDCClientID:        env("SDLC_OIDC_CLIENT_ID", ""),
-		OIDCGroupsClaim:     env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
-		SessionTTL:          12 * time.Hour,
-		DefaultActor:        env("SDLC_DEFAULT_ACTOR", "anonymous"),
-		BlobDir:             env("SDLC_BLOB_DIR", ""),
+		HTTPAddr:           env("SDLC_HTTP_ADDR", ":8080"),
+		ShutdownTimeout:    15 * time.Second,
+		RequestTimeout:     30 * time.Second,
+		DatabaseURL:        env("SDLC_DATABASE_URL", ""),
+		MaxConns:           10,
+		ConnectTimeout:     30 * time.Second,
+		AutoMigrate:        true,
+		StrictGates:        false,
+		LeaseTTL:           30 * time.Minute,
+		HeartbeatInterval:  5 * time.Minute,
+		LeaseSweepInterval: time.Minute,
+		MCPEnabled:         true,
+		GitHubAPIURL:       env("SDLC_GITHUB_API_URL", "https://api.github.com"),
+		GitHubAppID:        env("SDLC_GITHUB_APP_ID", ""),
+		GitHubAppKeyFile:   env("SDLC_GITHUB_APP_KEY_FILE", ""),
+		GitHubToken:        env("SDLC_GITHUB_TOKEN", ""),
+		IndexEnabled:       true,
+		IndexInterval:      5 * time.Minute,
+		IndexStuckAfter:    30 * time.Minute,
+		IndexMaxFileBytes:  512 << 10,
+		IndexMaxFiles:      20000,
+		ChunkMaxChars:      1600,
+		EmbeddingProvider:  env("SDLC_EMBEDDINGS_PROVIDER", ""),
+		EmbeddingModel:     env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
+		EmbeddingBatch:     96,
+		VoyageAPIURL:       env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
+		VoyageAPIKey:       env("SDLC_VOYAGE_API_KEY", ""),
+		AuthMode:           env("SDLC_AUTH_MODE", ""),
+		AdminHandle:        env("SDLC_ADMIN_HANDLE", "admin"),
+		AdminToken:         env("SDLC_ADMIN_TOKEN", ""),
+		BootstrapTeam:      env("SDLC_BOOTSTRAP_TEAM", ""),
+		BootstrapTeamName:  env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
+		OIDCIssuer:         env("SDLC_OIDC_ISSUER", ""),
+		OIDCClientID:       env("SDLC_OIDC_CLIENT_ID", ""),
+		OIDCGroupsClaim:    env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
+		SessionTTL:         12 * time.Hour,
+		DefaultActor:       env("SDLC_DEFAULT_ACTOR", "anonymous"),
+		BlobDir:            env("SDLC_BLOB_DIR", ""),
+		BlobS3: blobstore.S3Config{
+			Endpoint:     env("SDLC_BLOB_S3_ENDPOINT", ""),
+			Region:       env("SDLC_BLOB_S3_REGION", env("AWS_REGION", "")),
+			Bucket:       env("SDLC_BLOB_S3_BUCKET", ""),
+			Prefix:       env("SDLC_BLOB_S3_PREFIX", ""),
+			AccessKey:    env("SDLC_BLOB_S3_ACCESS_KEY_ID", env("AWS_ACCESS_KEY_ID", "")),
+			SecretKey:    env("SDLC_BLOB_S3_SECRET_ACCESS_KEY", env("AWS_SECRET_ACCESS_KEY", "")),
+			SessionToken: env("SDLC_BLOB_S3_SESSION_TOKEN", env("AWS_SESSION_TOKEN", "")),
+		},
 		BlobInlineMaxBytes:  256 << 10,
 		BlobMaxBytes:        64 << 20,
 		GitHubWebhookSecret: env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
@@ -264,6 +279,13 @@ func Load() (Config, error) {
 	}
 	if c.BlobMaxBytes, err = envInt("SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes); err != nil {
 		return c, err
+	}
+	// MinIO и совместимые умеют только path-style, у AWS работает и он же.
+	if c.BlobS3.PathStyle, err = envBool("SDLC_BLOB_S3_PATH_STYLE", true); err != nil {
+		return c, err
+	}
+	if c.BlobS3.Bucket != "" && c.BlobS3.Endpoint == "" && c.BlobS3.Region != "" {
+		c.BlobS3.Endpoint = "https://s3." + c.BlobS3.Region + ".amazonaws.com"
 	}
 	if c.IndexPollInterval, err = envDuration("SDLC_INDEX_POLL_INTERVAL", c.IndexPollInterval); err != nil {
 		return c, err

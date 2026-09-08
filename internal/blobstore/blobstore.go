@@ -26,6 +26,20 @@ type Store interface {
 	Get(ctx context.Context, uri string) ([]byte, error)
 }
 
+// Open выбирает хранилище по настройкам: бакет важнее каталога, потому что
+// каталог задан в образе по умолчанию, а бакет — осознанное решение. Без того
+// и другого возвращается nil: содержимое лежит inline.
+func Open(s3 S3Config, dir string) (Store, error) {
+	switch {
+	case s3.Bucket != "":
+		return NewS3(s3)
+	case dir != "":
+		return NewFS(dir)
+	default:
+		return nil, nil
+	}
+}
+
 // FS — каталог на диске. Годится для одного инстанса и для тома в
 // контейнере; для нескольких реплик нужен общий том или объектное хранилище.
 type FS struct {
@@ -82,6 +96,9 @@ func (f *FS) Put(ctx context.Context, sha string, content []byte, _ string) (str
 	}
 	return fsScheme + sha, nil
 }
+
+// String — для журнала: видно, куда именно уходит содержимое.
+func (f *FS) String() string { return "file://" + f.Dir }
 
 func (f *FS) Get(_ context.Context, uri string) ([]byte, error) {
 	sha, ok := strings.CutPrefix(uri, fsScheme)

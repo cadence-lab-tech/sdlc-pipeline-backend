@@ -57,14 +57,14 @@ func run() error {
 	defer pool.Close()
 
 	store := postgres.New(pool)
-	if cfg.BlobDir != "" {
-		// Тот же каталог, что у api: документы и артефакты, вынесенные
-		// сервисом, воркер читает при векторизации.
-		fs, err := blobstore.NewFS(cfg.BlobDir)
-		if err != nil {
-			return err
-		}
-		store.UseBlobStore(fs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
+	// То же хранилище, что у api: документы и артефакты, вынесенные сервисом,
+	// воркер читает при векторизации.
+	blobs, err := blobstore.Open(cfg.BlobS3, cfg.BlobDir)
+	if err != nil {
+		return err
+	}
+	if blobs != nil {
+		store.UseBlobStore(blobs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
 	}
 	// Миграции катит api: два процесса, накатывающие схему, разошлись бы в
 	// порядке старта. Воркер работает по уже готовой схеме.

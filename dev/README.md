@@ -25,6 +25,7 @@ docker compose -f dev/docker-compose.yml up -d --build
 | MCP для агентов | http://localhost:8088/mcp/projects/SDLC |
 | Postgres | `localhost:55432`, база/пользователь/пароль — `sdlc` |
 | Adminer | http://localhost:8089 (только с `--profile tools`) |
+| MinIO | http://localhost:9001 (только с `--profile s3`) |
 
 Порты нестандартные намеренно: 8080 и 5432 на машине разработчика обычно уже
 заняты. Переопределяются через `dev/.env` — образец в `.env.example`.
@@ -221,6 +222,42 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 воркер забирает очередь раз в `SDLC_INDEX_POLL_INTERVAL`. Локально без
 публичного адреса индексация по-прежнему идёт по таймеру.
 
+## Объектное хранилище вместо тома
+
+Крупное содержимое по умолчанию уходит на том `blobs`, общий у api и воркера.
+Когда реплик api несколько и общего тома между ними нет, вместо каталога
+задаётся бакет — интерфейс `blobstore.Store` один, меняется реализация.
+
+Локально это проверяется профилем `s3`: он поднимает MinIO и заводит в нём
+бакет. Настройки — в `dev/.env` (образец в `.env.example`), они же задают
+пользователя MinIO:
+
+```bash
+cat >> dev/.env <<'EOF'
+SDLC_BLOB_S3_BUCKET=sdlc-blobs
+SDLC_BLOB_S3_ENDPOINT=http://minio:9000
+SDLC_BLOB_S3_REGION=us-east-1
+SDLC_BLOB_S3_ACCESS_KEY_ID=sdlc
+SDLC_BLOB_S3_SECRET_ACCESS_KEY=sdlcsdlc
+EOF
+
+docker compose -f dev/docker-compose.yml --profile s3 up -d --build
+```
+
+В логе api появится `внешнее хранилище содержимого store=s3://sdlc-blobs/`.
+Дальше документ больше 256 КБ ляжет в бакет, а в базе останется адрес:
+
+```bash
+curl -s localhost:8088/v1/projects/SDLC/documents -H 'X-SDLC-Actor: local-dev' \
+  -H 'Content-Type: application/json' -d @big-document.json
+docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
+  "SELECT storage, external_uri FROM blobs WHERE storage='external'"
+```
+
+Убрать бакет из `dev/.env` и пересобрать — вернётся том. Адреса `s3://`,
+записанные раньше, файловое хранилище читать откажется: это разные хранилища,
+и молчаливой подмены здесь быть не должно.
+
 ## Метрики цикла
 
 `GET /v1/projects/SDLC/metrics?period=30d` или `sdlc metrics`: длительность
@@ -252,6 +289,13 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 | `SDLC_BLOB_DIR` | пусто | каталог для вынесенного содержимого; пусто — всё inline |
 | `SDLC_BLOB_INLINE_MAX_BYTES` | `262144` | до этого размера содержимое лежит в базе |
 | `SDLC_BLOB_MAX_BYTES` | `67108864` | предел принимаемого содержимого |
+| `SDLC_BLOB_S3_BUCKET` | пусто | бакет объектного хранилища; заданный перекрывает `SDLC_BLOB_DIR` |
+| `SDLC_BLOB_S3_ENDPOINT` | по региону | адрес хранилища; для AWS достаточно региона |
+| `SDLC_BLOB_S3_REGION` | `AWS_REGION` | регион, он же участвует в подписи |
+| `SDLC_BLOB_S3_PREFIX` | пусто | префикс ключей внутри бакета |
+| `SDLC_BLOB_S3_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` | ключ доступа |
+| `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` | секрет доступа |
+| `SDLC_BLOB_S3_PATH_STYLE` | `true` | адресация `endpoint/bucket/key`; `false` — `bucket.endpoint` |
 | `SDLC_GITHUB_WEBHOOK_SECRET` | пусто | секрет подписи вебхуков; без него ручка выключена |
 | `SDLC_INDEX_POLL_INTERVAL` | `15s` | как часто воркер смотрит в очередь прогонов между опросами |
 | `SDLC_INDEX_RETAIN_RUNS` | `5` | сколько завершённых прогонов хранить на ветку |
