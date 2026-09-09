@@ -26,7 +26,7 @@
 | | что это |
 |---|---|
 | `deploy/docker-compose.yml` | стек целиком; лежит на сервере в `/opt/sdlc` |
-| `deploy/Caddyfile` | TLS и маршрутизация |
+| `deploy/Caddyfile` | TLS и маршрутизация; правки доезжают выкладкой — `deploy.sh` делает `caddy reload` |
 | `deploy/deploy.sh` | выкладка на сервере, она же откат: `backend <тег>` или `frontend <тег>` |
 | `deploy/backup.sh` | дамп базы с ротацией, cron 03:00 |
 | `deploy/.env.example` | шаблон `/opt/sdlc/.env`; собирает `devops/bin/bootstrap-env.sh` |
