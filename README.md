@@ -168,13 +168,15 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 
 ```bash
 brew trust cadence-lab-tech/tap && brew install cadence-lab-tech/tap/clab   # macOS и Linux с Homebrew
-curl -fsSL https://sdlc.example.com/install.sh | sh                          # без Homebrew: скрипт отдаёт сам сервис
+gh api repos/cadence-lab-tech/homebrew-tap/contents/install.sh \
+    -H "Accept: application/vnd.github.raw" | sh                             # без Homebrew
 gh release download --repo cadence-lab-tech/sdlc-pipeline-backend \
     --pattern 'clab_*_windows_amd64.zip'                                     # Windows и всё остальное
 ```
 
-Релизы собирает `.github/workflows/release.yml` по тегу `v*`; как устроена
-раздача и тап Homebrew — [release/README.md](release/README.md).
+Релизы собирает `.github/workflows/release.yml` по тегу `v*` и сообщает о
+них тапу [homebrew-tap](https://github.com/cadence-lab-tech/homebrew-tap),
+где живут формула, стратегия скачивания из приватного релиза и `install.sh`.
 
 ## Структура
 

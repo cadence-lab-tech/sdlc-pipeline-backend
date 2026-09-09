@@ -17,8 +17,7 @@
 ```
 
 Наружу торчит только Caddy. Один домен на всё: интерфейс ходит в `/v1` того
-же origin, агенты — в `/mcp/projects/<KEY>`, GitHub — в `/webhooks/github`, коллеги
-берут скрипт установки CLI с `/install.sh` (см. [release/README.md](../release/README.md)).
+же origin, агенты — в `/mcp/projects/<KEY>`, GitHub — в `/webhooks/github`.
 Второго списка адресов нет — нет и CORS.
 
 ## Файлы
