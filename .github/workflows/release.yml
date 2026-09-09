@@ -104,4 +104,6 @@ jobs:
 
       - name: без токена тапа
         if: env.HAS_TAP_TOKEN != 'true'
-        run: echo "секрета TAP_DISPATCH_TOKEN нет — формула в homebrew-tap не обновится; руками: gh workflow run update.yml --repo cadence-lab-tech/homebrew-tap"
+        run: |
+          echo "секрета TAP_DISPATCH_TOKEN нет — формула в homebrew-tap не обновится;"
+          echo "руками: gh workflow run update.yml --repo cadence-lab-tech/homebrew-tap"
