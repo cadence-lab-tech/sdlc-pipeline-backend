@@ -68,10 +68,20 @@ Terraform, пароль базы, токен администратора и с�
 
 - `SDLC_GITHUB_APP_CLIENT_ID` / `_SECRET` — вход коллег через GitHub;
   callback в настройках приложения — `https://<домен>/login/github`;
-- `SDLC_GITHUB_APP_ID` и ключ в `/opt/sdlc/secrets/github-app.pem` (права
-  600, `SDLC_GITHUB_APP_KEY_FILE=/secrets/github-app.pem`) — чтение
+- `SDLC_GITHUB_APP_ID` и ключ в `/opt/sdlc/secrets/github-app.pem`
+  (`SDLC_GITHUB_APP_KEY_FILE=/secrets/github-app.pem`) — чтение
   репозиториев установкой приложения; вебхук — `https://<домен>/webhooks/github`
-  с `SDLC_GITHUB_WEBHOOK_SECRET` из `.env`;
+  с `SDLC_GITHUB_WEBHOOK_SECRET` из `.env`. Ключ читает контейнер от
+  пользователя `nonroot` (uid 65532), поэтому после `scp` его надо отдать
+  этому uid — shell в образе нет, делается одноразовым контейнером:
+
+  ```bash
+  docker run --rm -v /opt/sdlc/secrets:/s alpine:3 \
+    sh -c 'chown 65532:65532 /s/github-app.pem && chmod 400 /s/github-app.pem && chmod 711 /s'
+  ```
+
+  Каталог остаётся за `deploy`: заменить ключ можно тем же `scp` и повтором
+  команды;
 - `SDLC_VOYAGE_API_KEY` — семантический поиск; без него полнотекстовый.
 
 После правки `.env` — `docker compose up -d`: compose перечитает окружение
