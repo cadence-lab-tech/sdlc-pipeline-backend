@@ -43,7 +43,7 @@ func TestImportBundleIsIdempotentAndVersioned(t *testing.T) {
 		Repositories: []BundleRepository{
 			{Repository: "https://github.com/acme/api.git", RoleHint: "backend"},
 			// Уже есть в сиде — обязан стать updated, а не дублем.
-			{Repository: "stepaKaziatko/sdlc-pipeline-backend", RoleHint: "backend"},
+			{Repository: "cadence-lab-tech/sdlc-pipeline-backend", RoleHint: "backend"},
 		},
 		Roles: []BundleRole{
 			{Key: "writer", Name: "Техписатель", Instructions: "Пиши документацию.",
@@ -73,7 +73,7 @@ func TestImportBundleIsIdempotentAndVersioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("импорт: %v", err)
 	}
-	want := map[string]string{"acme/api": "created", "stepaKaziatko/sdlc-pipeline-backend": "updated"}
+	want := map[string]string{"acme/api": "created", "cadence-lab-tech/sdlc-pipeline-backend": "updated"}
 	for _, r := range first.Repositories {
 		if want[r.Key] != r.Outcome {
 			t.Errorf("репозиторий %s: %s, ожидали %s", r.Key, r.Outcome, want[r.Key])
@@ -273,7 +273,7 @@ func TestGitHubWebhooks(t *testing.T) {
 	store, engine, _, _, system := setupPhase4(t, AuthHeader)
 
 	push := []byte(`{"ref":"refs/heads/main","after":"abc123abc123abc123abc123abc123abc123abc1",
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"stepaKaziatko"}}}`)
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}}}`)
 	out, err := engine.HandleGitHubEvent(ctx, "push", "d-1", push)
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestGitHubWebhooks(t *testing.T) {
 	}
 	// Ветка не под наблюдением — игнорируется.
 	feature := []byte(`{"ref":"refs/heads/feature","after":"def456def456def456def456def456def456def4",
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"stepaKaziatko"}}}`)
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}}}`)
 	if out, err := engine.HandleGitHubEvent(ctx, "push", "d-3", feature); err != nil || out.Queued != 0 {
 		t.Fatalf("ветка вне наблюдения: %v %+v", err, out)
 	}
@@ -312,7 +312,7 @@ func TestGitHubWebhooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr := []byte(`{"action":"synchronize","number":128,
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"stepaKaziatko"}},
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}},
 		"pull_request":{"state":"open","merged":false,"html_url":"https://github.com/x/pull/128","head":{"sha":"newhead"}}}`)
 	out, err = engine.HandleGitHubEvent(ctx, "pull_request", "d-4", pr)
 	if err != nil || out.Touched != 1 {
@@ -324,7 +324,7 @@ func TestGitHubWebhooks(t *testing.T) {
 	}
 
 	checks := []byte(`{"check_run":{"head_sha":"newhead"},
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"stepaKaziatko"}}}`)
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}}}`)
 	if err := store.UpdateRepoRefChecks(ctx, store.DB(), refID(t, store, "SDLC-1"), "open", "newhead", "", nil); err != nil {
 		t.Fatal(err)
 	}

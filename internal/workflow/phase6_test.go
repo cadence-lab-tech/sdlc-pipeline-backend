@@ -532,7 +532,7 @@ func TestWebhookRoutesByInstallation(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(`{
 			"ref": "refs/heads/main", "after": "%s", "deleted": false,
-			"repository": {"name": "sdlc-pipeline-backend", "owner": {"login": "stepaKaziatko"}},
+			"repository": {"name": "sdlc-pipeline-backend", "owner": {"login": "cadence-lab-tech"}},
 			"installation": {"id": %d}
 		}`, strings.Repeat("a", 40), installationID)
 		out, err := engine.HandleGitHubEvent(ctx, "push", delivery, []byte(body))
