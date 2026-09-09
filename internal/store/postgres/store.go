@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 // Querier покрывает и пул, и транзакцию.

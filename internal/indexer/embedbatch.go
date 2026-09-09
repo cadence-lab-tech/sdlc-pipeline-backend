@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // embedBatch копит куски нескольких файлов и считает их одним вызовом модели.

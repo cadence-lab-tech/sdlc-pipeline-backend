@@ -23,12 +23,12 @@ BEGIN
     RETURNING id INTO proj;
 
     INSERT INTO repositories (project_id, owner, name, clone_url, role_hint) VALUES
-        (proj, 'stepaKaziatko', 'sdlc-pipeline-backend',
-         'https://github.com/stepaKaziatko/sdlc-pipeline-backend.git', 'backend'),
-        (proj, 'stepaKaziatko', 'sdlc-pipeline-frontend',
-         'https://github.com/stepaKaziatko/sdlc-pipeline-frontend.git', 'frontend'),
-        (proj, 'stepaKaziatko', 'sdlc-pipeline-docs',
-         'https://github.com/stepaKaziatko/sdlc-pipeline-docs.git', 'docs');
+        (proj, 'cadence-lab-tech', 'sdlc-pipeline-backend',
+         'https://github.com/cadence-lab-tech/sdlc-pipeline-backend.git', 'backend'),
+        (proj, 'cadence-lab-tech', 'sdlc-pipeline-frontend',
+         'https://github.com/cadence-lab-tech/sdlc-pipeline-frontend.git', 'frontend'),
+        (proj, 'cadence-lab-tech', 'sdlc-pipeline-docs',
+         'https://github.com/cadence-lab-tech/sdlc-pipeline-docs.git', 'docs');
 
     SELECT id INTO repo_be FROM repositories WHERE project_id = proj AND name = 'sdlc-pipeline-backend';
     SELECT id INTO repo_fe FROM repositories WHERE project_id = proj AND name = 'sdlc-pipeline-frontend';

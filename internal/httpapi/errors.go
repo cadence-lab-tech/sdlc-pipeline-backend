@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 )
 
 // errorBody — единая форма ошибки для UI и (в фазе 2) для MCP.

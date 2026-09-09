@@ -15,7 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/migrations"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/migrations"
 )
 
 // Реплики сервиса стартуют одновременно, миграции должен катить кто-то один.

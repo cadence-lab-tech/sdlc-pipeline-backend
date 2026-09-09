@@ -92,7 +92,7 @@ curl -s localhost:8088/v1/projects/SDLC/index | jq '.repositories[]
 
 ```bash
 curl -s 'localhost:8088/v1/projects/SDLC/search?q=как+устроена+аренда&top_k=5' | jq
-./bin/clab search "как устроена аренда" --scope code --repo stepaKaziatko/sdlc-pipeline-backend
+./bin/clab search "как устроена аренда" --scope code --repo cadence-lab-tech/sdlc-pipeline-backend
 ```
 
 Ищет по коду из актуального индекса, по артефактам задач и по проектным
@@ -162,7 +162,7 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 
 ## Аутентификация и права
 
-Режим `SDLC_AUTH_MODE=token` ([решение 0021](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0021-token-auth-and-project-members.md)):
+Режим `SDLC_AUTH_MODE=token` ([решение 0021](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0021-token-auth-and-project-members.md)):
 запрос без `Authorization: Bearer <token>` отбивается, права проверяются по
 участию в проекте (`viewer`, `agent`, `maintainer`, `admin`). Первый
 администратор заводится из окружения — в пустой базе некому выдать первый
@@ -180,7 +180,7 @@ export SDLC_TOKEN=sdlc_замените_на_длинный_секрет SDLC_PR
 ```
 
 Какие роли специалистов участник может забирать, задаёт администратор проекта
-на участии ([решение 0030](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0030-member-roles-github-login-open-projects.md)):
+на участии ([решение 0030](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0030-member-roles-github-login-open-projects.md)):
 `clab members set user:alice agent --roles developer,reviewer`; без `--roles` —
 любые. Команде роли выдаются так же: `clab team grant platform --project SDLC
 --level agent --roles reviewer`. Токен может только сузить эти рамки: `--roles`
@@ -215,7 +215,7 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 ## Перенос правил в проект
 
 Существующие правила команды — CLAUDE.md, AGENTS.md, ADR, описания ролей —
-переносятся в проект связкой ([решение 0022](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0022-bundle-import-export.md)).
+переносятся в проект связкой ([решение 0022](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0022-bundle-import-export.md)).
 Агенту достаточно промпта `/mcp__sdlc__import_rules` или тула
 `sdlc_import_guide`; из CLI:
 
@@ -236,7 +236,7 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 ## Вебхуки GitHub
 
 С секретом `SDLC_GITHUB_WEBHOOK_SECRET` сервис принимает события на
-`POST /webhooks/github` ([решение 0023](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0023-github-webhooks-write-to-queue.md)):
+`POST /webhooks/github` ([решение 0023](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0023-github-webhooks-write-to-queue.md)):
 `push` ставит коммит в очередь индексации, `pull_request` и `check_run`
 помечают привязанные PR к пересинхронизации. В сеть обработчик не ходит —
 воркер забирает очередь раз в `SDLC_INDEX_POLL_INTERVAL`. Локально без

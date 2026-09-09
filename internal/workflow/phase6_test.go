@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/testdb"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/testdb"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // Многокомандность (решение 0027) по настоящей схеме: права приходят в проект

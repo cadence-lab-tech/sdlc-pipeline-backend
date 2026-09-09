@@ -14,15 +14,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/httpapi"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/oidc"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/httpapi"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/mcp"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 func main() {

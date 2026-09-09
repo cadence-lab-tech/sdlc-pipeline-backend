@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 func TestNewTokenShape(t *testing.T) {

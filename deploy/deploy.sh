@@ -17,7 +17,7 @@ cd "$(dirname "$0")"
 
 image="${1:?укажите образ: backend | frontend}"
 tag="${2:?укажите тег образа (обычно короткий SHA коммита)}"
-registry="${REGISTRY:-ghcr.io/stepakaziatko}"
+registry="${REGISTRY:-ghcr.io/cadence-lab-tech}"
 
 case "$image" in
   backend)  key=IMAGE_BACKEND;  services="api worker" ;;

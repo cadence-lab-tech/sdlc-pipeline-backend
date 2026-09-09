@@ -3,7 +3,7 @@ package indexer
 import (
 	"context"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 )
 
 // gitHubSource — единственная сегодня реализация Source.

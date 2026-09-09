@@ -5,7 +5,7 @@ Go-сервис Cadence Lab (Clab): REST для UI, MCP-сервер для ло
 
 ## Прежде чем писать код
 
-Домен описан не здесь, а в [sdlc-pipeline-docs](https://github.com/stepaKaziatko/sdlc-pipeline-docs).
+Домен описан не здесь, а в [sdlc-pipeline-docs](https://github.com/cadence-lab-tech/sdlc-pipeline-docs).
 Локально — соседняя директория `../docs/`:
 
 - `../docs/ARCHITECTURE.md` — модель домена, гейты, дрейф, план по фазам

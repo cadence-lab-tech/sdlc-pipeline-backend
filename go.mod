@@ -1,4 +1,4 @@
-module github.com/stepaKaziatko/sdlc-pipeline-backend
+module github.com/cadence-lab-tech/sdlc-pipeline-backend
 
 go 1.25.0
 
