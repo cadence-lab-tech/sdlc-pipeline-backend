@@ -162,13 +162,19 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 ./bin/clab index
 ```
 
-Готовые бинарники под darwin, linux и windows лежат в релизах репозитория
-(`.github/workflows/release.yml`, тег `v*`):
+Поставить `clab` на свою машину можно тремя способами. Репозиторий
+приватный, поэтому всем трём нужен доступ к GitHub от участника организации
+(`gh auth login`):
 
 ```bash
+brew trust cadence-lab-tech/tap && brew install cadence-lab-tech/tap/clab   # macOS и Linux с Homebrew
+curl -fsSL https://sdlc.example.com/install.sh | sh                          # без Homebrew: скрипт отдаёт сам сервис
 gh release download --repo cadence-lab-tech/sdlc-pipeline-backend \
-    --pattern 'clab_*_darwin_arm64.tar.gz' && tar -xzf clab_*_darwin_arm64.tar.gz
+    --pattern 'clab_*_windows_amd64.zip'                                     # Windows и всё остальное
 ```
+
+Релизы собирает `.github/workflows/release.yml` по тегу `v*`; как устроена
+раздача и тап Homebrew — [release/README.md](release/README.md).
 
 ## Структура
 

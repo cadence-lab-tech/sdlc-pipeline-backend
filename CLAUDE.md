@@ -67,6 +67,7 @@ migrations/         схема и сиды; embed.go встраивает их �
 dev/                docker-compose для локального запуска, e2e.sh
 deploy/             продовый стек: compose за Caddy, deploy.sh, дампы
 devops/             инфраструктура Timeweb: Terraform, cloud-init, скрипты
+release/            раздача CLI: формула Homebrew и стратегия для приватного релиза
                     разбора аварий с границей «читать / менять»
 docs/               референсы реализации (не описания решений)
 ```
@@ -412,7 +413,10 @@ MCP и CLI, вебхуки GitHub, вынос крупного содержим�
 `clab auth login` — device flow поверх интерфейса (`cli_login_requests`,
 `POST /v1/auth/cli`, страница `/login/cli`), конфиг `~/.config/clab` по
 хостам, проект по `origin` через `GET /v1/projects?repo=`, `clab mcp
-install`, таблицы для команд чтения и `--json`, релизы `release.yml`.
+install`, таблицы для команд чтения и `--json`, релизы `release.yml`;
+раздача — тап `cadence-lab-tech/homebrew-tap` (формулу и стратегию пишет
+workflow из `release/brew/`) и скрипт `internal/httpapi/install.sh`, который
+сервис отдаёт по `GET /install.sh` с подстановкой своего адреса.
 
 Сквозной проход задачи по всему циклу проверяется `dev/e2e.sh` — включая
 возврат результата ревьюером и повторную перепроверку после доработки. Проход

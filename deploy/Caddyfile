@@ -11,8 +11,8 @@
 
 	# То, что обслуживает сервис. Список префиксов — это роутер httpapi:
 	# /v1 — REST, /mcp — агенты, /webhooks — GitHub, /healthz и /readyz —
-	# пробы. Всё остальное — интерфейс.
-	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz
+	# пробы, /install.sh — скрипт установки CLI. Всё остальное — интерфейс.
+	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz /install.sh
 	handle @backend {
 		# MCP отвечает потоком (SSE): буферизация ответа сломала бы его.
 		reverse_proxy api:8080 {
