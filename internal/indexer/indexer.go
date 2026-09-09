@@ -20,9 +20,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // Repo — координаты репозитория у провайдера.

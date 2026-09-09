@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // EnvURL — адрес базы для тестов. Выделенной: Store сносит схему целиком.

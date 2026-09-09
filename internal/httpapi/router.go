@@ -14,11 +14,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/mcp"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/mcp"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 type Server struct {

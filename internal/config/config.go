@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
 )
 
 type Config struct {

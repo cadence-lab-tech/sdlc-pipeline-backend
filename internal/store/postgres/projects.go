@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 // Ключ команды-владельца берётся подзапросом, а не джойном: projectCols

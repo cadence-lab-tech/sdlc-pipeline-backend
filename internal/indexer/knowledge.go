@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // IndexKnowledge раскладывает на куски то, что накопила сама система:

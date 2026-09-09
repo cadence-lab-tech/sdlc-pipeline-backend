@@ -3,7 +3,7 @@
 Одна машина в Timeweb, один домен, четыре контейнера за Caddy. Что и куда
 разворачивается — здесь; чем машина создаётся и как чинится —
 [devops/README.md](../devops/README.md). Почему именно так —
-[решение 0031](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0031-deploy-timeweb-single-vps.md).
+[решение 0031](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0031-deploy-timeweb-single-vps.md).
 
 ## Что где крутится
 
@@ -101,11 +101,11 @@ Terraform, пароль базы, токен администратора и с�
 
 ```bash
 for repo in sdlc-pipeline-backend sdlc-pipeline-frontend; do
-  gh secret set SSH_KEY -R stepaKaziatko/$repo < ~/.ssh/sdlc-deploy
-  gh secret set SSH_HOST -R stepaKaziatko/$repo --body "$(./devops/bin/tf.sh output -raw server_ip)"
-  gh secret set SSH_USER -R stepaKaziatko/$repo --body deploy
-  ssh-keyscan "$(./devops/bin/tf.sh output -raw server_ip)" 2>/dev/null | gh secret set SSH_KNOWN_HOSTS -R stepaKaziatko/$repo
-  gh variable set SDLC_DOMAIN -R stepaKaziatko/$repo --body "$(./devops/bin/tf.sh output -raw domain)"
+  gh secret set SSH_KEY -R cadence-lab-tech/$repo < ~/.ssh/sdlc-deploy
+  gh secret set SSH_HOST -R cadence-lab-tech/$repo --body "$(./devops/bin/tf.sh output -raw server_ip)"
+  gh secret set SSH_USER -R cadence-lab-tech/$repo --body deploy
+  ssh-keyscan "$(./devops/bin/tf.sh output -raw server_ip)" 2>/dev/null | gh secret set SSH_KNOWN_HOSTS -R cadence-lab-tech/$repo
+  gh variable set SDLC_DOMAIN -R cadence-lab-tech/$repo --body "$(./devops/bin/tf.sh output -raw domain)"
 done
 ```
 
@@ -123,8 +123,8 @@ personal access token не нужен — пока выкладка идёт ч�
 образ её закроет.
 
 ```bash
-gh run watch -R stepaKaziatko/sdlc-pipeline-backend
-gh run watch -R stepaKaziatko/sdlc-pipeline-frontend
+gh run watch -R cadence-lab-tech/sdlc-pipeline-backend
+gh run watch -R cadence-lab-tech/sdlc-pipeline-frontend
 curl https://<домен>/readyz          # {"status":"ok","database":"ok"}
 ```
 
@@ -143,7 +143,7 @@ claude mcp add --transport http sdlc https://<домен>/mcp/projects/<KEY> \
 
 ```bash
 ./devops/bin/remote-read.sh version       # что выложено и что было до
-gh workflow run deploy.yml -R stepaKaziatko/sdlc-pipeline-backend -f tag=<sha>
+gh workflow run deploy.yml -R cadence-lab-tech/sdlc-pipeline-backend -f tag=<sha>
 ```
 
 Или руками на машине: `./deploy.sh backend $(cat .last-ok-backend)`. Миграции

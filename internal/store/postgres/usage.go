@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 // Стоимость работы агента (решение 0026). Считается на прогоне этапа: прогон

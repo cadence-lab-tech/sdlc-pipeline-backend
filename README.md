@@ -5,16 +5,16 @@ MCP-сервер для локальных агентов, воркеры инд
 дрейфа.
 
 Документация по домену вынесена в отдельный репозиторий
-[sdlc-pipeline-docs](https://github.com/stepaKaziatko/sdlc-pipeline-docs):
+[sdlc-pipeline-docs](https://github.com/cadence-lab-tech/sdlc-pipeline-docs):
 
-- [Архитектура](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/ARCHITECTURE.md) — модель домена, гейты, дрейф, схема БД, план по фазам
-- [Контракт агента](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md) — MCP-тулы для локального агента
-- [Принятые решения](https://github.com/stepaKaziatko/sdlc-pipeline-docs/tree/main/decisions) — почему устроено именно так
+- [Архитектура](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/ARCHITECTURE.md) — модель домена, гейты, дрейф, схема БД, план по фазам
+- [Контракт агента](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md) — MCP-тулы для локального агента
+- [Принятые решения](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/tree/main/decisions) — почему устроено именно так
 
 Здесь остаются референсы реализации: [drift_detection.sql](docs/drift_detection.sql) —
 запросы детектора дрейфа, которые исполняет воркер.
 
-Фронтенд: [sdlc-pipeline-frontend](https://github.com/stepaKaziatko/sdlc-pipeline-frontend).
+Фронтенд: [sdlc-pipeline-frontend](https://github.com/cadence-lab-tech/sdlc-pipeline-frontend).
 
 ## Стек
 
@@ -68,7 +68,7 @@ make reset up && dev/e2e.sh
 
 ## API
 
-Аутентификации нет ([решение 0010](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0010-auth-deferred.md)):
+Аутентификации нет ([решение 0010](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0010-auth-deferred.md)):
 действующее лицо приезжает заголовком `X-SDLC-Actor` и заводится в `principals`
 при первом обращении.
 
@@ -113,7 +113,7 @@ make reset up && dev/e2e.sh
 именно не сдано и что с этим делать.
 
 Роли и цикл правятся версиями, а не на месте: версия роли иммутабельна, а
-редактируется только черновик цикла ([решение 0016](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0016-workflow-versions-immutable.md)).
+редактируется только черновик цикла ([решение 0016](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0016-workflow-versions-immutable.md)).
 Попытка изменить активный цикл — `409`.
 
 ## Агенты
@@ -126,7 +126,7 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 
 Инструкция роли, результаты предыдущих этапов, область репозиториев и требования
 гейтов приезжают в ответе на `sdlc_claim_task` — синхронизировать в локальный
-репозиторий нечего. Полный контракт — в [MCP_CONTRACT.md](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md).
+репозиторий нечего. Полный контракт — в [MCP_CONTRACT.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md).
 
 Задача выдаётся под аренду с heartbeat: агент локальный и может умереть, не
 отпустив её. Протухшие аренды возвращает в общий доступ `cmd/worker`.

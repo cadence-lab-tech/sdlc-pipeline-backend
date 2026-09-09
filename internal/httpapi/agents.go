@@ -9,9 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 // Ручки агентской части. Те же сервисы, что и у MCP-тулов: CLI и CI ходят

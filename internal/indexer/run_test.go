@@ -9,10 +9,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/testdb"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/testdb"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 // Интеграционные проверки прогона индексации: инкрементальность — это

@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 // Поиск по знанию проекта и состояние индекса. Те же сервисы, что у MCP-тула

@@ -125,7 +125,7 @@ for kind in dev.plan dev.change_summary dev.test_report; do
 done
 as agent:dev-bot link "$TASK" --repo frontend --ref 5 2>&1 | head -1 || true
 as agent:dev-bot link "$TASK" --repo backend --ref 128 \
-    --url https://github.com/stepaKaziatko/sdlc-pipeline-backend/pull/128 --state open >/dev/null
+    --url https://github.com/cadence-lab-tech/sdlc-pipeline-backend/pull/128 --state open >/dev/null
 # Гейт external_check читает состояние проверок, которое приносит воркер из
 # GitHub. Локально репозитория с этим PR нет, проверки не приезжают, и гейт
 # честно стоит в pending — это не поломка сценария, а его отдельный шаг:

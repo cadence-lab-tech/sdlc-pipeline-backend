@@ -15,10 +15,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/apperr"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
 // UseGitHub подключает вход через GitHub. Срок сессии общий с провайдером

@@ -18,14 +18,14 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/blobstore"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/config"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/domain"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/embed"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/github"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/indexer"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/store/postgres"
-	"github.com/stepaKaziatko/sdlc-pipeline-backend/internal/workflow"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/indexer"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 // systemActor — принципал, от имени которого воркер пишет в ленту задачи.
