@@ -1,12 +1,20 @@
-// Команда clab — CLI для CI и не-MCP клиентов.
+// Команда clab — CLI для людей, CI и не-MCP клиентов.
 //
 // Те же операции, что и у MCP-тулов, только транспорт другой: локальный агент
-// ходит по MCP, скрипт сборки — сюда. Логики цикла здесь нет и быть не должно.
+// ходит по MCP, человек и скрипт сборки — сюда. Логики цикла здесь нет и быть
+// не должно.
 //
-//	SDLC_API_URL   адрес API           (по умолчанию http://localhost:8088/v1)
-//	SDLC_TOKEN     токен доступа        (режим токенов; без него — заголовок актора)
+// Куда ходить и кем, clab узнаёт из конфига ~/.config/clab/config.json,
+// который заполняет «clab auth login» (решение 0032). Окружение перекрывает
+// конфиг — так clab работает в CI:
+//
+//	SDLC_API_URL   адрес API           (иначе хост из конфига; без него http://localhost:8088/v1)
+//	SDLC_TOKEN     токен доступа        (иначе токен хоста из конфига; без него — заголовок актора)
 //	SDLC_ACTOR     кто действует        (режим заголовка; по умолчанию agent:$USER)
-//	SDLC_PROJECT   проект по умолчанию для команд, которым нужен проект
+//	SDLC_PROJECT   проект по умолчанию  (иначе проект по git remote текущего каталога)
+//
+// Общие флаги: --host <адрес> выбирает хост из конфига, --json печатает ответ
+// сервера как есть вместо таблицы.
 package main
 
 import (
@@ -33,6 +41,8 @@ type command struct {
 
 func commands() []command {
 	return []command{
+		{"auth", "вход через браузер, состояние, выход", "clab auth login [--host https://sdlc.example.com] [--days 365] [--no-browser] | clab auth status | clab auth logout | clab auth token", cmdAuth},
+		{"mcp", "подключить локального агента к MCP проекта", "clab mcp install [--project SDLC] [--name sdlc] [--scope local|user] | clab mcp config | clab mcp url", cmdMCP},
 		{"whoami", "кто я и к какому проекту подключён", "clab whoami", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
@@ -69,6 +79,7 @@ func commands() []command {
 		{"role", "показать роль или завести версию инструкции", "clab role show analyst | clab role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
 		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
+		{"version", "версия clab", "clab version", cmdVersion},
 	}
 }
 
@@ -76,17 +87,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help" {
+	g, args := splitGlobals(os.Args[1:])
+	jsonOut = g.json
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		usage()
 		return
 	}
+	if args[0] == "--version" {
+		args[0] = "version"
+	}
 
-	name := os.Args[1]
+	name := args[0]
 	for _, cmd := range commands() {
 		if cmd.name != name {
 			continue
 		}
-		if err := cmd.run(ctx, NewClient(), os.Args[2:]); err != nil {
+		c, err := NewClient(g)
+		if err != nil {
+			exit(err)
+		}
+		if err := cmd.run(ctx, c, args[1:]); err != nil {
 			exit(err)
 		}
 		return
@@ -103,8 +123,20 @@ func usage() {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", cmd.name, cmd.summary)
 	}
 	fmt.Fprintln(os.Stderr, "\nclab <команда> --help — аргументы команды")
-	fmt.Fprintln(os.Stderr, "\nАдрес API — SDLC_API_URL, токен — SDLC_TOKEN (без него действующее")
-	fmt.Fprintln(os.Stderr, "лицо берётся из SDLC_ACTOR), проект по умолчанию — SDLC_PROJECT.")
+	fmt.Fprintln(os.Stderr, "\nОбщие флаги: --host <адрес> — хост из конфига, --json — ответ сервера как есть.")
+	fmt.Fprintln(os.Stderr, "Начало работы: clab auth login --host https://sdlc.example.com; конфиг — ~/.config/clab.")
+	fmt.Fprintln(os.Stderr, "Окружение перекрывает конфиг: SDLC_API_URL, SDLC_TOKEN (без него действующее")
+	fmt.Fprintln(os.Stderr, "лицо берётся из SDLC_ACTOR), SDLC_PROJECT — иначе проект по git remote.")
+}
+
+// version подставляется при сборке: -ldflags "-X main.version=…".
+var version = "dev"
+
+func cmdVersion(_ context.Context, _ *Client, _ []string) error {
+	return emit(map[string]any{"version": version}, func() error {
+		fmt.Println("clab", version)
+		return nil
+	})
 }
 
 // exit печатает ошибку домена так, чтобы её можно было разобрать скриптом:
@@ -120,19 +152,13 @@ func exit(err error) {
 				fmt.Fprintln(os.Stderr, string(body))
 			}
 		}
+		if apiErr.Code == "unauthenticated" {
+			fmt.Fprintln(os.Stderr, "Войти: clab auth login --host <адрес>; входы — clab auth status.")
+		}
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
-}
-
-func print(v any) error {
-	body, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(body))
-	return nil
 }
 
 // popTask отделяет ключ задачи от флагов.
@@ -166,16 +192,6 @@ func flags(cmd string, args []string, setup func(*flag.FlagSet)) (*flag.FlagSet,
 	return fs, nil
 }
 
-func project(fs *flag.FlagSet, explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	if key := os.Getenv("SDLC_PROJECT"); key != "" {
-		return key, nil
-	}
-	return "", fmt.Errorf("не указан проект: --project или SDLC_PROJECT")
-}
-
 func requireTask(fs *flag.FlagSet, task string) error {
 	if task == "" {
 		fs.Usage()
@@ -188,27 +204,51 @@ func requireTask(fs *flag.FlagSet, task string) error {
 
 func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	var projectFlag string
-	fs, err := flags("whoami", args, func(fs *flag.FlagSet) {
+	_, err := flags("whoami", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 	})
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
 
-	var out any
-	if err := c.get(ctx, "/projects/"+key, nil, &out); err != nil {
+	var view struct {
+		Project struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+		} `json:"project"`
+	}
+	if err := c.get(ctx, "/projects/"+key, nil, &view); err != nil {
 		return err
 	}
-	return print(map[string]any{"actor": c.actor, "api": c.base, "project": out})
+	project := view.Project
+	var me struct {
+		Principal struct {
+			Kind   string `json:"kind"`
+			Handle string `json:"handle"`
+		} `json:"principal"`
+		Authenticated bool `json:"authenticated"`
+	}
+	if err := c.get(ctx, "/auth/me", nil, &me); err != nil {
+		return err
+	}
+	who := me.Principal.Kind + ":" + me.Principal.Handle
+	return emit(map[string]any{"principal": who, "authenticated": me.Authenticated, "api": c.base, "project": project}, func() error {
+		how := "по токену"
+		if !me.Authenticated {
+			how = "по заголовку"
+		}
+		kv("Кто:", who+" ("+how+")", "API:", c.base, "Проект:", project.Key+" — "+project.Name)
+		return nil
+	})
 }
 
 func cmdQueue(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, role, status string
-	fs, err := flags("queue", args, func(fs *flag.FlagSet) {
+	_, err := flags("queue", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&role, "role", "", "оставить работу только для этой роли")
 		fs.StringVar(&status, "status", "", "оставить только этот статус")
@@ -216,7 +256,7 @@ func cmdQueue(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -229,16 +269,16 @@ func cmdQueue(ctx context.Context, c *Client, args []string) error {
 		q.Set("status", status)
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/projects/"+key+"/queue", q, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderQueue, out))
 }
 
 func cmdTasks(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, status, taskType, parent string
-	fs, err := flags("tasks", args, func(fs *flag.FlagSet) {
+	_, err := flags("tasks", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&status, "status", "", "фильтр по статусу")
 		fs.StringVar(&taskType, "type", "", "фильтр по типу задачи, например epic")
@@ -247,7 +287,7 @@ func cmdTasks(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -263,11 +303,11 @@ func cmdTasks(ctx context.Context, c *Client, args []string) error {
 		q.Set("parent", parent)
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/projects/"+key+"/tasks", q, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderTasks, out))
 }
 
 func cmdShow(ctx context.Context, c *Client, args []string) error {
@@ -280,11 +320,11 @@ func cmdShow(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/tasks/"+task+"/state", nil, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderState, out))
 }
 
 func cmdClaim(ctx context.Context, c *Client, args []string) error {
@@ -304,12 +344,12 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 		session = host + "/clab-cli"
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+task+"/claim",
 		map[string]any{"session_ref": session}, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderState, out))
 }
 
 func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {
@@ -381,13 +421,13 @@ func cmdSubmit(ctx context.Context, c *Client, args []string) error {
 		format = guessFormat(file)
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+task+"/artifacts", map[string]any{
 		"kind": kind, "title": title, "format": format, "content": string(body),
 	}, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderArtifact, out))
 }
 
 func cmdLink(ctx context.Context, c *Client, args []string) error {
@@ -466,22 +506,28 @@ func cmdGates(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 
-	var out struct {
-		Transitions []struct {
-			Key     string `json:"key"`
-			Allowed bool   `json:"allowed"`
-			Gates   []any  `json:"gates"`
-		} `json:"transitions"`
+	var raw json.RawMessage
+	if err := c.get(ctx, "/tasks/"+task+"/transitions", nil, &raw); err != nil {
+		return err
 	}
-	if err := c.get(ctx, "/tasks/"+task+"/transitions", nil, &out); err != nil {
+	var out struct {
+		Transitions []json.RawMessage `json:"transitions"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	var items []transitionPreview
+	if err := decode(raw, &struct {
+		Transitions *[]transitionPreview `json:"transitions"`
+	}{&items}); err != nil {
 		return err
 	}
 	if transition == "" {
-		return print(out.Transitions)
+		return emit(out.Transitions, func() error { return renderTransitions(items) })
 	}
-	for _, t := range out.Transitions {
+	for i, t := range items {
 		if t.Key == transition {
-			return print(t)
+			return emit(out.Transitions[i], func() error { return renderTransitions(items[i : i+1]) })
 		}
 	}
 	return fmt.Errorf("перехода %q нет из текущего статуса", transition)
@@ -531,12 +577,12 @@ func cmdTransition(ctx context.Context, c *Client, args []string) error {
 		comment = reason
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+task+"/transitions/"+to,
 		map[string]any{"comment": comment}, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderTransitionResult, out))
 }
 
 // cmdDecide закрывает гейт решением. Нужен CI: чек-лист и внешнюю проверку
@@ -596,11 +642,11 @@ func cmdDrift(ctx context.Context, c *Client, args []string) error {
 		q.Set("state", state)
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/tasks/"+task+"/drift", q, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderDrift, out))
 }
 
 func cmdResolveDrift(ctx context.Context, c *Client, args []string) error {
@@ -675,7 +721,7 @@ func cmdSearch(ctx context.Context, c *Client, args []string) error {
 	// Запрос читается первым позиционным аргументом по той же причине, что и
 	// ключ задачи: именно так эту команду пишут.
 	query, rest := popTask(args)
-	fs, err := flags("search", rest, func(fs *flag.FlagSet) {
+	_, err := flags("search", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&scope, "scope", "", "code, artifacts, documents через запятую")
 		fs.StringVar(&repos, "repo", "", "owner/name через запятую: сузить поиск по коду")
@@ -687,7 +733,7 @@ func cmdSearch(ctx context.Context, c *Client, args []string) error {
 	if query == "" {
 		return errors.New("не указан запрос: clab search \"как устроена ротация токенов\"")
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -704,29 +750,29 @@ func cmdSearch(ctx context.Context, c *Client, args []string) error {
 		q.Set("top_k", strconv.Itoa(top))
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/projects/"+key+"/search", q, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderSearch, out))
 }
 
 func cmdIndex(ctx context.Context, c *Client, args []string) error {
 	var projectFlag string
-	fs, err := flags("index", args, func(fs *flag.FlagSet) {
+	_, err := flags("index", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 	})
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/projects/"+key+"/index", nil, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderIndex, out))
 }

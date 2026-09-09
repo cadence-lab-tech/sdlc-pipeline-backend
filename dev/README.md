@@ -196,6 +196,20 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 Гейт `human_approval` в любом режиме закрывает только принципал вида `user`:
 агент, даже сопровождающий, поставить апрув не может.
 
+**Вход CLI через браузер** ([решение 0032](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0032-cli-login-device-flow.md)).
+Человеку токен руками не нужен: `clab auth login --host http://localhost:8088`
+печатает код, открывает `/login/cli`, и после «Разрешить» в интерфейсе
+кладёт долгоживущий токен в `~/.config/clab/config.json` (`CLAB_CONFIG_DIR`
+переопределяет каталог). Дальше `clab auth status`, `clab auth logout`,
+`clab auth token` для скриптов рядом; `--host` выбирает хост из конфига,
+`SDLC_API_URL` и `SDLC_TOKEN` перекрывают конфиг. Проект без `--project` и
+`SDLC_PROJECT` берётся по `origin` текущего каталога
+(`GET /v1/projects?repo=owner/name`). Агента к MCP проекта подключает
+`clab mcp install` — это `claude mcp add` с тем же токеном; `clab mcp config`
+печатает JSON для любого другого агента. Команды чтения показывают таблицы,
+`--json` в любом месте строки отдаёт ответ сервера как есть — так CLI зовут
+`dev/e2e.sh` и раннер.
+
 **Вход через GitHub.** У GitHub App в настройках есть раздел OAuth: Client ID
 и Client secret, callback URL — `https://<адрес интерфейса>/login/github`.
 С `SDLC_GITHUB_APP_CLIENT_ID` и `SDLC_GITHUB_APP_CLIENT_SECRET` на странице

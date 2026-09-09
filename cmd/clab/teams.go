@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -223,7 +224,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 			fs.Usage()
 			return fmt.Errorf("clab team grant <команда> --project SDLC --level maintainer")
 		}
-		projectKey, err := project(fs, projectFlag)
+		projectKey, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -247,7 +248,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 			fs.Usage()
 			return fmt.Errorf("clab team revoke <команда> --project SDLC")
 		}
-		projectKey, err := project(fs, projectFlag)
+		projectKey, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -271,11 +272,11 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		if _, err := flags("project", rest, func(*flag.FlagSet) {}); err != nil {
 			return err
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/projects", nil, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderProjects, out))
 
 	case "create":
 		key, tail := popTask(rest)
@@ -306,7 +307,7 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		var projectFlag, credentialRef string
 		var installation int64
 		var check bool
-		fs, err := flags("project", rest, func(fs *flag.FlagSet) {
+		_, err := flags("project", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.Int64Var(&installation, "installation", 0, "идентификатор установки приложения в организации")
 			fs.StringVar(&credentialRef, "credential-ref", "", "имя секрета с токеном: запасной путь без приложения")
@@ -315,7 +316,7 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		projectKey, err := project(fs, projectFlag)
+		projectKey, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -344,13 +345,13 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 
 	case "teams":
 		var projectFlag string
-		fs, err := flags("project", rest, func(fs *flag.FlagSet) {
+		_, err := flags("project", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
 			return err
 		}
-		projectKey, err := project(fs, projectFlag)
+		projectKey, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}

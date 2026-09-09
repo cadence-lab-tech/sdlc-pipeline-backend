@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -263,5 +264,76 @@ func TestOpenProjectCreation(t *testing.T) {
 	// пропускает чужих: лидом команды нужно быть по-прежнему.
 	if _, err := auth.OwnerTeamFor(ctx, alice, "no-such-team"); apperr.As(err).Code != apperr.CodeNotFound {
 		t.Fatalf("команда проверяется: %v", err)
+	}
+}
+
+// Вход CLI через браузер (решение 0032): CLI заводит запрос, человек
+// подтверждает код своей сессией, CLI забирает токен ровно один раз.
+func TestCLILoginDeviceFlow(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, auth, _ := setupPhase4(t, AuthToken)
+	admin := adminIdentity(t, ctx, auth)
+
+	start, err := auth.StartCLILogin(ctx, "clab на macbook", 30)
+	if err != nil {
+		t.Fatalf("старт входа: %v", err)
+	}
+	if len(start.UserCode) != 9 || start.UserCode[4] != '-' {
+		t.Fatalf("код для человека: %q", start.UserCode)
+	}
+
+	// До подтверждения — pending, и токена нет.
+	poll, err := auth.PollCLILogin(ctx, start.PollSecret)
+	if err != nil || poll.Status != "pending" || poll.Token != "" {
+		t.Fatalf("опрос до подтверждения: %+v %v", poll, err)
+	}
+	if _, err := auth.PollCLILogin(ctx, "sdlc_wrong"); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("чужой секрет: %v", err)
+	}
+
+	// Без входа подтверждать нельзя; код принимается и строчными без дефиса.
+	if _, err := auth.CLILoginByCode(ctx, Identity{Principal: admin.Principal}, start.UserCode); apperr.As(err).Code != apperr.CodeUnauthenticated {
+		t.Fatalf("без токена: %v", err)
+	}
+	loose := strings.ToLower(strings.ReplaceAll(start.UserCode, "-", ""))
+	shown, err := auth.CLILoginByCode(ctx, admin, loose)
+	if err != nil || shown.Label != "clab на macbook" || shown.TokenDays != 30 {
+		t.Fatalf("запрос по коду: %+v %v", shown, err)
+	}
+	approved, err := auth.ApproveCLILogin(ctx, admin, loose, true)
+	if err != nil || approved.Status(time.Now()) != "approved" {
+		t.Fatalf("подтверждение: %+v %v", approved, err)
+	}
+	if _, err := auth.ApproveCLILogin(ctx, admin, start.UserCode, true); apperr.As(err).Code != apperr.CodeConflict {
+		t.Fatalf("повторное подтверждение: %v", err)
+	}
+
+	// Токен приходит один раз и принадлежит подтвердившему.
+	poll, err = auth.PollCLILogin(ctx, start.PollSecret)
+	if err != nil || poll.Status != "approved" || poll.Token == "" {
+		t.Fatalf("опрос после подтверждения: %+v %v", poll, err)
+	}
+	if poll.Record.Name != "clab на macbook" || poll.Record.ExpiresAt == nil || poll.Record.TokenKind != domain.TokenAPI {
+		t.Fatalf("запись токена: %+v", poll.Record)
+	}
+	id, err := auth.Authenticate(ctx, poll.Token)
+	if err != nil || id.Principal.ID != admin.Principal.ID {
+		t.Fatalf("токен CLI: %+v %v", id, err)
+	}
+	again, err := auth.PollCLILogin(ctx, start.PollSecret)
+	if err != nil || again.Status != "consumed" || again.Token != "" {
+		t.Fatalf("повторный опрос: %+v %v", again, err)
+	}
+
+	// Отказ закрывает запрос: CLI видит denied.
+	start, err = auth.StartCLILogin(ctx, "clab на ci", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.ApproveCLILogin(ctx, admin, start.UserCode, false); err != nil {
+		t.Fatalf("отказ: %v", err)
+	}
+	if poll, err := auth.PollCLILogin(ctx, start.PollSecret); err != nil || poll.Status != "denied" {
+		t.Fatalf("опрос после отказа: %+v %v", poll, err)
 	}
 }

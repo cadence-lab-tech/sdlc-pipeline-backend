@@ -102,6 +102,29 @@ func (s *Store) ProjectByInstallation(ctx context.Context, q Querier, installati
 	return p, nil
 }
 
+// ProjectIDsByRepository — проекты, к которым привязан репозиторий с такими
+// координатами. Один репозиторий может стоять в нескольких проектах, поэтому
+// множество, а не один идентификатор.
+func (s *Store) ProjectIDsByRepository(ctx context.Context, q Querier, owner, name string) (map[uuid.UUID]struct{}, error) {
+	rows, err := q.Query(ctx, `
+		SELECT DISTINCT project_id FROM repositories
+		WHERE lower(owner) = lower($1) AND lower(name) = lower($2)`, owner, name)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]struct{}{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = struct{}{}
+	}
+	return out, translate(rows.Err())
+}
+
 func (s *Store) ListRepositories(ctx context.Context, q Querier, projectID uuid.UUID) ([]domain.Repository, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, project_id, provider, owner, name, default_branch,

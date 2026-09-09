@@ -17,7 +17,7 @@ export SDLC_API_URL=$API SDLC_PROJECT=${SDLC_PROJECT:-SDLC}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-as() { SDLC_ACTOR="$1" "$CLI" "${@:2}"; }
+as() { SDLC_ACTOR="$1" "$CLI" --json "${@:2}"; }
 status() { as human:ci show "$TASK" | python3 -c 'import json,sys;print(json.load(sys.stdin)["task"]["status"])'; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 file() { printf '%s\n' "$2" > "$work/$1"; echo "$work/$1"; }
