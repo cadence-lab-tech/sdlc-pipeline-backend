@@ -235,3 +235,56 @@ func (s *Server) removeProjectTeam(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// ── арендатор: превращение и тариф (решение 0033) ───────────────────────────
+
+type convertTeamRequest struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// convertTeam превращает личную команду в организацию: проекты остаются,
+// участников теперь можно звать. Пустые ключ и название — прежние.
+func (s *Server) convertTeam(c *gin.Context) {
+	var req convertTeamRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	team, err := s.auth.ConvertTeam(c.Request.Context(), identity(c), c.Param("teamKey"),
+		workflow.ConvertTeamInput{Key: req.Key, Name: req.Name})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, team)
+}
+
+func (s *Server) listPlans(c *gin.Context) {
+	plans, err := s.auth.ListPlans(c.Request.Context(), identity(c))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"plans": plans})
+}
+
+type setTeamPlanRequest struct {
+	Plan string `json:"plan" binding:"required"`
+}
+
+// setTeamPlan переводит команду на тариф. Право проверяет сервис:
+// администратор инстанса, и никто больше.
+func (s *Server) setTeamPlan(c *gin.Context) {
+	var req setTeamPlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	plan, err := s.auth.SetTeamPlan(c.Request.Context(), identity(c), c.Param("teamKey"), req.Plan)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, plan)
+}

@@ -58,7 +58,7 @@ func TestPrincipalListIsForAdminsOnly(t *testing.T) {
 	ctx := context.Background()
 	store, _, _, auth, _ := setupPhase4(t, AuthToken)
 	admin := adminIdentity(t, ctx, auth)
-	alice := identityOf(t, store, "user:alice")
+	alice := identityOf(t, store, "alice")
 
 	all, err := auth.ListPrincipals(ctx, admin, "")
 	if err != nil {
@@ -90,10 +90,10 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 	if _, err := auth.CreateTeam(ctx, admin, CreateTeamInput{Key: "platform", Name: "Платформа"}); err != nil {
 		t.Fatalf("создание команды: %v", err)
 	}
+	alice := identityOf(t, store, "alice")
 	if _, err := auth.SetTeamMember(ctx, admin, "platform", "user:alice", domain.TeamRoleMember); err != nil {
 		t.Fatalf("состав команды: %v", err)
 	}
-	alice := identityOf(t, store, "alice")
 
 	// Пока команду не пустили в проект, участие в ней доступа не даёт.
 	if err := auth.Require(ctx, alice, pid, domain.MemberViewer); apperr.As(err).Code != apperr.CodeForbidden {
@@ -161,14 +161,15 @@ func TestTeamLeadCreatesProjectAndOwnsIt(t *testing.T) {
 	if _, err := auth.CreateTeam(ctx, admin, CreateTeamInput{Key: "platform", Name: "Платформа"}); err != nil {
 		t.Fatal(err)
 	}
+	// Человек добавляется в команду только после того, как заведён (решение 0033).
+	lead := identityOf(t, store, "lead")
+	bob := identityOf(t, store, "bob")
 	if _, err := auth.SetTeamMember(ctx, admin, "platform", "user:lead", domain.TeamRoleLead); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := auth.SetTeamMember(ctx, admin, "platform", "user:bob", domain.TeamRoleMember); err != nil {
 		t.Fatal(err)
 	}
-	lead := identityOf(t, store, "lead")
-	bob := identityOf(t, store, "bob")
 
 	// Право заводить проекты у команды, а не у лида: пока его нет, не может
 	// никто.
@@ -220,15 +221,16 @@ func TestTeamLeadCreatesProjectAndOwnsIt(t *testing.T) {
 		t.Fatalf("владение раздало права всей команде: %v", err)
 	}
 
-	// Проект без команды заводит только администратор системы.
+	// Проект без явной команды уходит в личную команду (решение 0033), а у
+	// неё в закрытом режиме права на проекты нет.
 	if _, err := auth.OwnerTeamFor(ctx, lead, ""); apperr.As(err).Code != apperr.CodeForbidden {
-		t.Fatalf("проект без владельца завёл не администратор: %v", err)
+		t.Fatalf("личная команда завела проект в закрытом режиме: %v", err)
 	}
 }
 
 func TestLastTeamLeadIsProtected(t *testing.T) {
 	ctx := context.Background()
-	_, _, _, auth, _ := setupPhase4(t, AuthToken)
+	store, _, _, auth, _ := setupPhase4(t, AuthToken)
 	admin := adminIdentity(t, ctx, auth)
 
 	if _, err := auth.CreateTeam(ctx, admin, CreateTeamInput{Key: "platform", Name: "Платформа"}); err != nil {
@@ -250,6 +252,7 @@ func TestLastTeamLeadIsProtected(t *testing.T) {
 		t.Fatalf("последнего лида понизили: %v", err)
 	}
 
+	mustActor(t, store, "user:alice")
 	if _, err := auth.SetTeamMember(ctx, admin, "platform", "user:alice", domain.TeamRoleLead); err != nil {
 		t.Fatal(err)
 	}

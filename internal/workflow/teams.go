@@ -24,6 +24,8 @@ type TeamDetail struct {
 	Team     domain.Team          `json:"team"`
 	Members  []domain.TeamMember  `json:"members"`
 	Projects []domain.ProjectTeam `json:"projects"`
+	// Действующий тариф: предел участников читается вместе с составом.
+	Plan domain.Plan `json:"plan"`
 }
 
 type CreateTeamInput struct {
@@ -65,15 +67,23 @@ func (a *Auth) GetTeam(ctx context.Context, id Identity, key string) (TeamDetail
 	if err != nil {
 		return TeamDetail{}, err
 	}
-	return TeamDetail{Team: team, Members: members, Projects: projects}, nil
+	plan, err := a.store.PlanOf(ctx, q, team.ID)
+	if err != nil {
+		return TeamDetail{}, err
+	}
+	return TeamDetail{Team: team, Members: members, Projects: projects, Plan: plan}, nil
 }
 
-// CreateTeam заводит команду и делает создателя её лидом: команда без лида не
-// сможет ни принять человека, ни завести проект.
+// CreateTeam заводит организацию и делает создателя её лидом: команда без
+// лида не сможет ни принять человека, ни завести проект. Заводит любой
+// вошедший человек (решение 0033); право на проекты новая команда получает
+// по режиму инстанса, а явно его выдаёт только администратор.
 func (a *Auth) CreateTeam(ctx context.Context, id Identity, in CreateTeamInput) (domain.Team, error) {
-	if err := a.RequireAdmin(id); err != nil {
-		return domain.Team{}, err
+	if a.Enforced() && !id.Principal.IsAdmin && id.Principal.Kind != domain.PrincipalUser {
+		return domain.Team{}, apperr.Forbidden("организацию заводит человек, а не %s", id.Principal.Kind)
 	}
+	// Явно выданное право только поднимает: в открытом режиме оно есть у всех.
+	canCreate := a.openProjects || (in.CanCreateProjects && a.RequireAdmin(id) == nil)
 	key := strings.TrimSpace(in.Key)
 	if key == "" || strings.TrimSpace(in.Name) == "" {
 		return domain.Team{}, apperr.InvalidInput("у команды должны быть ключ и название")
@@ -81,8 +91,8 @@ func (a *Auth) CreateTeam(ctx context.Context, id Identity, in CreateTeamInput) 
 	var out domain.Team
 	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
 		team, err := a.store.CreateTeam(ctx, tx, postgres.CreateTeamInput{
-			Key: key, Name: in.Name, Description: in.Description,
-			CanCreateProjects: in.CanCreateProjects, CreatedBy: id.Principal.ID,
+			Key: key, Name: in.Name, Description: in.Description, Kind: domain.TeamOrganization,
+			CanCreateProjects: canCreate, CreatedBy: id.Principal.ID,
 		})
 		if err != nil {
 			return err
@@ -134,9 +144,9 @@ func (a *Auth) ArchiveTeam(ctx context.Context, id Identity, key string) error {
 	return a.store.ArchiveTeam(ctx, q, team.ID)
 }
 
-// SetTeamMember добавляет принципала в команду или меняет его роль.
-// Принципал заводится, если его ещё нет: лид добавляет «user:alice» до того,
-// как та впервые войдёт.
+// SetTeamMember добавляет принципала в команду или меняет его роль. Человек
+// обязан уже существовать, агент заводится на месте; новый участник проходит
+// квоту тарифа, личная команда не принимает никого (решение 0033).
 func (a *Auth) SetTeamMember(ctx context.Context, id Identity, key, principal string, role domain.TeamRole) (domain.TeamMember, error) {
 	if !role.Valid() {
 		return domain.TeamMember{}, apperr.InvalidInput("роль в команде: member или lead, а не %q", role)
@@ -150,10 +160,18 @@ func (a *Auth) SetTeamMember(ctx context.Context, id Identity, key, principal st
 		if _, err := a.teamRole(ctx, tx, id, team.ID, true); err != nil {
 			return err
 		}
-		kind, handle := SplitHandle(principal, domain.PrincipalUser)
-		p, err := a.store.ResolveActor(ctx, tx, handle, kind)
+		p, err := a.findPrincipal(ctx, tx, principal, domain.PrincipalUser)
 		if err != nil {
 			return err
+		}
+		current, err := a.store.TeamRoleOf(ctx, tx, team.ID, p.ID)
+		if err != nil {
+			return err
+		}
+		if current == "" {
+			if err := a.memberQuota(ctx, tx, team, 1); err != nil {
+				return err
+			}
 		}
 		if role == domain.TeamRoleMember {
 			if err := a.guardLastLead(ctx, tx, team.ID, p.ID); err != nil {
@@ -252,41 +270,47 @@ func (a *Auth) RemoveProjectTeam(ctx context.Context, id Identity, projectKey, t
 
 // OwnerTeamFor проверяет право завести проект и отдаёт команду-владельца.
 //
-// Проект заводит администратор системы или лид команды, которой это право
-// выдано (`can_create_projects`). Команда указывается явно: человек может
-// быть лидом нескольких, и угадывать, чьим будет проект, нельзя.
-func (a *Auth) OwnerTeamFor(ctx context.Context, id Identity, teamKey string) (*uuid.UUID, error) {
+// Проект всегда принадлежит команде (решение 0033). Без явной команды он
+// уходит в личную команду создателя — она заводится, если её ещё нет, — и
+// право на проекты у неё есть по режиму инстанса. Явно названная команда
+// проверяется как раньше: лид и `can_create_projects`. Администратор
+// системы и режим без проверки прав проходят в любую.
+func (a *Auth) OwnerTeamFor(ctx context.Context, id Identity, teamKey string) (uuid.UUID, error) {
 	teamKey = strings.TrimSpace(teamKey)
 	if teamKey == "" {
-		// Открытое создание (решение 0030): проект без команды-владельца
-		// достаётся создателю — CreateProject делает его администратором.
-		if a.openProjects {
-			return nil, nil
+		if id.Principal.Kind != domain.PrincipalUser {
+			return uuid.Nil, apperr.InvalidInput("укажите команду-владельца: личной команды у %s нет", id.Principal.Kind)
 		}
-		if err := a.RequireAdmin(id); err != nil {
-			return nil, apperr.Forbidden("проект без команды-владельца заводит администратор системы")
+		team, err := a.PersonalTeam(ctx, id)
+		if err != nil {
+			return uuid.Nil, err
 		}
-		return nil, nil
+		// При открытом создании личной команде право не нужно: режим
+		// инстанса выше флага, поставленного при её заведении.
+		if !a.Enforced() || id.Principal.IsAdmin || team.CanCreateProjects || a.openProjects {
+			return team.ID, nil
+		}
+		return uuid.Nil, apperr.Forbidden("проекты заводят администратор системы и лиды команд с правом на это")
 	}
 	q := a.store.DB()
 	team, err := a.store.GetTeamByKey(ctx, q, teamKey)
 	if err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
 	if !a.Enforced() || id.Principal.IsAdmin {
-		return &team.ID, nil
+		return team.ID, nil
 	}
 	role, err := a.store.TeamRoleOf(ctx, q, team.ID, id.Principal.ID)
 	if err != nil {
-		return nil, err
+		return uuid.Nil, err
 	}
 	if role != domain.TeamRoleLead {
-		return nil, apperr.Forbidden("проект команде заводит её лид")
+		return uuid.Nil, apperr.Forbidden("проект команде заводит её лид")
 	}
 	if !team.CanCreateProjects {
-		return nil, apperr.Forbidden("команде %q не выдано право заводить проекты", team.Key)
+		return uuid.Nil, apperr.Forbidden("команде %q не выдано право заводить проекты", team.Key)
 	}
-	return &team.ID, nil
+	return team.ID, nil
 }
 
 // BootstrapTeam заводит первую команду и делает администратора её лидом:

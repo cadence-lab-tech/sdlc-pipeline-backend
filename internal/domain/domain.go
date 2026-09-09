@@ -91,6 +91,15 @@ const (
 
 func (r TeamRole) Valid() bool { return r == TeamRoleMember || r == TeamRoleLead }
 
+// Вид команды (решение 0033). Арендатор — команда: личная заводится при
+// первом входе и участников не принимает, организацию заводит любой вошедший.
+type TeamKind string
+
+const (
+	TeamPersonal     TeamKind = "personal"
+	TeamOrganization TeamKind = "organization"
+)
+
 // Team — группа принципалов уровня инстанса. Команда участвует в проектах
 // целиком, поэтому уход человека — одна строка, а не обход всех проектов.
 type Team struct {
@@ -98,6 +107,10 @@ type Team struct {
 	Key         string    `json:"key"`
 	Name        string    `json:"name"`
 	Description *string   `json:"description,omitempty"`
+	// Вид: личная команда одного человека или организация (решение 0033).
+	// Личная помнит, чья она; превращённая в организацию — уже нет.
+	Kind       TeamKind   `json:"kind"`
+	PersonalOf *uuid.UUID `json:"personal_of,omitempty"`
 	// Право заводить проекты принадлежит команде, а не человеку: лид
 	// меняется, команда остаётся.
 	CanCreateProjects bool       `json:"can_create_projects"`
@@ -109,6 +122,7 @@ type Team struct {
 type TeamMember struct {
 	TeamID      uuid.UUID     `json:"team_id"`
 	TeamKey     string        `json:"team_key"`
+	TeamKind    TeamKind      `json:"team_kind"`
 	PrincipalID uuid.UUID     `json:"principal_id"`
 	Handle      string        `json:"handle"`
 	Kind        PrincipalKind `json:"kind"`
@@ -672,4 +686,26 @@ type ProjectDocument struct {
 	RepoPath   *string         `json:"repo_path,omitempty"`
 	BlobSHA    *string         `json:"blob_sha,omitempty"`
 	Meta       json.RawMessage `json:"meta"`
+}
+
+// Тариф — набор пределов (решение 0033). nil — без предела. Команда без
+// подписки живёт на free; квота проверяется рядом с правами, а не в домене.
+type Plan struct {
+	Code       string    `json:"code"`
+	Name       string    `json:"name"`
+	MembersMax *int      `json:"members_max,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// Subscription — активная подписка команды на тариф. Одна активная на
+// команду; смена тарифа закрывает прежнюю и заводит новую.
+type Subscription struct {
+	ID          uuid.UUID  `json:"id"`
+	TeamID      uuid.UUID  `json:"team_id"`
+	PlanCode    string     `json:"plan_code"`
+	Status      string     `json:"status"`
+	PeriodStart *time.Time `json:"period_start,omitempty"`
+	PeriodEnd   *time.Time `json:"period_end,omitempty"`
+	ExternalRef *string    `json:"external_ref,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }

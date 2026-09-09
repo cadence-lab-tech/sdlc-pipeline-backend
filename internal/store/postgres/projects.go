@@ -57,9 +57,8 @@ type CreateProjectInput struct {
 	Name        string
 	Description *string
 	CreatedBy   uuid.UUID
-	// Команда-владелец. Пусто у проекта, заведённого глобальным
-	// администратором вне команд.
-	OwnerTeamID *uuid.UUID
+	// Команда-владелец: проект без неё не бывает (решение 0033).
+	OwnerTeamID uuid.UUID
 }
 
 func (s *Store) CreateProject(ctx context.Context, q Querier, in CreateProjectInput) (domain.Project, error) {
