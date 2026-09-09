@@ -66,7 +66,7 @@ docker compose -f dev/docker-compose.yml up -d worker
 docker compose -f dev/docker-compose.yml logs -f worker
 ```
 
-Состояние индекса — `GET /v1/projects/SDLC/index` или `sdlc index`:
+Состояние индекса — `GET /v1/projects/SDLC/index` или `clab index`:
 
 ```bash
 curl -s localhost:8088/v1/projects/SDLC/index | jq '.repositories[]
@@ -92,7 +92,7 @@ curl -s localhost:8088/v1/projects/SDLC/index | jq '.repositories[]
 
 ```bash
 curl -s 'localhost:8088/v1/projects/SDLC/search?q=как+устроена+аренда&top_k=5' | jq
-./bin/sdlc search "как устроена аренда" --scope code --repo stepaKaziatko/sdlc-pipeline-backend
+./bin/clab search "как устроена аренда" --scope code --repo stepaKaziatko/sdlc-pipeline-backend
 ```
 
 Ищет по коду из актуального индекса, по артефактам задач и по проектным
@@ -173,16 +173,16 @@ printf 'SDLC_AUTH_MODE=token\nSDLC_ADMIN_TOKEN=sdlc_замените_на_дли
 make up
 
 export SDLC_TOKEN=sdlc_замените_на_длинный_секрет SDLC_PROJECT=SDLC
-./bin/sdlc me                                     # admin, is_admin=true
-./bin/sdlc members set user:alice maintainer      # добавить человека
-./bin/sdlc token create --name alice --for user:alice   # выдать ей токен
-./bin/sdlc token create --name ci-reviewer --for agent:reviewer-bot --roles reviewer
+./bin/clab me                                     # admin, is_admin=true
+./bin/clab members set user:alice maintainer      # добавить человека
+./bin/clab token create --name alice --for user:alice   # выдать ей токен
+./bin/clab token create --name ci-reviewer --for agent:reviewer-bot --roles reviewer
 ```
 
 Какие роли специалистов участник может забирать, задаёт администратор проекта
 на участии ([решение 0030](https://github.com/stepaKaziatko/sdlc-pipeline-docs/blob/main/decisions/0030-member-roles-github-login-open-projects.md)):
-`sdlc members set user:alice agent --roles developer,reviewer`; без `--roles` —
-любые. Команде роли выдаются так же: `sdlc team grant platform --project SDLC
+`clab members set user:alice agent --roles developer,reviewer`; без `--roles` —
+любые. Команде роли выдаются так же: `clab team grant platform --project SDLC
 --level agent --roles reviewer`. Токен может только сузить эти рамки: `--roles`
 у токена пересекается с ролями участника, и токен ревьюера не заберёт этап
 разработчика. Сам токен показывается один раз при выдаче; в базе лежит хеш.
@@ -208,7 +208,7 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 доступ ему выдаёт администратор проекта.
 
 **Создание проектов.** По умолчанию (`SDLC_PROJECT_CREATION=open`) проект
-заводит любой вошедший — из интерфейса или `sdlc project create`; создатель
+заводит любой вошедший — из интерфейса или `clab project create`; создатель
 становится его администратором и сам добавляет коллег. `teams` возвращает
 правило фазы 6: администратор системы и лиды команд с правом на это.
 
@@ -220,14 +220,14 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 `sdlc_import_guide`; из CLI:
 
 ```bash
-./bin/sdlc import-guide                          # что и куда переносить
-./bin/sdlc export > bundle.json                  # выгрузить проект связкой
-./bin/sdlc import --file bundle.json --dry-run   # отчёт без изменений
-./bin/sdlc import --file bundle.json
-./bin/sdlc repo add acme/api --hint backend
-./bin/sdlc role put --key writer --name Техписатель --file docs/roles/writer.md
-./bin/sdlc doc put --kind guideline --title Соглашения --file CLAUDE.md
-./bin/sdlc workflow activate <id>                # цикл из связки приходит черновиком
+./bin/clab import-guide                          # что и куда переносить
+./bin/clab export > bundle.json                  # выгрузить проект связкой
+./bin/clab import --file bundle.json --dry-run   # отчёт без изменений
+./bin/clab import --file bundle.json
+./bin/clab repo add acme/api --hint backend
+./bin/clab role put --key writer --name Техписатель --file docs/roles/writer.md
+./bin/clab doc put --kind guideline --title Соглашения --file CLAUDE.md
+./bin/clab workflow activate <id>                # цикл из связки приходит черновиком
 ```
 
 Импорт идемпотентен: роль с той же инструкцией не трогается, с другой —
@@ -280,7 +280,7 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 
 ## Метрики цикла
 
-`GET /v1/projects/SDLC/metrics?period=30d` или `sdlc metrics`: длительность
+`GET /v1/projects/SDLC/metrics?period=30d` или `clab metrics`: длительность
 этапов по статусам, откаты и повторные попытки, вердикты по гейтам, сигналы
 дрейфа, пропускная способность. Считается по накопленным таблицам.
 

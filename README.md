@@ -1,4 +1,4 @@
-# SDLC Pipeline — Backend
+# Cadence Lab — Backend
 
 Go-сервис, ведущий задачи по настраиваемому циклу разработки: REST API для UI,
 MCP-сервер для локальных агентов, воркеры индексации репозиториев и детектора
@@ -43,7 +43,7 @@ make reset   # снести вместе с данными
 ```bash
 export SDLC_DATABASE_URL='postgres://sdlc:sdlc@localhost:55432/sdlc?sslmode=disable'
 export SDLC_SEED=default_workflow
-make build && ./bin/api      # рядом собираются bin/worker и bin/sdlc
+make build && ./bin/api      # рядом собираются bin/worker и bin/clab
 ```
 
 Сквозной проход задачи по циклу глазами агентов — `dev/e2e.sh`: захват,
@@ -63,7 +63,7 @@ make reset up && dev/e2e.sh
 
 `SDLC_AUTH_MODE=token` включает токены и права по участию в проекте; первый
 администратор берётся из `SDLC_ADMIN_TOKEN`. Правила команды переносятся в
-проект связкой: `sdlc export`, `sdlc import --file bundle.json`, из агента —
+проект связкой: `clab export`, `clab import --file bundle.json`, из агента —
 промпт `/mcp__sdlc__import_rules`. Подробности — [dev/README.md](dev/README.md).
 
 ## API
@@ -140,13 +140,13 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 
 ```bash
 export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:analyst-bot
-./bin/sdlc queue --role analyst
-./bin/sdlc claim SDLC-1
-./bin/sdlc submit SDLC-1 --kind analysis.brief --title "Разбор" --file brief.md
-./bin/sdlc gates SDLC-1 --transition analysis_done
-./bin/sdlc transition SDLC-1 --to analysis_done --summary "Требования разобраны"
-./bin/sdlc search "как устроена аренда" --scope code
-./bin/sdlc index
+./bin/clab queue --role analyst
+./bin/clab claim SDLC-1
+./bin/clab submit SDLC-1 --kind analysis.brief --title "Разбор" --file brief.md
+./bin/clab gates SDLC-1 --transition analysis_done
+./bin/clab transition SDLC-1 --to analysis_done --summary "Требования разобраны"
+./bin/clab search "как устроена аренда" --scope code
+./bin/clab index
 ```
 
 ## Структура
@@ -154,7 +154,7 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 ```
 cmd/api/            HTTP-сервер: REST и MCP на одних сервисах
 cmd/worker/         аренды, индексация, детектор дрейфа, состояние PR
-cmd/sdlc/           CLI для агентов и CI
+cmd/clab/           CLI для агентов и CI
 internal/
   config/           настройки из окружения
   apperr/           ошибки домена с кодом, общим для REST и MCP

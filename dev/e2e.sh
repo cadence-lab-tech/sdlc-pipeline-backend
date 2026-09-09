@@ -10,7 +10,7 @@
 set -euo pipefail
 
 API=${SDLC_API_URL:-http://localhost:8088/v1}
-CLI=${SDLC_CLI:-./bin/sdlc}
+CLI=${SDLC_CLI:-./bin/clab}
 TASK=${TASK:-SDLC-1}
 export SDLC_API_URL=$API SDLC_PROJECT=${SDLC_PROJECT:-SDLC}
 

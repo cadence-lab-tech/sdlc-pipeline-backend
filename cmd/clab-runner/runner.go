@@ -288,7 +288,7 @@ func (r *runner) mcpConfig() (string, func(), error) {
 	if err != nil {
 		return "", func() {}, err
 	}
-	dir, err := os.MkdirTemp("", "sdlc-runner-*")
+	dir, err := os.MkdirTemp("", "clab-runner-*")
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -386,6 +386,6 @@ func parseUsage(out []byte) map[string]any {
 	if v := result.Usage.CacheCreationInputTokens; v != nil {
 		report["cache_write_tokens"] = *v
 	}
-	report["details"] = map[string]any{"reported_by": "sdlc-runner"}
+	report["details"] = map[string]any{"reported_by": "clab-runner"}
 	return report
 }

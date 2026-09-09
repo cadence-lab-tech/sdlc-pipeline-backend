@@ -78,7 +78,7 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 	s := &Server{log: log, store: store, engine: engine, authoring: authoring, auth: auth}
 	s.mcp = sdk.NewServer(&sdk.Implementation{
 		Name:    ServerName,
-		Title:   "SDLC Pipeline",
+		Title:   "Cadence Lab",
 		Version: Version,
 	}, nil)
 	s.registerTools()
