@@ -69,7 +69,7 @@ func commands() []command {
 		{"me", "кто я по токену, где состою", "clab me", cmdMe},
 		{"token", "выдать, перечислить или отозвать токен", "clab token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | clab token list [--project SDLC] | clab token revoke <id>", cmdToken},
 		{"members", "участники проекта и их уровни", "clab members [list] | clab members set user:alice agent [--roles developer,reviewer] | clab members remove user:alice", cmdMembers},
-		{"team", "команды: состав, группы провайдера, права на проекты", "clab team list | clab team show platform | clab team create platform --name Платформа [--can-create-projects] | clab team add platform user:alice --role lead | clab team groups platform --set sdlc-platform | clab team grant platform --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
+		{"team", "команды: организации, состав, тариф, группы провайдера, права на проекты", "clab team list | clab team show acme | clab team create acme --name Acme | clab team convert <личная> --key acme | clab team plan acme [--set business] | clab team add acme user:alice --role lead | clab team groups acme --set sdlc-platform | clab team grant acme --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
 		{"project", "проекты: список, создание, команды и доступ к GitHub", "clab project list | clab project create ACME --name \"Проект\" [--team platform] | clab project teams | clab project github --installation 42 | clab project github --check", cmdProject},
 
 		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "clab export [--project SDLC] > bundle.json", cmdExport},

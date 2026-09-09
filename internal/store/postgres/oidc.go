@@ -22,10 +22,11 @@ type IdPPrincipalInput struct {
 // UpsertIdPPrincipal находит принципала по `sub` провайдера или заводит его.
 //
 // Ключ — именно `sub`: почту и имя в IdP меняют, и связывать по ним значило бы
-// заводить второго принципала после смены фамилии. Принципал, заведённый до
-// подключения провайдера (администратор бутстрапом, участник, добавленный
-// руками), связывается с `sub` по хэндлу — иначе у человека оказалось бы две
-// учётки, и права остались бы на прежней.
+// заводить второго принципала после смены фамилии. По хэндлу не связывается
+// тоже (решение 0033): хэндл выбирает провайдер, и на открытом инстансе
+// принципал, заведённый под чужой логин, достался бы тому, кто первым с ним
+// войдёт — вместе с администратором бутстрапа, у которого `sub` нет. Занятый
+// хэндл — конфликт, который вызывающий разводит суффиксом.
 func (s *Store) UpsertIdPPrincipal(ctx context.Context, q Querier, in IdPPrincipalInput) (domain.Principal, error) {
 	var email *string
 	if in.Email != "" {
@@ -35,17 +36,9 @@ func (s *Store) UpsertIdPPrincipal(ctx context.Context, q Querier, in IdPPrincip
 	if name == "" {
 		name = in.Handle
 	}
-	// Кандидат выбирается по одному, а не условием «или»: человек с уже
-	// связанным `sub` и однофамилец с тем же хэндлом — это два разных
-	// принципала, и обновлять обоих нельзя.
 	p, err := scanPrincipal(q.QueryRow(ctx, `
 		WITH target AS (
-			SELECT id, 1 AS rank FROM principals WHERE idp_subject = $1
-			UNION ALL
-			SELECT id, 2 FROM principals
-			WHERE idp_subject IS NULL AND handle = $2 AND kind = 'user'
-			ORDER BY rank
-			LIMIT 1
+			SELECT id FROM principals WHERE idp_subject = $1
 		), linked AS (
 			UPDATE principals SET
 				idp_subject = $1,

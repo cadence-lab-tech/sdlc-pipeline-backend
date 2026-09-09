@@ -50,6 +50,7 @@ services:
       SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}
       SDLC_BOOTSTRAP_TEAM_NAME: ${SDLC_BOOTSTRAP_TEAM_NAME:-}
       SDLC_PROJECT_CREATION: ${SDLC_PROJECT_CREATION:-open}
+      SDLC_TENANCY: ${SDLC_TENANCY:-shared}
       SDLC_SESSION_TTL: ${SDLC_SESSION_TTL:-12h}
       # Вход людей: GitHub и, если есть, корпоративный провайдер.
       SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}

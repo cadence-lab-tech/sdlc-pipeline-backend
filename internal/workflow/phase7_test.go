@@ -226,9 +226,11 @@ func TestOpenProjectCreation(t *testing.T) {
 	ctx := context.Background()
 	store, engine, _, auth, _ := setupPhase4(t, AuthToken)
 	adminIdentity(t, ctx, auth)
-	alice := identityOf(t, store, "user:alice")
+	alice := identityOf(t, store, "alice")
+	mustActor(t, store, "user:bob")
 
-	// Закрытый режим: постороннему проект не завести.
+	// Закрытый режим: личная команда заводится, но права на проекты у неё
+	// нет — его выдаёт администратор.
 	if _, err := auth.OwnerTeamFor(ctx, alice, ""); apperr.As(err).Code != apperr.CodeForbidden {
 		t.Fatalf("закрытый режим: %v", err)
 	}
@@ -240,18 +242,22 @@ func TestOpenProjectCreation(t *testing.T) {
 		t.Fatal("в закрытом режиме кнопки быть не должно")
 	}
 
+	// Открытый режим выше флага личной команды: проект уходит в неё.
 	auth.OpenProjectCreation(true)
 	owner, err := auth.OwnerTeamFor(ctx, alice, "")
-	if err != nil || owner != nil {
-		t.Fatalf("открытый режим: %v %v", err, owner)
+	if err != nil {
+		t.Fatalf("открытый режим: %v", err)
 	}
 	me, err = auth.Me(ctx, alice)
 	if err != nil || !me.CanCreateProjects {
 		t.Fatalf("в открытом режиме проект заводит любой: %v %+v", err, me)
 	}
-	project, err := engine.CreateProject(ctx, alice.Principal.ID, postgres.CreateProjectInput{Key: "ALICE", Name: "Проект Алисы"})
+	project, err := engine.CreateProject(ctx, alice.Principal.ID, postgres.CreateProjectInput{Key: "ALICE", Name: "Проект Алисы", OwnerTeamID: owner})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if project.OwnerTeamKey == nil || *project.OwnerTeamKey != "alice" {
+		t.Fatalf("проект не в личной команде: %+v", project)
 	}
 	// Создатель — администратор проекта: добавляет коллег сам.
 	if err := auth.Require(ctx, alice, project.ID, domain.MemberAdmin); err != nil {
@@ -260,8 +266,12 @@ func TestOpenProjectCreation(t *testing.T) {
 	if _, err := auth.SetMember(ctx, alice, "ALICE", "user:bob", domain.MemberMaintainer, nil); err != nil {
 		t.Fatalf("создатель добавляет коллегу: %v", err)
 	}
-	// Команда при открытом режиме остаётся необязательной, но и не
-	// пропускает чужих: лидом команды нужно быть по-прежнему.
+	// Незаведённого человека добавить нельзя: принципал по хэндлу не
+	// заводится (решение 0033).
+	if _, err := auth.SetMember(ctx, alice, "ALICE", "user:nobody", domain.MemberViewer, nil); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("участник из воздуха: %v", err)
+	}
+	// Явно названная команда проверяется по-прежнему: лидом нужно быть.
 	if _, err := auth.OwnerTeamFor(ctx, alice, "no-such-team"); apperr.As(err).Code != apperr.CodeNotFound {
 		t.Fatalf("команда проверяется: %v", err)
 	}

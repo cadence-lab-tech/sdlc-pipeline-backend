@@ -15,29 +15,36 @@ import (
 // прямого участия и участия через команды. Считать его в Go означало бы два
 // похода в базу на каждую проверку прав, а проверка идёт на каждый запрос.
 
-const teamCols = `id, key, name, description, can_create_projects, created_at, updated_at, archived_at`
+const teamCols = `id, key, name, description, kind, personal_of, can_create_projects, created_at, updated_at, archived_at`
 
 func scanTeam(row interface{ Scan(...any) error }) (domain.Team, error) {
 	var t domain.Team
-	err := row.Scan(&t.ID, &t.Key, &t.Name, &t.Description, &t.CanCreateProjects,
-		&t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt)
+	err := row.Scan(&t.ID, &t.Key, &t.Name, &t.Description, &t.Kind, &t.PersonalOf,
+		&t.CanCreateProjects, &t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt)
 	return t, err
 }
 
 type CreateTeamInput struct {
-	Key               string
-	Name              string
-	Description       *string
+	Key         string
+	Name        string
+	Description *string
+	// Пусто — организация. Личная команда несёт PersonalOf (решение 0033).
+	Kind              domain.TeamKind
+	PersonalOf        *uuid.UUID
 	CanCreateProjects bool
 	CreatedBy         uuid.UUID
 }
 
 func (s *Store) CreateTeam(ctx context.Context, q Querier, in CreateTeamInput) (domain.Team, error) {
+	kind := in.Kind
+	if kind == "" {
+		kind = domain.TeamOrganization
+	}
 	t, err := scanTeam(q.QueryRow(ctx, `
-		INSERT INTO teams (key, name, description, can_create_projects, created_by)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO teams (key, name, description, kind, personal_of, can_create_projects, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+teamCols,
-		in.Key, in.Name, in.Description, in.CanCreateProjects, in.CreatedBy))
+		in.Key, in.Name, in.Description, kind, in.PersonalOf, in.CanCreateProjects, in.CreatedBy))
 	if err != nil {
 		return t, translate(err)
 	}
@@ -116,7 +123,7 @@ func (s *Store) ArchiveTeam(ctx context.Context, q Querier, id uuid.UUID) error 
 // ── состав команды ──────────────────────────────────────────────────────────
 
 const teamMemberSelect = `
-	SELECT m.team_id, t.key, m.principal_id, p.handle, p.kind, p.display_name,
+	SELECT m.team_id, t.key, t.kind, m.principal_id, p.handle, p.kind, p.display_name,
 	       m.role, m.created_at
 	FROM team_members m
 	JOIN principals p ON p.id = m.principal_id
@@ -124,7 +131,7 @@ const teamMemberSelect = `
 
 func scanTeamMember(row interface{ Scan(...any) error }) (domain.TeamMember, error) {
 	var m domain.TeamMember
-	err := row.Scan(&m.TeamID, &m.TeamKey, &m.PrincipalID, &m.Handle, &m.Kind,
+	err := row.Scan(&m.TeamID, &m.TeamKey, &m.TeamKind, &m.PrincipalID, &m.Handle, &m.Kind,
 		&m.DisplayName, &m.Role, &m.CreatedAt)
 	return m, err
 }

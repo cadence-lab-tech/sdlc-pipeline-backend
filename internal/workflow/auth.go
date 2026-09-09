@@ -72,6 +72,9 @@ type Auth struct {
 	sessionTTL time.Duration
 	// Вход через GitHub (решение 0030). nil — выключен.
 	github *github.OAuth
+	// Профиль поставки (решение 0033): shared — квоты тарифа считаются,
+	// single — выделенный инстанс, пределы задаёт договор.
+	tenancy string
 }
 
 func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {
@@ -85,8 +88,8 @@ func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {
 func (a *Auth) Mode() string { return a.mode }
 
 // OpenProjectCreation включает или выключает создание проектов любым
-// вошедшим. Создатель становится администратором проекта, команды остаются
-// необязательным слоем поверх (решение 0030).
+// вошедшим (решение 0030). Проект при этом уходит в личную команду создателя
+// (решение 0033): она и получает право заводить проекты при заведении.
 func (a *Auth) OpenProjectCreation(open bool) *Auth {
 	a.openProjects = open
 	return a
@@ -155,6 +158,11 @@ func (a *Auth) Bootstrap(ctx context.Context, handle, token string) error {
 				return err
 			}
 		}
+		// Личная команда — и у администратора: проект без явной команды
+		// уходит в неё (решение 0033).
+		if _, err := a.ensurePersonalTeam(ctx, tx, p); err != nil {
+			return err
+		}
 		prefix := token
 		if len(prefix) > 12 {
 			prefix = prefix[:12]
@@ -208,7 +216,6 @@ func (a *Auth) IssueToken(ctx context.Context, id Identity, in IssueTokenInput) 
 		forSelf := in.Principal == "" || in.Principal == id.Principal.Handle ||
 			in.Principal == string(id.Principal.Kind)+":"+id.Principal.Handle
 		if !forSelf {
-			kind, handle := SplitHandle(in.Principal, domain.PrincipalAgent)
 			if project == nil {
 				if err := a.RequireAdmin(id); err != nil {
 					return apperr.Forbidden("токен другому принципалу без привязки к проекту выдаёт только администратор системы")
@@ -216,7 +223,7 @@ func (a *Auth) IssueToken(ctx context.Context, id Identity, in IssueTokenInput) 
 			} else if err := a.Require(ctx, id, project.ID, domain.MemberAdmin); err != nil {
 				return err
 			}
-			p, err := a.store.ResolveActor(ctx, tx, handle, kind)
+			p, err := a.findPrincipal(ctx, tx, in.Principal, domain.PrincipalAgent)
 			if err != nil {
 				return err
 			}
@@ -486,9 +493,9 @@ func (a *Auth) ListMembers(ctx context.Context, id Identity, projectKey string) 
 }
 
 // SetMember добавляет участника или меняет его уровень и роли специалистов.
-// Принципал заводится, если его ещё нет: администратор добавляет «user:alice»
-// до того, как та впервые придёт с токеном. roleKeys nil — любые роли
-// (решение 0030); заданные роли обязаны существовать в проекте.
+// Человек обязан уже существовать, агент заводится на месте (решение 0033).
+// roleKeys nil — любые роли (решение 0030); заданные роли обязаны
+// существовать в проекте.
 func (a *Auth) SetMember(ctx context.Context, id Identity, projectKey, principal string, role domain.MemberRole, roleKeys []string) (domain.ProjectMember, error) {
 	if !role.Valid() {
 		return domain.ProjectMember{}, apperr.InvalidInput(
@@ -503,8 +510,7 @@ func (a *Auth) SetMember(ctx context.Context, id Identity, projectKey, principal
 		if err := a.Require(ctx, id, project.ID, domain.MemberAdmin); err != nil {
 			return err
 		}
-		kind, handle := SplitHandle(principal, domain.PrincipalUser)
-		p, err := a.store.ResolveActor(ctx, tx, handle, kind)
+		p, err := a.findPrincipal(ctx, tx, principal, domain.PrincipalUser)
 		if err != nil {
 			return err
 		}
@@ -592,9 +598,10 @@ type Me struct {
 	// Команды показываются отдельно от участия в проектах: права из них
 	// приходят в проекты, которых в memberships нет.
 	Teams []domain.TeamMember `json:"teams"`
-	// Может ли актор завести проект: открытое создание, администратор
-	// системы или лид команды с правом на это. Интерфейсу это нужно, чтобы
-	// показать кнопку тому, у кого она сработает.
+	// Может ли актор завести проект: администратор системы, человек при
+	// открытом создании (проект уйдёт в его личную команду) или лид команды
+	// с правом на это. Интерфейсу это нужно, чтобы показать кнопку тому, у
+	// кого она сработает.
 	CanCreateProjects bool `json:"can_create_projects"`
 }
 
@@ -608,7 +615,8 @@ func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
 	if err != nil {
 		return Me{}, err
 	}
-	canCreate := a.openProjects || !a.Enforced() || id.Principal.IsAdmin
+	canCreate := !a.Enforced() || id.Principal.IsAdmin ||
+		(a.openProjects && id.Principal.Kind == domain.PrincipalUser)
 	if !canCreate {
 		for _, t := range teams {
 			if t.Role != domain.TeamRoleLead {

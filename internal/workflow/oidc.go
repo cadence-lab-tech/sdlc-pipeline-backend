@@ -105,6 +105,9 @@ func (a *Auth) Login(ctx context.Context, idToken string) (Session, error) {
 		if err := a.syncTeams(ctx, tx, p.ID, claims.Groups); err != nil {
 			return err
 		}
+		if _, err := a.ensurePersonalTeam(ctx, tx, p); err != nil {
+			return err
+		}
 		record, err := a.store.CreateToken(ctx, tx, postgres.CreateTokenInput{
 			PrincipalID: p.ID, Name: "вход через " + a.oidc.Issuer(),
 			TokenHash: hash, Prefix: prefix, ExpiresAt: &expires,

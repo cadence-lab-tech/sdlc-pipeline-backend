@@ -1,8 +1,8 @@
 package main
 
-// Команды и проекты команды (решение 0027). Те же операции, что в интерфейсе:
-// администратор заводит команду и выдаёт ей право на проекты, лид ведёт
-// состав и заводит проекты.
+// Команды и проекты команды (решения 0027, 0033). Те же операции, что в
+// интерфейсе: любой вошедший заводит организацию, лид ведёт состав и заводит
+// проекты, администратор инстанса выдаёт право на проекты и тариф.
 
 import (
 	"context"
@@ -46,7 +46,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
 			fs.StringVar(&name, "name", "", "название команды")
 			fs.StringVar(&description, "description", "", "описание")
-			fs.BoolVar(&canCreate, "can-create-projects", false, "разрешить команде заводить проекты")
+			fs.BoolVar(&canCreate, "can-create-projects", false, "выдать право заводить проекты явно (администратор); иначе — по режиму инстанса")
 		})
 		if err != nil {
 			return err
@@ -61,6 +61,61 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		var out any
 		if err := c.do(ctx, "POST", "/teams", body, &out); err != nil {
+			return err
+		}
+		return print(out)
+
+	case "convert":
+		// Личная команда становится организацией (решение 0033): проекты
+		// остаются, участников теперь можно звать.
+		key, tail := popTask(rest)
+		var newKey, name string
+		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
+			fs.StringVar(&newKey, "key", "", "новый ключ организации; пусто — прежний")
+			fs.StringVar(&name, "name", "", "новое название; пусто — прежнее")
+		})
+		if err != nil {
+			return err
+		}
+		if key == "" {
+			fs.Usage()
+			return fmt.Errorf("clab team convert <личная команда> [--key acme --name \"Acme\"]")
+		}
+		var out any
+		if err := c.do(ctx, "POST", "/teams/"+url.PathEscape(key)+"/convert",
+			map[string]any{"key": newKey, "name": name}, &out); err != nil {
+			return err
+		}
+		return print(out)
+
+	case "plan":
+		// Тариф команды: без --set показывает действующий, с --set переводит
+		// (администратор инстанса).
+		key, tail := popTask(rest)
+		var set string
+		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
+			fs.StringVar(&set, "set", "", "код тарифа: free, business")
+		})
+		if err != nil {
+			return err
+		}
+		if key == "" {
+			fs.Usage()
+			return fmt.Errorf("clab team plan <команда> [--set business]")
+		}
+		if set == "" {
+			var out any
+			if err := c.get(ctx, "/teams/"+url.PathEscape(key), nil, &out); err != nil {
+				return err
+			}
+			if detail, ok := out.(map[string]any); ok {
+				return print(detail["plan"])
+			}
+			return print(out)
+		}
+		var out any
+		if err := c.do(ctx, "PUT", "/teams/"+url.PathEscape(key)+"/plan",
+			map[string]any{"plan": set}, &out); err != nil {
 			return err
 		}
 		return print(out)
@@ -259,7 +314,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		return print(map[string]any{"revoked": key, "project": projectKey})
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, update, archive, add, remove, groups, budget, grant, revoke", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, convert, plan, update, archive, add, remove, groups, budget, grant, revoke", sub)
 	}
 }
 

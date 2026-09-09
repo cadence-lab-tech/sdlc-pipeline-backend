@@ -252,6 +252,7 @@ func TestTokensAndPermissions(t *testing.T) {
 	}
 
 	// Последнего администратора проекта снять нельзя.
+	mustActor(t, store, "user:owner")
 	if _, err := auth.SetMember(ctx, admin, "SDLC", "user:owner", domain.MemberAdmin, nil); err != nil {
 		t.Fatal(err)
 	}

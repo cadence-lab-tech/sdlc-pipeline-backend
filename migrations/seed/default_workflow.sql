@@ -13,13 +13,21 @@ DECLARE
     st_rev     uuid; st_qa  uuid; st_done uuid; st_cancel uuid;
     r_analyst  uuid; r_architect uuid; r_developer uuid; r_reviewer uuid; r_qa uuid;
     ep         uuid;
+    team       uuid;
     repo_be    uuid; repo_fe uuid;
     t_be       uuid; t_fe uuid; t_multi uuid;
 BEGIN
     SELECT id INTO sys FROM principals WHERE handle = 'system';
 
-    INSERT INTO projects (key, name, description, created_by)
-    VALUES ('SDLC', 'SDLC Pipeline', 'Сам себя разрабатывающий пайплайн', sys)
+    -- Проект всегда принадлежит команде (решение 0033). У демонстрационного
+    -- проекта это организация без участников: в режиме заголовка права не
+    -- проверяются, в режиме токенов её ведёт администратор инстанса.
+    INSERT INTO teams (key, name, kind, can_create_projects, created_by)
+    VALUES ('sdlc', 'Cadence Lab', 'organization', true, sys)
+    RETURNING id INTO team;
+
+    INSERT INTO projects (key, name, description, created_by, owner_team_id)
+    VALUES ('SDLC', 'SDLC Pipeline', 'Сам себя разрабатывающий пайплайн', sys, team)
     RETURNING id INTO proj;
 
     INSERT INTO repositories (project_id, owner, name, clone_url, role_hint) VALUES

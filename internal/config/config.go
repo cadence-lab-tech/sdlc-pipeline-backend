@@ -106,6 +106,9 @@ type Config struct {
 	// становится администратором проекта; teams — администратор системы и
 	// лиды команд с правом на это (решение 0027).
 	ProjectCreation string
+	// Профиль поставки (решение 0033): shared — общий инстанс, квоты тарифа
+	// считаются; single — выделенный, пределы задаёт договор, квоты выключены.
+	Tenancy string
 	// Срок жизни сессии: она отзывается выходом, но и сама протухает —
 	// вкладку, забытую открытой на неделю, входом заново не считают.
 	SessionTTL time.Duration
@@ -159,6 +162,7 @@ func Load() (Config, error) {
 		GitHubAppClientID:     env("SDLC_GITHUB_APP_CLIENT_ID", ""),
 		GitHubAppClientSecret: env("SDLC_GITHUB_APP_CLIENT_SECRET", ""),
 		ProjectCreation:       env("SDLC_PROJECT_CREATION", "open"),
+		Tenancy:               env("SDLC_TENANCY", "shared"),
 		IndexEnabled:          true,
 		IndexInterval:         5 * time.Minute,
 		IndexStuckAfter:       30 * time.Minute,
@@ -288,6 +292,11 @@ func Load() (Config, error) {
 	case "open", "teams":
 	default:
 		return c, fmt.Errorf("SDLC_PROJECT_CREATION: %q — не open или teams", c.ProjectCreation)
+	}
+	switch c.Tenancy {
+	case "shared", "single":
+	default:
+		return c, fmt.Errorf("SDLC_TENANCY: %q — не shared или single", c.Tenancy)
 	}
 	if (c.GitHubAppClientID == "") != (c.GitHubAppClientSecret == "") {
 		return c, fmt.Errorf("SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET задаются вместе")

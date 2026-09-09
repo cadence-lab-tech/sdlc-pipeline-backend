@@ -103,7 +103,8 @@ func run() error {
 	}
 
 	auth := workflow.NewAuth(store, log, cfg.AuthMode).
-		OpenProjectCreation(cfg.ProjectCreation == "open")
+		OpenProjectCreation(cfg.ProjectCreation == "open").
+		Tenancy(cfg.Tenancy)
 	if err := auth.Bootstrap(ctx, cfg.AdminHandle, cfg.AdminToken); err != nil {
 		return err
 	}
