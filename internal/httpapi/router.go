@@ -53,6 +53,8 @@ func (s *Server) Handler() http.Handler {
 	// должен заводить принципала на каждый опрос.
 	r.GET("/healthz", s.healthz)
 	r.GET("/readyz", s.readyz)
+	// Скрипт установки CLI: curl -fsSL https://<адрес>/install.sh | sh.
+	r.GET("/install.sh", s.installScript)
 
 	// Вебхуки провайдера: подпись вместо токена.
 	r.POST("/webhooks/github", s.githubWebhook)

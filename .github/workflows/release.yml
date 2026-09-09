@@ -1,8 +1,9 @@
-# Релиз clab: бинарники под три платформы по тегу v*.
+# Релиз clab: бинарники под три платформы по тегу v*, формула в тап Homebrew.
 #
 # CLI ставят на машины разработчиков, где нет ни Go, ни доступа к GHCR, —
 # поэтому не образ, а готовые архивы в GitHub Releases. Репозиторий
-# приватный: скачивает участник организации через gh release download.
+# приватный: скачивает участник организации — brew с его токеном GitHub,
+# скрипт /install.sh с сервиса или gh release download.
 name: release
 
 on:
@@ -63,7 +64,12 @@ jobs:
   release:
     needs: [build]
     runs-on: ubuntu-latest
+    env:
+      # Секреты в условии шага недоступны, поэтому флаг считается здесь.
+      # Без ключа релиз всё равно выходит — только формула в тап не уезжает.
+      HAS_TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY != '' }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -74,8 +80,49 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
+      # Формула из тех же сумм, что в релизе. Лежит рядом с архивами и в
+      # тапе; в ассеты релиза не попадает — brew тянет из тапа.
+      - name: формула Homebrew
+        run: |
+          mkdir -p brew
+          release/brew/formula.sh "$GITHUB_REF_NAME" dist/checksums.txt > brew/clab.rb
+          cat brew/clab.rb
+
       # Черновик не нужен: тег ставится, когда релиз уже решён.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+
+      # Тап — отдельный репозиторий cadence-lab-tech/homebrew-tap; токен
+      # прогона до него не дотягивается, пушим deploy-ключом с правом
+      # записи (секрет TAP_DEPLOY_KEY). Ключи хоста GitHub берутся из его
+      # API по https, а не ssh-keyscan'ом с доверием кому попало.
+      - name: обновить тап
+        if: env.HAS_TAP_KEY == 'true'
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > ~/.ssh/known_hosts
+          git clone --depth 1 git@github.com:cadence-lab-tech/homebrew-tap.git tap
+          mkdir -p tap/Formula tap/lib
+          cp brew/clab.rb tap/Formula/clab.rb
+          cp release/brew/private_strategy.rb tap/lib/private_strategy.rb
+          cp release/brew/README.md tap/README.md
+          cd tap
+          git add -A
+          if git diff --cached --quiet; then
+            echo "формула не изменилась"
+            exit 0
+          fi
+          git -c user.name="release.yml" -c user.email="release@cadence-lab-tech.invalid" \
+            commit -m "clab ${GITHUB_REF_NAME}"
+          git push
+
+      - name: без ключа тапа
+        if: env.HAS_TAP_KEY != 'true'
+        run: echo "секрета TAP_DEPLOY_KEY нет — формула в homebrew-tap не обновлена, см. release/README.md"
