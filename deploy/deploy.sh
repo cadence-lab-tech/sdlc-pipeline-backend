@@ -38,6 +38,11 @@ sed -i "s|^${key}=.*|${key}=${registry}/sdlc-pipeline-${image}:${tag}|" .env
 docker compose pull $services
 docker compose up -d --remove-orphans
 
+# Caddyfile примонтирован в контейнер, и `up -d` его правку не замечает:
+# конфигурация не входит в то, по чему compose решает пересоздавать. Reload
+# у Caddy бесшовный, поэтому делается всегда, а не по diff'у.
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+
 # `up -d` возвращается раньше, чем сервис реально поднялся: у api есть
 # healthcheck, ждём его. У интерфейса — статика, достаточно ответа.
 echo "▸ ждём $image"
