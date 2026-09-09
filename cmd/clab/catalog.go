@@ -84,14 +84,14 @@ func cmdToken(ctx context.Context, c *Client, args []string) error {
 	case "revoke":
 		id, _ := popTask(rest)
 		if id == "" {
-			return fmt.Errorf("sdlc token revoke <id>")
+			return fmt.Errorf("clab token revoke <id>")
 		}
 		if err := c.do(ctx, "DELETE", "/auth/tokens/"+id, nil, nil); err != nil {
 			return err
 		}
 		return print(map[string]any{"revoked": id})
 	default:
-		return fmt.Errorf("sdlc token create|list|revoke")
+		return fmt.Errorf("clab token create|list|revoke")
 	}
 }
 
@@ -112,7 +112,7 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 			return nil, err
 		}
 		if len(pos) < positional {
-			return nil, fmt.Errorf("sdlc members %s: не хватает аргументов", name)
+			return nil, fmt.Errorf("clab members %s: не хватает аргументов", name)
 		}
 		return pos, nil
 	}
@@ -160,7 +160,7 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 	default:
-		return fmt.Errorf("sdlc members list|set|remove")
+		return fmt.Errorf("clab members list|set|remove")
 	}
 }
 
@@ -264,7 +264,7 @@ func cmdImportGuide(_ context.Context, _ *Client, _ []string) error {
 func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	sub, rest := popTask(args)
 	if sub != "add" {
-		return fmt.Errorf("sdlc repo add owner/name [--hint backend] [--branch main]")
+		return fmt.Errorf("clab repo add owner/name [--hint backend] [--branch main]")
 	}
 	repo, rest := popTask(rest)
 	var projectFlag, hint, branch, watch string
@@ -310,7 +310,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		if roleKey == "" {
-			return fmt.Errorf("sdlc role show <key>")
+			return fmt.Errorf("clab role show <key>")
 		}
 		key, err := project(fs, projectFlag)
 		if err != nil {
@@ -372,7 +372,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 	default:
-		return fmt.Errorf("sdlc role show|put")
+		return fmt.Errorf("clab role show|put")
 	}
 }
 
@@ -408,7 +408,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		if id == "" {
-			return fmt.Errorf("sdlc doc get <id>")
+			return fmt.Errorf("clab doc get <id>")
 		}
 		key, err := project(fs, projectFlag)
 		if err != nil {
@@ -474,7 +474,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(map[string]any{"deleted": id})
 	default:
-		return fmt.Errorf("sdlc doc list|get|put|delete")
+		return fmt.Errorf("clab doc list|get|put|delete")
 	}
 }
 
@@ -505,7 +505,7 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 	case "validate", "activate":
 		id, _ := popTask(rest)
 		if id == "" {
-			return fmt.Errorf("sdlc workflow %s <id>", sub)
+			return fmt.Errorf("clab workflow %s <id>", sub)
 		}
 		var out any
 		if sub == "validate" {
@@ -517,7 +517,7 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 	default:
-		return fmt.Errorf("sdlc workflow list|validate|activate")
+		return fmt.Errorf("clab workflow list|validate|activate")
 	}
 }
 
@@ -574,6 +574,6 @@ const importGuide = `Перенос правил команды в проект 
     "roles":[{"key":"reviewer","name":"Ревьюер","instructions":"...",
               "output_contract":[{"kind":"review.verdict","format":"json","required":true}]}],
     "documents":[{"kind":"guideline","title":"Соглашения","content":"..."}]}
-4. sdlc import --file bundle.json --dry-run  -> покажи отчёт человеку.
-5. sdlc import --file bundle.json            -> примени.
+4. clab import --file bundle.json --dry-run  -> покажи отчёт человеку.
+5. clab import --file bundle.json            -> примени.
 Ничего не сочиняй: скажи, чего в репозитории не нашлось.`

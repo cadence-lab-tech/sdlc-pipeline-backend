@@ -1,4 +1,4 @@
-// Команда sdlc — CLI для CI и не-MCP клиентов.
+// Команда clab — CLI для CI и не-MCP клиентов.
 //
 // Те же операции, что и у MCP-тулов, только транспорт другой: локальный агент
 // ходит по MCP, скрипт сборки — сюда. Логики цикла здесь нет и быть не должно.
@@ -33,42 +33,42 @@ type command struct {
 
 func commands() []command {
 	return []command{
-		{"whoami", "кто я и к какому проекту подключён", "sdlc whoami", cmdWhoami},
-		{"queue", "что сейчас можно забрать", "sdlc queue [--role reviewer] [--status analysis]", cmdQueue},
-		{"tasks", "задачи проекта", "sdlc tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
-		{"show", "состояние задачи глазами агента", "sdlc show SDLC-42", cmdShow},
-		{"create", "завести задачу или эпик", "sdlc create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot]", cmdCreate},
-		{"relate", "связать задачи порядком или контекстом", "sdlc relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
-		{"assign", "назначить задачу исполнителю", "sdlc assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
-		{"usage", "отчитаться о стоимости прогона или показать её", "sdlc usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | sdlc usage SDLC-4 --show", cmdUsage},
-		{"claim", "забрать задачу и получить контекст этапа", "sdlc claim SDLC-42 [--session ref]", cmdClaim},
-		{"heartbeat", "продлить аренду", "sdlc heartbeat SDLC-42", cmdHeartbeat},
-		{"release", "отпустить задачу, не завершив этап", "sdlc release SDLC-42 [--note ...]", cmdRelease},
-		{"submit", "сдать артефакт", "sdlc submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
-		{"link", "привязать PR, ветку или коммит", "sdlc link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
-		{"scope", "расширить область задачи", "sdlc scope SDLC-42 --add acme/web --reason ...", cmdScope},
-		{"gates", "что мешает переходу", "sdlc gates SDLC-42 [--transition analysis_done]", cmdGates},
-		{"transition", "запросить переход", "sdlc transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file]", cmdTransition},
-		{"decide", "закрыть гейт решением", "sdlc decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
-		{"search", "поиск по коду, артефактам и документам проекта", "sdlc search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
-		{"index", "состояние индекса репозиториев", "sdlc index [--project SDLC]", cmdIndex},
-		{"drift", "открытые расхождения задачи", "sdlc drift SDLC-42", cmdDrift},
-		{"resolve-drift", "закрыть сигнал дрейфа", "sdlc resolve-drift <signal-id> --resolution resolved [--note ...]", cmdResolveDrift},
-		{"metrics", "метрики цикла: где застревают задачи, какие гейты валятся", "sdlc metrics [--period 30d]", cmdMetrics},
+		{"whoami", "кто я и к какому проекту подключён", "clab whoami", cmdWhoami},
+		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
+		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
+		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
+		{"create", "завести задачу или эпик", "clab create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot]", cmdCreate},
+		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
+		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
+		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
+		{"claim", "забрать задачу и получить контекст этапа", "clab claim SDLC-42 [--session ref]", cmdClaim},
+		{"heartbeat", "продлить аренду", "clab heartbeat SDLC-42", cmdHeartbeat},
+		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
+		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
+		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
+		{"scope", "расширить область задачи", "clab scope SDLC-42 --add acme/web --reason ...", cmdScope},
+		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
+		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file]", cmdTransition},
+		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
+		{"search", "поиск по коду, артефактам и документам проекта", "clab search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
+		{"index", "состояние индекса репозиториев", "clab index [--project SDLC]", cmdIndex},
+		{"drift", "открытые расхождения задачи", "clab drift SDLC-42", cmdDrift},
+		{"resolve-drift", "закрыть сигнал дрейфа", "clab resolve-drift <signal-id> --resolution resolved [--note ...]", cmdResolveDrift},
+		{"metrics", "метрики цикла: где застревают задачи, какие гейты валятся", "clab metrics [--period 30d]", cmdMetrics},
 
-		{"me", "кто я по токену, где состою", "sdlc me", cmdMe},
-		{"token", "выдать, перечислить или отозвать токен", "sdlc token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | sdlc token list [--project SDLC] | sdlc token revoke <id>", cmdToken},
-		{"members", "участники проекта и их уровни", "sdlc members [list] | sdlc members set user:alice agent [--roles developer,reviewer] | sdlc members remove user:alice", cmdMembers},
-		{"team", "команды: состав, группы провайдера, права на проекты", "sdlc team list | sdlc team show platform | sdlc team create platform --name Платформа [--can-create-projects] | sdlc team add platform user:alice --role lead | sdlc team groups platform --set sdlc-platform | sdlc team grant platform --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
-		{"project", "проекты: список, создание, команды и доступ к GitHub", "sdlc project list | sdlc project create ACME --name \"Проект\" [--team platform] | sdlc project teams | sdlc project github --installation 42 | sdlc project github --check", cmdProject},
+		{"me", "кто я по токену, где состою", "clab me", cmdMe},
+		{"token", "выдать, перечислить или отозвать токен", "clab token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | clab token list [--project SDLC] | clab token revoke <id>", cmdToken},
+		{"members", "участники проекта и их уровни", "clab members [list] | clab members set user:alice agent [--roles developer,reviewer] | clab members remove user:alice", cmdMembers},
+		{"team", "команды: состав, группы провайдера, права на проекты", "clab team list | clab team show platform | clab team create platform --name Платформа [--can-create-projects] | clab team add platform user:alice --role lead | clab team groups platform --set sdlc-platform | clab team grant platform --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
+		{"project", "проекты: список, создание, команды и доступ к GitHub", "clab project list | clab project create ACME --name \"Проект\" [--team platform] | clab project teams | clab project github --installation 42 | clab project github --check", cmdProject},
 
-		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "sdlc export [--project SDLC] > bundle.json", cmdExport},
-		{"import", "применить связку к проекту или раздать её нескольким", "sdlc import --file bundle.json [--dry-run] | sdlc import --from SDLC --to ACME,WEB", cmdImport},
-		{"import-guide", "инструкция агенту по переносу правил команды", "sdlc import-guide", cmdImportGuide},
-		{"repo", "привязать репозиторий к проекту", "sdlc repo add acme/api [--hint backend] [--branch main]", cmdRepo},
-		{"role", "показать роль или завести версию инструкции", "sdlc role show analyst | sdlc role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
-		{"doc", "проектные документы", "sdlc doc list | sdlc doc put --kind guideline --title Соглашения --file CLAUDE.md | sdlc doc get <id>", cmdDoc},
-		{"workflow", "версии цикла: список, проверка, активация черновика", "sdlc workflow list | sdlc workflow validate <id> | sdlc workflow activate <id>", cmdWorkflow},
+		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "clab export [--project SDLC] > bundle.json", cmdExport},
+		{"import", "применить связку к проекту или раздать её нескольким", "clab import --file bundle.json [--dry-run] | clab import --from SDLC --to ACME,WEB", cmdImport},
+		{"import-guide", "инструкция агенту по переносу правил команды", "clab import-guide", cmdImportGuide},
+		{"repo", "привязать репозиторий к проекту", "clab repo add acme/api [--hint backend] [--branch main]", cmdRepo},
+		{"role", "показать роль или завести версию инструкции", "clab role show analyst | clab role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
+		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
+		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
 	}
 }
 
@@ -98,11 +98,11 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "sdlc — работа с циклом разработки из CI и скриптов\n\n")
+	fmt.Fprint(os.Stderr, "clab — Cadence Lab: работа с циклом разработки из CI и скриптов\n\n")
 	for _, cmd := range commands() {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", cmd.name, cmd.summary)
 	}
-	fmt.Fprintln(os.Stderr, "\nsdlc <команда> --help — аргументы команды")
+	fmt.Fprintln(os.Stderr, "\nclab <команда> --help — аргументы команды")
 	fmt.Fprintln(os.Stderr, "\nАдрес API — SDLC_API_URL, токен — SDLC_TOKEN (без него действующее")
 	fmt.Fprintln(os.Stderr, "лицо берётся из SDLC_ACTOR), проект по умолчанию — SDLC_PROJECT.")
 }
@@ -138,7 +138,7 @@ func print(v any) error {
 // popTask отделяет ключ задачи от флагов.
 //
 // Пакет flag прекращает разбор на первом позиционном аргументе, а ключ задачи
-// читается первым: "sdlc claim SDLC-42 --session x" должно работать, потому
+// читается первым: "clab claim SDLC-42 --session x" должно работать, потому
 // что именно так эту команду и пишут.
 func popTask(args []string) (string, []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -301,7 +301,7 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 	}
 	if session == "" {
 		host, _ := os.Hostname()
-		session = host + "/sdlc-cli"
+		session = host + "/clab-cli"
 	}
 
 	var out any
@@ -685,7 +685,7 @@ func cmdSearch(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	if query == "" {
-		return errors.New("не указан запрос: sdlc search \"как устроена ротация токенов\"")
+		return errors.New("не указан запрос: clab search \"как устроена ротация токенов\"")
 	}
 	key, err := project(fs, projectFlag)
 	if err != nil {

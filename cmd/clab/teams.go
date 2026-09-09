@@ -30,7 +30,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		if key == "" {
-			return fmt.Errorf("sdlc team show <ключ команды>")
+			return fmt.Errorf("clab team show <ключ команды>")
 		}
 		var out any
 		if err := c.get(ctx, "/teams/"+url.PathEscape(key), nil, &out); err != nil {
@@ -110,7 +110,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		if key == "" {
-			return fmt.Errorf("sdlc team archive <ключ команды>")
+			return fmt.Errorf("clab team archive <ключ команды>")
 		}
 		if err := c.do(ctx, "DELETE", "/teams/"+url.PathEscape(key), nil, nil); err != nil {
 			return err
@@ -129,7 +129,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" || principal == "" {
 			fs.Usage()
-			return fmt.Errorf("sdlc team add <команда> <user:alice> [--role lead]")
+			return fmt.Errorf("clab team add <команда> <user:alice> [--role lead]")
 		}
 		var out any
 		if err := c.do(ctx, "PUT", "/teams/"+url.PathEscape(key)+"/members",
@@ -145,7 +145,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		if key == "" || principal == "" {
-			return fmt.Errorf("sdlc team remove <команда> <user:alice>")
+			return fmt.Errorf("clab team remove <команда> <user:alice>")
 		}
 		if err := c.do(ctx, "DELETE",
 			"/teams/"+url.PathEscape(key)+"/members/"+url.PathEscape(principal), nil, nil); err != nil {
@@ -166,7 +166,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" || (set == "" && !clear) {
 			fs.Usage()
-			return fmt.Errorf("sdlc team groups <команда> --set sdlc-platform,sdlc-core")
+			return fmt.Errorf("clab team groups <команда> --set sdlc-platform,sdlc-core")
 		}
 		groups := []string{}
 		if !clear {
@@ -192,7 +192,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" {
 			fs.Usage()
-			return fmt.Errorf("sdlc team budget <команда> [--period month --limit 500]")
+			return fmt.Errorf("clab team budget <команда> [--period month --limit 500]")
 		}
 		if period == "" {
 			var out any
@@ -221,7 +221,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" || level == "" {
 			fs.Usage()
-			return fmt.Errorf("sdlc team grant <команда> --project SDLC --level maintainer")
+			return fmt.Errorf("clab team grant <команда> --project SDLC --level maintainer")
 		}
 		projectKey, err := project(fs, projectFlag)
 		if err != nil {
@@ -245,7 +245,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" {
 			fs.Usage()
-			return fmt.Errorf("sdlc team revoke <команда> --project SDLC")
+			return fmt.Errorf("clab team revoke <команда> --project SDLC")
 		}
 		projectKey, err := project(fs, projectFlag)
 		if err != nil {
@@ -290,7 +290,7 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		}
 		if key == "" || name == "" {
 			fs.Usage()
-			return fmt.Errorf("sdlc project create <КЛЮЧ> --name \"Название\" [--team platform]")
+			return fmt.Errorf("clab project create <КЛЮЧ> --name \"Название\" [--team platform]")
 		}
 		body := map[string]any{"key": key, "name": name, "team": team}
 		if description != "" {

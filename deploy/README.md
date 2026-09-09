@@ -120,7 +120,7 @@ curl https://<домен>/readyz          # {"status":"ok","database":"ok"}
 
 Первый вход — токеном администратора: `./devops/bin/remote-run.sh 'grep
 ^SDLC_ADMIN_TOKEN= .env'` (в переписку с агентом не выносить). Дальше —
-`sdlc members set`, проекты заводят сами коллеги.
+`clab members set`, проекты заводят сами коллеги.
 
 Локальный агент коллеги:
 
