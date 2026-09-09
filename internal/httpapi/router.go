@@ -66,6 +66,10 @@ func (s *Server) Handler() http.Handler {
 	// секрет клиента живёт у него.
 	r.GET("/v1/auth/github", s.githubSettings)
 	r.POST("/v1/auth/github/login", s.githubLogin)
+	// Вход CLI через браузер (решение 0032): запрос заводит и опрашивает
+	// CLI без токена, подтверждает — вошедший из интерфейса.
+	r.POST("/v1/auth/cli", s.cliLoginStart)
+	r.POST("/v1/auth/cli/poll", s.cliLoginPoll)
 
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)
@@ -82,6 +86,8 @@ func (s *Server) Handler() http.Handler {
 		// Выход отзывает предъявленную сессию; выданный руками токен так не
 		// отзывается — он отзывается по имени из списка.
 		v1.POST("/auth/logout", s.logout)
+		v1.GET("/auth/cli/:code", s.cliLoginShow)
+		v1.POST("/auth/cli/:code", s.cliLoginDecide)
 
 		// Команды: группы принципалов с правами на проекты (решение 0027).
 		// Права разные у каждой ручки — их проверяет сам сервис.

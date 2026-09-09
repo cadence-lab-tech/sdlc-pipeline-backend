@@ -136,11 +136,24 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 плюс полнотекст; без ключа Voyage остаётся полнотекстовым, и агент видит это в
 поле `mode`.
 
-Те же операции для CI и не-MCP клиентов даёт CLI:
+Те же операции для людей, CI и не-MCP клиентов даёт CLI `clab`. Человек
+входит через браузер, как в `gh`, и дальше работает из каталога
+репозитория — проект находится по `origin`:
+
+```bash
+clab auth login --host https://sdlc.example.com   # код в терминале, подтверждение в браузере
+clab auth status
+cd ~/src/api                                      # репозиторий привязан к проекту
+clab tasks                                        # таблица; --json — ответ сервера как есть
+clab show SDLC-1
+clab mcp install                                  # claude mcp add с тем же токеном
+```
+
+Скрипты и CI обходятся без конфига — переменные окружения перекрывают его:
 
 ```bash
 export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:analyst-bot
-./bin/clab queue --role analyst
+./bin/clab --json queue --role analyst
 ./bin/clab claim SDLC-1
 ./bin/clab submit SDLC-1 --kind analysis.brief --title "Разбор" --file brief.md
 ./bin/clab gates SDLC-1 --transition analysis_done
@@ -149,12 +162,20 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 ./bin/clab index
 ```
 
+Готовые бинарники под darwin, linux и windows лежат в релизах репозитория
+(`.github/workflows/release.yml`, тег `v*`):
+
+```bash
+gh release download --repo cadence-lab-tech/sdlc-pipeline-backend \
+    --pattern 'clab_*_darwin_arm64.tar.gz' && tar -xzf clab_*_darwin_arm64.tar.gz
+```
+
 ## Структура
 
 ```
 cmd/api/            HTTP-сервер: REST и MCP на одних сервисах
 cmd/worker/         аренды, индексация, детектор дрейфа, состояние PR
-cmd/clab/           CLI для агентов и CI
+cmd/clab/           CLI для людей, агентов и CI
 internal/
   config/           настройки из окружения
   apperr/           ошибки домена с кодом, общим для REST и MCP

@@ -446,3 +446,75 @@ func (s *Server) githubWebhook(c *gin.Context) {
 		"queued", out.Queued, "touched", out.Touched, "duplicate", out.Duplicate, "ignored", out.Ignored)
 	c.JSON(http.StatusOK, out)
 }
+
+// ── вход CLI через браузер ──────────────────────────────────────────────────
+
+type cliLoginStartRequest struct {
+	// Подпись запроса — «clab на macbook»; так же назовётся токен.
+	Label string `json:"label"`
+	// Срок токена в днях; 0 — бессрочно.
+	TokenDays int `json:"token_days"`
+}
+
+// cliLoginStart заводит запрос входа. Ручка открытая: у CLI токена ещё нет.
+func (s *Server) cliLoginStart(c *gin.Context) {
+	var req cliLoginStartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	start, err := s.auth.StartCLILogin(c.Request.Context(), req.Label, req.TokenDays)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusCreated, start)
+}
+
+type cliLoginPollRequest struct {
+	PollSecret string `json:"poll_secret" binding:"required"`
+}
+
+// cliLoginPoll — опрос запроса секретом CLI; токен приходит один раз.
+func (s *Server) cliLoginPoll(c *gin.Context) {
+	var req cliLoginPollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	out, err := s.auth.PollCLILogin(c.Request.Context(), req.PollSecret)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// cliLoginShow — запрос для страницы подтверждения.
+func (s *Server) cliLoginShow(c *gin.Context) {
+	req, err := s.auth.CLILoginByCode(c.Request.Context(), identity(c), c.Param("code"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"request": req, "status": req.Status(time.Now())})
+}
+
+type cliLoginDecideRequest struct {
+	Approve bool `json:"approve"`
+}
+
+// cliLoginDecide подтверждает или отклоняет запрос от имени вошедшего.
+func (s *Server) cliLoginDecide(c *gin.Context) {
+	var req cliLoginDecideRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	out, err := s.auth.ApproveCLILogin(c.Request.Context(), identity(c), c.Param("code"), req.Approve)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"request": out, "status": out.Status(time.Now())})
+}

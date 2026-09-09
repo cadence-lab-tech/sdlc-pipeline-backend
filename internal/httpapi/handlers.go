@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -24,6 +25,27 @@ func (s *Server) listProjects(c *gin.Context) {
 	if err != nil {
 		fail(c, s.log, err)
 		return
+	}
+	// ?repo=owner/name — проекты, к которым привязан репозиторий: так CLI
+	// узнаёт проект по git remote текущего каталога.
+	if repo := strings.TrimSpace(c.Query("repo")); repo != "" {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || owner == "" || name == "" {
+			fail(c, s.log, apperr.InvalidInput("repo: ожидается owner/name"))
+			return
+		}
+		ids, err := s.store.ProjectIDsByRepository(c.Request.Context(), s.store.DB(), owner, name)
+		if err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		filtered := projects[:0]
+		for _, p := range projects {
+			if _, ok := ids[p.ID]; ok {
+				filtered = append(filtered, p)
+			}
+		}
+		projects = filtered
 	}
 	c.JSON(http.StatusOK, gin.H{"projects": projects})
 }

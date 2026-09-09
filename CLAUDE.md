@@ -30,7 +30,7 @@ MCP — официальный `github.com/modelcontextprotocol/go-sdk`, схе�
 ```
 cmd/api/            HTTP-сервер: REST и MCP на одних сервисах
 cmd/worker/         аренды, индексация, детектор дрейфа, состояние PR
-cmd/clab/           CLI для агентов и CI
+cmd/clab/           CLI: вход через браузер, конфиг по хостам, проект из git remote
 cmd/clab-runner/    раннер саб-агентов: опрашивает очередь и поднимает агента
 internal/
   config/           настройки из окружения (SDLC_*)
@@ -407,6 +407,12 @@ MCP и CLI, вебхуки GitHub, вынос крупного содержим�
 `sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_report_usage` и промпт
 `work_on_task`, адресное назначение, учёт стоимости прогонов с разрезом в
 метриках, раннер саб-агентов `cmd/clab-runner`.
+
+Фаза 7, CLI как `gh` ([решение 0032](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0032-cli-login-device-flow.md)):
+`clab auth login` — device flow поверх интерфейса (`cli_login_requests`,
+`POST /v1/auth/cli`, страница `/login/cli`), конфиг `~/.config/clab` по
+хостам, проект по `origin` через `GET /v1/projects?repo=`, `clab mcp
+install`, таблицы для команд чтения и `--json`, релизы `release.yml`.
 
 Сквозной проход задачи по всему циклу проверяется `dev/e2e.sh` — включая
 возврат результата ревьюером и повторную перепроверку после доработки. Проход

@@ -19,11 +19,11 @@ func cmdMe(ctx context.Context, c *Client, args []string) error {
 	if _, err := flags("me", args, func(*flag.FlagSet) {}); err != nil {
 		return err
 	}
-	var out any
+	var out json.RawMessage
 	if err := c.get(ctx, "/auth/me", nil, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderMe, out))
 }
 
 func cmdToken(ctx context.Context, c *Client, args []string) error {
@@ -76,11 +76,11 @@ func cmdToken(ctx context.Context, c *Client, args []string) error {
 		if projectFlag != "" {
 			q.Set("project", projectFlag)
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/auth/tokens", q, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderTokens, out))
 	case "revoke":
 		id, _ := popTask(rest)
 		if id == "" {
@@ -123,7 +123,7 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		key, err := project(nil, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -138,7 +138,7 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		key, err := project(nil, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -150,15 +150,15 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 		if _, err := parse("list", 0); err != nil {
 			return err
 		}
-		key, err := project(nil, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/projects/"+key+"/members", nil, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderMembers, out))
 	default:
 		return fmt.Errorf("clab members list|set|remove")
 	}
@@ -168,13 +168,13 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 
 func cmdExport(ctx context.Context, c *Client, args []string) error {
 	var projectFlag string
-	fs, err := flags("export", args, func(fs *flag.FlagSet) {
+	_, err := flags("export", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 	})
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -196,7 +196,7 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 func cmdImport(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, file, from, to string
 	var dryRun bool
-	fs, err := flags("import", args, func(fs *flag.FlagSet) {
+	_, err := flags("import", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&file, "file", "", "связка JSON; - читает stdin")
 		fs.StringVar(&from, "from", "", "взять связку из проекта-шаблона вместо файла")
@@ -209,7 +209,7 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 
 	targets := splitCSV(to)
 	if len(targets) == 0 {
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -268,7 +268,7 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	}
 	repo, rest := popTask(rest)
 	var projectFlag, hint, branch, watch string
-	fs, err := flags("repo", rest, func(fs *flag.FlagSet) {
+	_, err := flags("repo", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&hint, "hint", "", "за что отвечает: backend, frontend, docs, infra")
 		fs.StringVar(&branch, "branch", "", "основная ветка")
@@ -280,7 +280,7 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	if repo == "" {
 		return fmt.Errorf("не указан репозиторий: owner/name или URL")
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -303,7 +303,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 	case "show":
 		roleKey, rest := popTask(rest)
 		var projectFlag string
-		fs, err := flags("role", rest, func(fs *flag.FlagSet) {
+		_, err := flags("role", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
@@ -312,7 +312,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		if roleKey == "" {
 			return fmt.Errorf("clab role show <key>")
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -323,7 +323,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		return print(out)
 	case "put":
 		var projectFlag, roleKey, name, summary, file, contract, inputs, changelog string
-		fs, err := flags("role", rest, func(fs *flag.FlagSet) {
+		_, err := flags("role", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.StringVar(&roleKey, "key", "", "ключ роли")
 			fs.StringVar(&name, "name", "", "название")
@@ -339,7 +339,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		if roleKey == "" {
 			return fmt.Errorf("не указан --key")
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -383,13 +383,13 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 	switch sub {
 	case "list", "":
 		var projectFlag string
-		fs, err := flags("doc", rest, func(fs *flag.FlagSet) {
+		_, err := flags("doc", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
 			return err
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -401,7 +401,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 	case "get":
 		id, rest := popTask(rest)
 		var projectFlag string
-		fs, err := flags("doc", rest, func(fs *flag.FlagSet) {
+		_, err := flags("doc", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
@@ -410,7 +410,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 		if id == "" {
 			return fmt.Errorf("clab doc get <id>")
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 		return nil
 	case "put":
 		var projectFlag, kind, title, file, link, repo, repoPath string
-		fs, err := flags("doc", rest, func(fs *flag.FlagSet) {
+		_, err := flags("doc", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.StringVar(&kind, "kind", "", "guideline | architecture | adr | api_registry | glossary | runbook")
 			fs.StringVar(&title, "title", "", "название")
@@ -437,7 +437,7 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 		if kind == "" || title == "" {
 			return fmt.Errorf("нужны --kind и --title")
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -459,13 +459,13 @@ func cmdDoc(ctx context.Context, c *Client, args []string) error {
 	case "delete":
 		id, rest := popTask(rest)
 		var projectFlag string
-		fs, err := flags("doc", rest, func(fs *flag.FlagSet) {
+		_, err := flags("doc", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
 			return err
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -487,13 +487,13 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 	switch sub {
 	case "list", "":
 		var projectFlag string
-		fs, err := flags("workflow", rest, func(fs *flag.FlagSet) {
+		_, err := flags("workflow", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		})
 		if err != nil {
 			return err
 		}
-		key, err := project(fs, projectFlag)
+		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
 		}
@@ -525,14 +525,14 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 
 func cmdMetrics(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, period string
-	fs, err := flags("metrics", args, func(fs *flag.FlagSet) {
+	_, err := flags("metrics", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&period, "period", "", "окно назад: 30d, 12h")
 	})
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}

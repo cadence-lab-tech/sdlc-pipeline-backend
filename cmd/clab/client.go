@@ -16,22 +16,51 @@ import (
 // Client — тонкая обёртка над REST. CLI не знает правил цикла: он только
 // перекладывает аргументы в запрос и печатает ответ (решение 0011).
 type Client struct {
-	base  string
-	actor string
-	// Токен доступа (SDLC_TOKEN). С ним заголовок актора не нужен: кто
-	// пришёл, определяет токен (решение 0021).
-	token string
-	http  *http.Client
+	base string
+	// Адрес интерфейса без /v1: от него считаются MCP и страница
+	// подтверждения входа.
+	origin string
+	actor  string
+	// Токен доступа. С ним заголовок актора не нужен: кто пришёл, определяет
+	// токен (решение 0021).
+	token   string
+	http    *http.Client
+	globals globals
+	// Откуда взялись адрес и токен — для подсказок в ошибках.
+	source string
 }
 
-func NewClient() *Client {
-	base := env("SDLC_API_URL", "http://localhost:8088/v1")
-	return &Client{
-		base:  strings.TrimRight(base, "/"),
-		actor: env("SDLC_ACTOR", "agent:"+env("USER", "sdlc-cli")),
-		token: env("SDLC_TOKEN", ""),
-		http:  &http.Client{Timeout: 60 * time.Second},
+// NewClient собирает клиент из окружения и конфига (решение 0032):
+// SDLC_API_URL и SDLC_TOKEN перекрывают конфиг; без них — хост из --host
+// или хост по умолчанию с его токеном; совсем без всего — локальная сборка.
+func NewClient(g globals) (*Client, error) {
+	c := &Client{
+		actor:   env("SDLC_ACTOR", "agent:"+env("USER", "sdlc-cli")),
+		token:   env("SDLC_TOKEN", ""),
+		http:    &http.Client{Timeout: 60 * time.Second},
+		globals: g,
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	host, origin, hc, found, err := resolveHost(cfg, g)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case origin != "":
+		c.origin = origin
+		c.source = host
+	default:
+		c.origin = "http://localhost:8088"
+		c.source = "localhost (адрес не задан)"
+	}
+	c.base = c.origin + "/v1"
+	if c.token == "" && found {
+		c.token = hc.Token
+	}
+	return c, nil
 }
 
 // APIError — ошибка домена, пришедшая с сервера. Код совпадает с таблицей
@@ -65,11 +94,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	} else {
-		req.Header.Set("X-SDLC-Actor", c.actor)
-	}
+	c.authorize(req)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -102,6 +127,14 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	return json.Unmarshal(raw, out)
 }
 
+func (c *Client) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	} else {
+		req.Header.Set("X-SDLC-Actor", c.actor)
+	}
+}
+
 func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
 	if len(query) > 0 {
 		path += "?" + query.Encode()
@@ -119,11 +152,7 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	} else {
-		req.Header.Set("X-SDLC-Actor", c.actor)
-	}
+	c.authorize(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -137,6 +166,35 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 		return nil, &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
 	}
 	return raw, nil
+}
+
+// project — какой проект имеется в виду: флаг, SDLC_PROJECT, иначе проект,
+// к которому привязан репозиторий текущего каталога.
+func (c *Client) project(ctx context.Context, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if key := os.Getenv("SDLC_PROJECT"); key != "" {
+		return key, nil
+	}
+	key, err := c.projectByRemote(ctx)
+	if err != nil {
+		return "", err
+	}
+	if key != "" {
+		return key, nil
+	}
+	return "", fmt.Errorf("не указан проект: --project, SDLC_PROJECT или каталог репозитория, привязанного к проекту")
+}
+
+func query(pairs ...string) url.Values {
+	q := url.Values{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			q.Set(pairs[i], pairs[i+1])
+		}
+	}
+	return q
 }
 
 func env(key, def string) string {

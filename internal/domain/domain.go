@@ -136,6 +136,42 @@ const (
 	TokenSession = "session"
 )
 
+// CLILoginRequest — запрос входа CLI через браузер (решение 0032). CLI
+// показывает UserCode, человек подтверждает его в интерфейсе, CLI забирает
+// токен по своему секрету; секрета в записи нет, только его хеш.
+type CLILoginRequest struct {
+	ID       uuid.UUID `json:"id"`
+	UserCode string    `json:"user_code"`
+	Label    string    `json:"label"`
+	// Срок токена в днях, о котором просит CLI; 0 — бессрочно.
+	TokenDays      int            `json:"token_days"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	ApprovedBy     *uuid.UUID     `json:"approved_by,omitempty"`
+	ApprovedHandle *string        `json:"approved_handle,omitempty"`
+	ApprovedKind   *PrincipalKind `json:"approved_kind,omitempty"`
+	ApprovedAt     *time.Time     `json:"approved_at,omitempty"`
+	DeniedAt       *time.Time     `json:"denied_at,omitempty"`
+	ConsumedAt     *time.Time     `json:"consumed_at,omitempty"`
+}
+
+// Status — состояние запроса словом, как его видят CLI и страница
+// подтверждения: pending, approved, denied, expired, consumed.
+func (r CLILoginRequest) Status(now time.Time) string {
+	switch {
+	case r.ConsumedAt != nil:
+		return "consumed"
+	case r.DeniedAt != nil:
+		return "denied"
+	case r.ApprovedAt != nil:
+		return "approved"
+	case !now.Before(r.ExpiresAt):
+		return "expired"
+	default:
+		return "pending"
+	}
+}
+
 // TeamBudget — предел стоимости команды за окно (решение 0027). Расход —
 // стоимость прогонов в проектах, которыми команда владеет.
 type TeamBudget struct {

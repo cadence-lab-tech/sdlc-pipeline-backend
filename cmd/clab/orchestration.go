@@ -16,7 +16,7 @@ import (
 func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, title, description, taskType, parent, priority, assignee string
 	var repos, labels, blocks, properties string
-	fs, err := flags("create", args, func(fs *flag.FlagSet) {
+	_, err := flags("create", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&title, "title", "", "заголовок задачи")
 		fs.StringVar(&description, "description", "", "описание")
@@ -32,7 +32,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	key, err := project(fs, projectFlag)
+	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
@@ -73,11 +73,11 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		body["properties"] = props
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.do(ctx, "POST", "/projects/"+key+"/tasks", body, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderTask, out))
 }
 
 func cmdRelate(ctx context.Context, c *Client, args []string) error {
