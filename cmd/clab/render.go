@@ -396,6 +396,60 @@ func deref(n *int) int {
 	return *n
 }
 
+// renderGitHubCheck — проверка доступа к репозиториям проекта: есть ли он и
+// чем проверяли (решение 0034).
+func renderGitHubCheck(raw json.RawMessage) error {
+	var out struct {
+		AppConfigured bool `json:"app_configured"`
+		Repositories  []struct {
+			Repository     string `json:"repository"`
+			OK             bool   `json:"ok"`
+			Error          string `json:"error"`
+			Source         string `json:"source"`
+			InstallationID *int64 `json:"installation_id"`
+			CredentialRef  string `json:"credential_ref"`
+		} `json:"repositories"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	if !out.AppConfigured {
+		fmt.Println("Приложение у инстанса не настроено: установки не выписывают токенов.")
+	}
+	t := newTable("РЕПОЗИТОРИЙ", "ДОСТУП", "ЧЕМ ПРОВЕРЯЛИ", "ЧТО НЕ ТАК")
+	for _, r := range out.Repositories {
+		access := "есть"
+		if !r.OK {
+			access = "нет"
+		}
+		t.add(r.Repository, access, credentialSource(r.Source, r.InstallationID, r.CredentialRef), dash(r.Error))
+	}
+	t.print()
+	return nil
+}
+
+// credentialSource — подпись источника учётных данных, как в настройках
+// проекта. Незнакомое значение показывается как есть: сервер новее CLI.
+func credentialSource(source string, installation *int64, ref string) string {
+	id := ""
+	if installation != nil {
+		id = fmt.Sprint(*installation)
+	}
+	switch source {
+	case "repository_secret":
+		return "секрет репозитория " + ref
+	case "repository_installation":
+		return "установка репозитория " + id
+	case "project_installation":
+		return "установка проекта " + id
+	case "project_secret":
+		return "секрет проекта " + ref
+	case "instance":
+		return "токен инстанса"
+	}
+	return dash(source)
+}
+
 func renderMe(raw json.RawMessage) error {
 	var me struct {
 		Mode          string `json:"mode"`

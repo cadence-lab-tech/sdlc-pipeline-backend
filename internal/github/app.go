@@ -177,21 +177,62 @@ func LoadApp(baseURL, appID, keyFile string) (*App, error) {
 // ── выбор учётных данных ────────────────────────────────────────────────────
 
 // Credentials — чем ходить в провайдера за конкретным репозиторием.
-// Заполняются из проекта и самого репозитория; пустые означают общий токен
-// инстанса.
+// Выбирает их CredentialRefs.Resolve; пустые означают общий токен инстанса.
 type Credentials struct {
-	// Установка приложения в организации проекта.
+	// Установка приложения — репозитория или проекта.
 	InstallationID *int64
 	// Имя секрета в окружении: запасной путь для GitHub Enterprise без
 	// приложения. В базе лежит имя, значение приезжает из окружения.
 	SecretRef string
 }
 
-// Provider выдаёт клиента с нужными учётными данными.
+// CredentialSource — откуда взяты учётные данные репозитория. Значения —
+// часть протокола: их отдаёт проверка доступа и показывает интерфейс.
+type CredentialSource string
+
+const (
+	SourceRepositorySecret       CredentialSource = "repository_secret"
+	SourceRepositoryInstallation CredentialSource = "repository_installation"
+	SourceProjectInstallation    CredentialSource = "project_installation"
+	SourceProjectSecret          CredentialSource = "project_secret"
+	SourceInstance               CredentialSource = "instance"
+)
+
+// CredentialRefs — всё, что репозиторий и проект объявили о доступе к
+// провайдеру: имена секретов и номера установок, без значений.
+type CredentialRefs struct {
+	RepositorySecret       string
+	RepositoryInstallation *int64
+	ProjectInstallation    *int64
+	ProjectSecret          string
+}
+
+// Resolve выбирает учётные данные в порядке решения 0034, от частного к
+// общему: секрет репозитория, установка репозитория, установка проекта,
+// секрет проекта, токен инстанса. Частное побеждает, потому что его задают
+// ради исключения из общего правила.
 //
-// Порядок разрешения — от частного к общему: секрет репозитория, установка
-// проекта, секрет проекта, токен инстанса. Частное побеждает, потому что его
-// задают ради исключения из общего правила.
+// Берётся первый заданный источник, и в Credentials заполнено не больше
+// одного поля. Отказ выбранного источника — не повод пробовать следующий:
+// читают репозиторий им, и доступ, которым никто не пользуется, ничего не
+// доказывает.
+func (r CredentialRefs) Resolve() (Credentials, CredentialSource) {
+	switch {
+	case r.RepositorySecret != "":
+		return Credentials{SecretRef: r.RepositorySecret}, SourceRepositorySecret
+	case r.RepositoryInstallation != nil:
+		return Credentials{InstallationID: r.RepositoryInstallation}, SourceRepositoryInstallation
+	case r.ProjectInstallation != nil:
+		return Credentials{InstallationID: r.ProjectInstallation}, SourceProjectInstallation
+	case r.ProjectSecret != "":
+		return Credentials{SecretRef: r.ProjectSecret}, SourceProjectSecret
+	}
+	return Credentials{}, SourceInstance
+}
+
+// Provider выдаёт клиента по уже выбранным учётным данным. Порядок выбора
+// живёт в CredentialRefs.Resolve; если в Credentials заполнены оба поля,
+// секрет берётся раньше установки.
 type Provider struct {
 	base   *Client
 	app    *App

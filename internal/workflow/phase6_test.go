@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/testdb"
 
@@ -461,18 +463,267 @@ func TestOIDCRejectsForeignTokens(t *testing.T) {
 // fakeGitHub отвечает за провайдера: проверяется правило движка, а не поход в
 // сеть — сам поход проверен в internal/github.
 type fakeGitHub struct {
-	allowed        map[string]bool
+	// allowed пускает к репозиторию любыми учётными данными.
+	allowed map[string]bool
+	// grants пускает по паре «учётные данные → репозиторий»: "42 acme/api"
+	// для установки, "repo-x acme/api" для секрета, "instance acme/api".
+	grants         map[string]bool
 	installationID *int64
+	// checked — чем спрашивали про каждый репозиторий, в той же записи.
+	checked map[string]string
+	// mixed — в провайдера пришли разом установка и секрет: Provider.Client
+	// взял бы секрет, и проверка соврала бы о том, чем читают.
+	mixed bool
 }
 
 func (f *fakeGitHub) AppConfigured() bool { return true }
 
-func (f *fakeGitHub) CheckRepo(_ context.Context, installationID *int64, _, owner, name string) error {
+func (f *fakeGitHub) CheckRepo(_ context.Context, installationID *int64, secretRef, owner, name string) error {
 	f.installationID = installationID
-	if f.allowed[owner+"/"+name] {
+	if installationID != nil && secretRef != "" {
+		f.mixed = true
+	}
+	creds := "instance"
+	switch {
+	case secretRef != "":
+		creds = secretRef
+	case installationID != nil:
+		creds = strconv.FormatInt(*installationID, 10)
+	}
+	repo := owner + "/" + name
+	if f.checked == nil {
+		f.checked = map[string]string{}
+	}
+	f.checked[repo] = creds
+	if f.allowed[repo] || f.grants[creds+" "+repo] {
 		return nil
 	}
 	return errors.New("404 Not Found")
+}
+
+// Проверка доступа берёт учётные данные каждого репозитория в порядке
+// решения 0034 и отвечает, чем проверяла.
+func TestAccessCheckPicksCredentialsPerRepository(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, _, system := setupPhase4(t, AuthHeader)
+	gh := &fakeGitHub{grants: map[string]bool{
+		"42 acme/own":         true,
+		"repo-x acme/secret":  true,
+		"7 acme/plain":        true,
+		"proj acme/plain":     true,
+		"instance acme/plain": true,
+		"7 acme/removed":      true,
+		"7 acme/suspended":    true,
+		"7 acme/gone":         true,
+		"proj acme/suspended": true,
+	}}
+	engine := NewEngine(store, testdb.Logger(), Options{StrictGates: true, GitHub: gh})
+	q := store.DB()
+
+	// Репозитории заводятся, пока у проекта нет ни учётных данных, ни
+	// установок: провайдера никто не спрашивает (AC-11).
+	names := []string{"own", "secret", "plain", "removed", "suspended", "gone", "denied"}
+	for _, name := range names {
+		if _, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/" + name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(gh.checked) != 0 {
+		t.Fatalf("провайдера спросили у проекта без учётных данных: %v", gh.checked)
+	}
+
+	project, err := store.GetProjectByKey(ctx, q, "SDLC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.OwnerTeamID == nil {
+		t.Fatal("у демонстрационного проекта нет команды-владельца")
+	}
+	for _, id := range []int64{42, 43, 44} {
+		if _, err := store.UpsertInstallation(ctx, q, postgres.InstallationInput{
+			InstallationID: id, AccountLogin: "acme", AccountID: 1, AccountType: "Organization",
+			OwnerTeamID: *project.OwnerTeamID, ConnectedBy: system.ID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bind := func(name string, installation int64, secret *string) {
+		t.Helper()
+		if _, err := q.Exec(ctx, `UPDATE repositories SET installation_id = $3, credential_ref = $4
+			WHERE project_id = $1 AND owner = 'acme' AND name = $2`,
+			project.ID, name, installation, secret); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bind("own", 42, nil)
+	bind("secret", 42, ptr("repo-x"))
+	bind("removed", 43, nil)
+	bind("suspended", 44, nil)
+	bind("gone", 42, nil)
+	if _, err := store.SetInstallationState(ctx, q, 43, postgres.InstallationRemoved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetInstallationState(ctx, q, 44, postgres.InstallationSuspended); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetRepositoryAvailability(ctx, q, 42, "acme", "gone", false); err != nil {
+		t.Fatal(err)
+	}
+
+	setProject := func(installation *int64, secret *string) {
+		t.Helper()
+		if _, err := q.Exec(ctx, `UPDATE projects SET github_installation_id = $2, github_credential_ref = $3
+			WHERE id = $1`, project.ID, installation, secret); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func() map[string]RepoAccessResult {
+		t.Helper()
+		gh.checked = nil
+		status, err := engine.CheckGitHubAccess(ctx, "SDLC")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]RepoAccessResult{}
+		for _, r := range status.Repositories {
+			out[r.Repository] = r
+		}
+		return out
+	}
+	expect := func(res RepoAccessResult, ok bool, source github.CredentialSource, creds string) {
+		t.Helper()
+		if res.OK != ok || res.Source != source {
+			t.Fatalf("%s: ok=%v source=%q, ждали ok=%v source=%q (%s)",
+				res.Repository, res.OK, res.Source, ok, source, res.Error)
+		}
+		if got := gh.checked[res.Repository]; got != creds {
+			t.Fatalf("%s: провайдера спросили %q, ждали %q", res.Repository, got, creds)
+		}
+	}
+
+	// У проекта и установка, и секрет.
+	setProject(ptr(int64(7)), ptr("proj"))
+	got := check()
+
+	// AC-2: установка репозитория раньше установки проекта.
+	own := got["acme/own"]
+	expect(own, true, github.SourceRepositoryInstallation, "42")
+	if own.InstallationID == nil || *own.InstallationID != 42 || own.CredentialRef != "" {
+		t.Fatalf("в ответе не видно установки репозитория: %+v", own)
+	}
+	// AC-3: секрет репозитория побеждает и свою установку, и проектную.
+	secret := got["acme/secret"]
+	expect(secret, true, github.SourceRepositorySecret, "repo-x")
+	if secret.CredentialRef != "repo-x" || secret.InstallationID != nil {
+		t.Fatalf("в ответе не видно секрета репозитория: %+v", secret)
+	}
+	// AC-4: у репозитория ничего нет — установка проекта раньше его секрета.
+	plain := got["acme/plain"]
+	expect(plain, true, github.SourceProjectInstallation, "7")
+	if plain.InstallationID == nil || *plain.InstallationID != 7 {
+		t.Fatalf("в ответе не видно установки проекта: %+v", plain)
+	}
+	// AC-7: мёртвая установка и убранный из неё репозиторий — отказ без
+	// похода в провайдера, установкой проекта не подменяются, хотя она их и
+	// пустила бы.
+	for repo, words := range map[string][]string{
+		"acme/removed":   {"43", "снята"},
+		"acme/suspended": {"44", "приостановлена"},
+		"acme/gone":      {"42", "убран"},
+	} {
+		res := got[repo]
+		if res.OK {
+			t.Fatalf("%s: доступ показан через мёртвую установку: %+v", repo, res)
+		}
+		for _, w := range words {
+			if !strings.Contains(res.Error, w) {
+				t.Fatalf("%s: в отказе нет %q: %s", repo, w, res.Error)
+			}
+		}
+		if creds, asked := gh.checked[repo]; asked {
+			t.Fatalf("%s: провайдера спросили (%s), хотя установка мертва", repo, creds)
+		}
+	}
+	// AC-8: отказ называет источник, которым проверяли.
+	denied := got["acme/denied"]
+	expect(denied, false, github.SourceProjectInstallation, "7")
+	if !strings.Contains(denied.Error, "установка проекта 7") {
+		t.Fatalf("отказ не называет установку проекта: %s", denied.Error)
+	}
+
+	// AC-5: у проекта только секрет.
+	setProject(nil, ptr("proj"))
+	got = check()
+	plain = got["acme/plain"]
+	expect(plain, true, github.SourceProjectSecret, "proj")
+	if plain.CredentialRef != "proj" || plain.InstallationID != nil {
+		t.Fatalf("в ответе не видно секрета проекта: %+v", plain)
+	}
+	denied = got["acme/denied"]
+	if !strings.Contains(denied.Error, "секрет проекта proj") || strings.Contains(denied.Error, "установк") {
+		t.Fatalf("отказ проверки секретом говорит не о секрете: %s", denied.Error)
+	}
+
+	// AC-6: ничего не объявлено — токен инстанса.
+	setProject(nil, nil)
+	got = check()
+	expect(got["acme/plain"], true, github.SourceInstance, "instance")
+	denied = got["acme/denied"]
+	if !strings.Contains(denied.Error, "токен инстанса") || strings.Contains(denied.Error, "установк") {
+		t.Fatalf("отказ проверки токеном инстанса: %s", denied.Error)
+	}
+
+	if gh.mixed {
+		t.Fatal("в провайдера пришли разом установка и секрет")
+	}
+}
+
+// Привязка по координатам с секретом репозитория проверяется секретом, а не
+// установкой проекта (AC-10).
+func TestAddRepositoryChecksRepositorySecret(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, _, _ := setupPhase4(t, AuthHeader)
+	gh := &fakeGitHub{grants: map[string]bool{
+		"7 acme/api":      true,
+		"repo-x acme/web": true,
+	}}
+	engine := NewEngine(store, testdb.Logger(), Options{StrictGates: true, GitHub: gh})
+	if _, err := engine.SetProjectGitHub(ctx, "SDLC", SetGitHubInput{InstallationID: ptr(int64(7))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Установка проекта пустила бы, но читать будут секретом — им и проверяем.
+	_, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/api", CredentialRef: "repo-x"})
+	if apperr.As(err).Code != apperr.CodeInvalidInput {
+		t.Fatalf("репозиторий, недоступный своему секрету, привязался: %v", err)
+	}
+	if gh.checked["acme/api"] != "repo-x" {
+		t.Fatalf("проверка пошла не секретом репозитория: %q", gh.checked["acme/api"])
+	}
+	if !strings.Contains(err.Error(), "секрет репозитория repo-x") {
+		t.Fatalf("отказ не называет секрет репозитория: %v", err)
+	}
+
+	repo, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: "acme/web", CredentialRef: "repo-x"})
+	if err != nil {
+		t.Fatalf("репозиторий, доступный своему секрету: %v", err)
+	}
+	if repo.CredentialRef == nil || *repo.CredentialRef != "repo-x" {
+		t.Fatalf("секрет репозитория не сохранился: %+v", repo)
+	}
+
+	repos, err := store.ListRepositories(ctx, store.DB(), repo.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range repos {
+		if r.Owner == "acme" && r.Name == "api" {
+			t.Fatal("отвергнутый репозиторий остался в проекте")
+		}
+	}
+	if gh.mixed {
+		t.Fatal("в провайдера пришли разом установка и секрет")
+	}
 }
 
 func TestRepositoryOutsideInstallationIsRejected(t *testing.T) {

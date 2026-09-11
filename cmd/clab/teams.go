@@ -409,11 +409,11 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 			}
 			return print(out)
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/projects/"+url.PathEscape(projectKey)+"/github/check", nil, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderGitHubCheck, out))
 
 	case "teams":
 		var projectFlag string

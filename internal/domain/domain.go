@@ -266,6 +266,9 @@ type Repository struct {
 	Visibility    string    `json:"visibility"`
 	AccessMode    string    `json:"access_mode"`
 	RoleHint      *string   `json:"role_hint,omitempty"`
+	// Имя секрета с токеном для этого репозитория — исключение из правила
+	// проекта, побеждает любую установку. Значение живёт в окружении.
+	CredentialRef *string `json:"credential_ref,omitempty"`
 	// Установка приложения, которой репозиторий читается (решение 0034).
 	// Пусто — учётные данные проекта или инстанса.
 	InstallationID *int64 `json:"installation_id,omitempty"`
