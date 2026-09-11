@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,12 +25,17 @@ type Config struct {
 	// Сколько ждать агента, прежде чем считать его мёртвым и отпустить задачу.
 	Timeout time.Duration
 	// Шаблон команды. Подстановки: {task}, {role}, {model}, {allowed_tools},
-	// {disallowed_tools}, {mcp_config}, {prompt}.
+	// {disallowed_tools}, {mcp_config}, {prompt}, {workdir}.
 	Command string
 	// Забрать одну задачу и выйти: так раннер работает в CI.
 	Once bool
 	// Ничего не запускать, только показывать, что было бы запущено.
 	DryRun bool
+	// Каталог с клонами репозиториев проекта и каталог рабочих копий задач.
+	// С клонами агент работает в git worktree своей задачи; без них — в
+	// каталоге раннера, как раньше, и это безопасно только при одном слоте.
+	ReposDir     string
+	WorktreesDir string
 }
 
 // Команда по умолчанию — Claude Code: агент получает промпт work_on_task с
@@ -67,6 +73,9 @@ func loadConfig() (Config, error) {
 		}
 		c.Slots = n
 	}
+	if err := c.loadWorkspaces(); err != nil {
+		return c, err
+	}
 	var err error
 	if c.Interval, err = envDuration("SDLC_RUNNER_INTERVAL", c.Interval); err != nil {
 		return c, err
@@ -75,6 +84,45 @@ func loadConfig() (Config, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// loadWorkspaces читает, где лежат клоны и куда класть рабочие копии.
+//
+// Несколько слотов без клонов — отказ, а не предупреждение: агенты разных
+// задач переключали бы ветки друг у друга в одном каталоге. Отличить
+// безопасную роль от опасной раннер не может, не зашивая роли в код.
+func (c *Config) loadWorkspaces() error {
+	c.ReposDir = env("SDLC_RUNNER_REPOS", "")
+	c.WorktreesDir = env("SDLC_RUNNER_WORKTREES", "")
+	if c.ReposDir == "" {
+		if c.WorktreesDir != "" {
+			return fmt.Errorf("SDLC_RUNNER_WORKTREES задан без SDLC_RUNNER_REPOS: рабочие копии заводить не из чего")
+		}
+		if c.Slots > 1 {
+			return fmt.Errorf("SDLC_RUNNER_SLOTS=%d без SDLC_RUNNER_REPOS: агенты работали бы в одном каталоге "+
+				"и переключали ветки друг у друга; задайте каталог с клонами репозиториев проекта", c.Slots)
+		}
+		return nil
+	}
+
+	repos, err := filepath.Abs(c.ReposDir)
+	if err != nil {
+		return fmt.Errorf("SDLC_RUNNER_REPOS: %w", err)
+	}
+	if info, err := os.Stat(repos); err != nil || !info.IsDir() {
+		return fmt.Errorf("SDLC_RUNNER_REPOS: %s — не каталог", repos)
+	}
+	c.ReposDir = repos
+
+	if c.WorktreesDir == "" {
+		// Рядом с клонами и скрыто: так же, как .worktrees в рабочей
+		// директории Cadence Lab, и поиск клонов его пропускает.
+		c.WorktreesDir = filepath.Join(repos, ".worktrees")
+	}
+	if c.WorktreesDir, err = filepath.Abs(c.WorktreesDir); err != nil {
+		return fmt.Errorf("SDLC_RUNNER_WORKTREES: %w", err)
+	}
+	return nil
 }
 
 // mcpURL — адрес MCP-сервера проекта. Он выводится из адреса API: это один
