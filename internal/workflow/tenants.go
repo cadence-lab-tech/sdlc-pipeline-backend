@@ -114,7 +114,7 @@ func (a *Auth) findPrincipal(ctx context.Context, q postgres.Querier, raw string
 // adding участников. Личная команда участников не принимает вовсе.
 func (a *Auth) memberQuota(ctx context.Context, q postgres.Querier, team domain.Team, adding int) error {
 	if team.Kind == domain.TeamPersonal {
-		return apperr.Forbidden("личный аккаунт — один человек; чтобы работать с коллегами, заведите организацию или превратите в неё этот аккаунт")
+		return errPersonalTeam()
 	}
 	if !a.QuotasOn() {
 		return nil
@@ -135,6 +135,12 @@ func (a *Auth) memberQuota(ctx context.Context, q postgres.Querier, team domain.
 			plan.Name, team.Key, *plan.MembersMax, n)
 	}
 	return nil
+}
+
+// errPersonalTeam — отказ личной команде в новом участнике: и прямом, и по
+// приглашению, чтобы человек видел одну причину, каким путём ни пришёл.
+func errPersonalTeam() error {
+	return apperr.Forbidden("личный аккаунт — один человек; чтобы работать с коллегами, заведите организацию или превратите в неё этот аккаунт")
 }
 
 // ConvertTeamInput — новые ключ и название организации; пусто — прежние.
