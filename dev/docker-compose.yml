@@ -6,13 +6,20 @@
 #
 # Порты вынесены в переменные и читаются из dev/.env, если он есть;
 # без него берутся значения по умолчанию — файл заводить не обязательно.
+#
+# Имена контейнеров тоже с префиксом из переменной: рядом с основным стеком
+# поднимают второй (проверка на свежей базе, параллельная задача), а
+# фиксированное container_name заняло бы имя и не дало бы это сделать —
+# флаг -p сам по себе имена контейнеров не меняет. Второй стек:
+#   DEV_STACK_PREFIX=clabqa POSTGRES_PORT=55433 API_PORT=18081 \
+#     docker compose -p clabqa up -d
 
 name: sdlc-pipeline
 
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: sdlc-postgres
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sdlc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdlc}
@@ -37,7 +44,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${VERSION:-dev}
-    container_name: sdlc-api
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,7 +127,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${VERSION:-dev}
-    container_name: sdlc-worker
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-worker
     entrypoint: ["/worker"]
     depends_on:
       api:
@@ -170,7 +177,7 @@ services:
   # в dev/.env задан SDLC_BLOB_S3_BUCKET (см. dev/README.md).
   minio:
     image: minio/minio:latest
-    container_name: sdlc-minio
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-minio
     profiles: ["s3"]
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -192,7 +199,7 @@ services:
   # NoSuchBucket на первом же артефакте неинтересно.
   minio-init:
     image: minio/mc:latest
-    container_name: sdlc-minio-init
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-minio-init
     profiles: ["s3"]
     depends_on:
       minio:
@@ -209,7 +216,7 @@ services:
   # Просмотр базы руками: docker compose --profile tools up -d
   adminer:
     image: adminer:4
-    container_name: sdlc-adminer
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-adminer
     profiles: ["tools"]
     depends_on:
       postgres:
