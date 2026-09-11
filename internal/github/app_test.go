@@ -142,3 +142,68 @@ func TestProviderPrefersMoreSpecificCredentials(t *testing.T) {
 		t.Fatal("ненайденный секрет не считается ошибкой")
 	}
 }
+
+func TestResolveFollowsDecision0034(t *testing.T) {
+	repoInstallation, projectInstallation := int64(42), int64(7)
+	cases := []struct {
+		name         string
+		refs         CredentialRefs
+		source       CredentialSource
+		installation *int64
+		secret       string
+	}{
+		{"секрет репозитория побеждает всё", CredentialRefs{
+			RepositorySecret: "repo-x", RepositoryInstallation: &repoInstallation,
+			ProjectInstallation: &projectInstallation, ProjectSecret: "proj",
+		}, SourceRepositorySecret, nil, "repo-x"},
+		{"установка репозитория раньше проекта", CredentialRefs{
+			RepositoryInstallation: &repoInstallation,
+			ProjectInstallation:    &projectInstallation, ProjectSecret: "proj",
+		}, SourceRepositoryInstallation, &repoInstallation, ""},
+		{"установка проекта раньше секрета проекта", CredentialRefs{
+			ProjectInstallation: &projectInstallation, ProjectSecret: "proj",
+		}, SourceProjectInstallation, &projectInstallation, ""},
+		{"секрет проекта", CredentialRefs{ProjectSecret: "proj"}, SourceProjectSecret, nil, "proj"},
+		{"ничего не объявлено — токен инстанса", CredentialRefs{}, SourceInstance, nil, ""},
+	}
+	for _, tc := range cases {
+		creds, source := tc.refs.Resolve()
+		if source != tc.source {
+			t.Fatalf("%s: источник %q вместо %q", tc.name, source, tc.source)
+		}
+		if creds.SecretRef != tc.secret {
+			t.Fatalf("%s: секрет %q вместо %q", tc.name, creds.SecretRef, tc.secret)
+		}
+		// Заполнено не больше одного поля: Provider.Client отдаёт секрету
+		// приоритет, и лишняя установка рядом с ним была бы враньём о том,
+		// чем читают.
+		switch {
+		case (creds.InstallationID == nil) != (tc.installation == nil):
+			t.Fatalf("%s: установка %v вместо %v", tc.name, creds.InstallationID, tc.installation)
+		case creds.InstallationID != nil && *creds.InstallationID != *tc.installation:
+			t.Fatalf("%s: установка %d вместо %d", tc.name, *creds.InstallationID, *tc.installation)
+		}
+	}
+}
+
+// Значение секрета не попадает в текст отказа провайдера: отказ уходит в
+// ответ проверки доступа и в интерфейс.
+func TestSecretValueStaysOutOfErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	provider := NewProvider(New(srv.URL, ""), nil, func(string) string { return "ghp_значение-секрета" })
+	client, err := provider.Client(context.Background(), Credentials{SecretRef: "repo-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Repo(context.Background(), Repo{Owner: "acme", Name: "api"})
+	if err == nil {
+		t.Fatal("404 не стал ошибкой")
+	}
+	if strings.Contains(err.Error(), "ghp_значение-секрета") {
+		t.Fatalf("значение секрета в тексте ошибки: %v", err)
+	}
+}

@@ -100,10 +100,13 @@ func (e *Engine) AddRepository(ctx context.Context, projectKey string, in AddRep
 		if installation, err = e.pickInstallation(ctx, project, owner, name); err != nil {
 			return domain.Repository{}, false, err
 		}
-		if installation == nil {
-			if err := e.checkRepoAccess(ctx, project, owner, name); err != nil {
-				return domain.Repository{}, false, err
-			}
+	}
+	// Секрет репозитория побеждает установку (решение 0034): читать будут им,
+	// им и проверяется. Установка при этом остаётся — по ней идут вебхуки.
+	// Без секрета и без установки — учётные данные проекта.
+	if in.CredentialRef != "" || installation == nil {
+		if err := e.checkRepoAccess(ctx, project, in.CredentialRef, owner, name); err != nil {
+			return domain.Repository{}, false, err
 		}
 	}
 

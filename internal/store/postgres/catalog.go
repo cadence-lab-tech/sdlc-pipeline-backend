@@ -33,12 +33,13 @@ type RepositoryInput struct {
 }
 
 const repositoryCols = `id, project_id, provider, owner, name, default_branch,
-	clone_url, visibility, access_mode, role_hint, installation_id, unavailable_at`
+	clone_url, visibility, access_mode, role_hint, credential_ref, installation_id, unavailable_at`
 
 func scanRepository(row interface{ Scan(...any) error }) (domain.Repository, error) {
 	var r domain.Repository
 	err := row.Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name, &r.DefaultBranch,
-		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.InstallationID, &r.UnavailableAt)
+		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.CredentialRef,
+		&r.InstallationID, &r.UnavailableAt)
 	return r, err
 }
 
@@ -93,8 +94,8 @@ func (s *Store) UpsertRepository(ctx context.Context, q Querier, in RepositoryIn
 		in.Visibility, in.RoleHint, in.CredentialRef, in.WatchBranches,
 		in.ExcludeGlobs, in.IndexEnabled, in.InstallationID,
 	).Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name, &r.DefaultBranch,
-		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.InstallationID,
-		&r.UnavailableAt, &created)
+		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.CredentialRef,
+		&r.InstallationID, &r.UnavailableAt, &created)
 	if err != nil {
 		return r, false, translate(err)
 	}
