@@ -27,10 +27,20 @@ type RepositoryInput struct {
 	WatchBranches []string
 	ExcludeGlobs  []string
 	IndexEnabled  *bool
+	// Установка, которой репозиторий читается (решение 0034). nil при
+	// обновлении — оставить прежнюю.
+	InstallationID *int64
 }
 
 const repositoryCols = `id, project_id, provider, owner, name, default_branch,
-	clone_url, visibility, access_mode, role_hint`
+	clone_url, visibility, access_mode, role_hint, installation_id, unavailable_at`
+
+func scanRepository(row interface{ Scan(...any) error }) (domain.Repository, error) {
+	var r domain.Repository
+	err := row.Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name, &r.DefaultBranch,
+		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.InstallationID, &r.UnavailableAt)
+	return r, err
+}
 
 // UpsertRepository заводит репозиторий или обновляет настройки уже
 // привязанного. Ключ — (project, provider, owner, name): повторный импорт
@@ -60,26 +70,31 @@ func (s *Store) UpsertRepository(ctx context.Context, q Querier, in RepositoryIn
 
 	var r domain.Repository
 	var created bool
+	// Повторная привязка через установку снимает пометку «недоступен»:
+	// человек заново выбрал репозиторий на стороне GitHub.
 	err := q.QueryRow(ctx, `
 		INSERT INTO repositories (project_id, provider, owner, name, default_branch, clone_url,
 		                          visibility, role_hint, credential_ref, watch_branches,
-		                          exclude_globs, index_enabled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, coalesce($12, true))
+		                          exclude_globs, index_enabled, installation_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, coalesce($12, true), $13)
 		ON CONFLICT (project_id, provider, owner, name) DO UPDATE SET
-		    default_branch = EXCLUDED.default_branch,
-		    clone_url      = EXCLUDED.clone_url,
-		    visibility     = EXCLUDED.visibility,
-		    role_hint      = coalesce(EXCLUDED.role_hint, repositories.role_hint),
-		    credential_ref = coalesce(EXCLUDED.credential_ref, repositories.credential_ref),
-		    watch_branches = EXCLUDED.watch_branches,
-		    exclude_globs  = EXCLUDED.exclude_globs,
-		    index_enabled  = coalesce($12, repositories.index_enabled)
+		    default_branch  = EXCLUDED.default_branch,
+		    clone_url       = EXCLUDED.clone_url,
+		    visibility      = EXCLUDED.visibility,
+		    role_hint       = coalesce(EXCLUDED.role_hint, repositories.role_hint),
+		    credential_ref  = coalesce(EXCLUDED.credential_ref, repositories.credential_ref),
+		    watch_branches  = EXCLUDED.watch_branches,
+		    exclude_globs   = EXCLUDED.exclude_globs,
+		    index_enabled   = coalesce($12, repositories.index_enabled),
+		    installation_id = coalesce($13, repositories.installation_id),
+		    unavailable_at  = CASE WHEN $13::bigint IS NULL THEN repositories.unavailable_at END
 		RETURNING `+repositoryCols+`, (xmax = 0)`,
 		in.ProjectID, in.Provider, in.Owner, in.Name, in.DefaultBranch, in.CloneURL,
 		in.Visibility, in.RoleHint, in.CredentialRef, in.WatchBranches,
-		in.ExcludeGlobs, in.IndexEnabled,
+		in.ExcludeGlobs, in.IndexEnabled, in.InstallationID,
 	).Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name, &r.DefaultBranch,
-		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &created)
+		&r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint, &r.InstallationID,
+		&r.UnavailableAt, &created)
 	if err != nil {
 		return r, false, translate(err)
 	}
@@ -107,17 +122,20 @@ func (s *Store) RepositorySettings(ctx context.Context, q Querier, id uuid.UUID)
 	return out, nil
 }
 
-// RepositoriesByCoordinates — все привязки репозитория owner/name по всем
-// проектам. Вебхук приходит от провайдера и проекта не знает.
-func (s *Store) RepositoriesByCoordinates(ctx context.Context, q Querier, provider, owner, name string) ([]IndexTarget, error) {
+// RepositoriesByCoordinates — привязки репозитория owner/name, читаемые
+// установкой installationID, по всем проектам. Вебхук приходит от
+// провайдера и проекта не знает; установка — первый ключ маршрутизации
+// (решение 0034): репозиторий без установки событий не получает, и
+// одноимённый репозиторий другого арендатора событием не задевается.
+func (s *Store) RepositoriesByCoordinates(ctx context.Context, q Querier, provider, owner, name string, installationID int64) ([]IndexTarget, error) {
 	rows, err := q.Query(ctx, `
-		SELECT r.id, r.project_id, p.key, r.owner, r.name,
-		       r.watch_branches, r.exclude_globs, r.credential_ref,
-		       p.github_installation_id, p.github_credential_ref
+		SELECT `+indexTargetCols+`
 		FROM repositories r
 		JOIN projects p ON p.id = r.project_id
+		LEFT JOIN github_installations gi ON gi.installation_id = r.installation_id
 		WHERE r.provider = $1 AND lower(r.owner) = lower($2) AND lower(r.name) = lower($3)
-		  AND r.index_enabled`, provider, owner, name)
+		  AND coalesce(r.installation_id, p.github_installation_id) = $4
+		  AND r.index_enabled AND `+indexTargetLive, provider, owner, name, installationID)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -125,10 +143,8 @@ func (s *Store) RepositoriesByCoordinates(ctx context.Context, q Querier, provid
 
 	out := []IndexTarget{}
 	for rows.Next() {
-		var t IndexTarget
-		if err := rows.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
-			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
-			&t.InstallationID, &t.ProjectCredentialRef); err != nil {
+		t, err := scanIndexTarget(rows)
+		if err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, t)

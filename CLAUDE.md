@@ -49,6 +49,8 @@ internal/
                     через них, tenants.go — личная команда, организации,
                     квота тарифа, oidc.go — вход и синхронизация команд,
                     github_login.go — вход через GitHub,
+                    installations.go — установки GitHub App на команде,
+                    выбор и привязка репозиториев из них,
                     webhooks.go — события GitHub,
                     projects.go — каталог репозиториев и документов,
                     metrics.go — метрики цикла, usage.go — стоимость прогонов
@@ -339,6 +341,16 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   бэкенд (`github.OAuth`, секрет клиента в окружении), принципал ключуется
   `github:<id>` в том же `idp_subject`, сессия та же. Токен пользователя живёт
   в запросе и не сохраняется: репозитории читает установка приложения.
+- **Установка приложения принадлежит команде** ([решение 0034](../docs/decisions/0034-github-installation-on-tenant.md)).
+  `github_installations` записывается только через `Auth.ConnectGitHub`:
+  право на установку доказывает `GET /user/installations` токеном
+  пользователя из кода повторной авторизации — номер установки не
+  доказательство. Тем же токеном читается пересечение репозиториев с личным
+  доступом; токен не сохраняется. Репозиторий помнит установку, цели
+  индексации и вебхуки берут `coalesce(r.installation_id,
+  p.github_installation_id)`; доставка без установки не обслуживается.
+  Снятая или приостановленная установка и убранный из неё репозиторий
+  выпадают из целей и очереди (`indexTargetLive`), индекс не удаляется.
 - **Проект всегда принадлежит команде** ([решение 0033](../docs/decisions/0033-tenant-is-team.md)).
   Без явной команды `OwnerTeamFor` отдаёт личную команду создателя
   (`ensurePersonalTeam` заводит её при входе, бутстрапе и первом проекте);
@@ -435,6 +447,12 @@ install`, таблицы для команд чтения и `--json`, рели�
 организация для любого вошедшего, `plans`/`subscriptions` с пределом
 участников на `free`, `POST /teams/{key}/convert`, `PUT /teams/{key}/plan`,
 `SDLC_TENANCY`, человек по хэндлу не заводится.
+GitHub по кнопке ([решение 0034](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0034-github-installation-on-tenant.md)):
+`github_installations` на команде, `POST /teams/{key}/github/connect` по
+коду повторной авторизации, `POST /projects/{key}/github/repositories`
+пачкой, `repositories.installation_id`, маршрутизация вебхуков по
+установке, события `installation` и `installation_repositories`,
+`SDLC_GITHUB_APP_SLUG`.
 
 Сквозной проход задачи по всему циклу проверяется `dev/e2e.sh` — включая
 возврат результата ревьюером и повторную перепроверку после доработки. Проход

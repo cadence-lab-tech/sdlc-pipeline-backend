@@ -557,9 +557,10 @@ func TestWebhookRoutesByInstallation(t *testing.T) {
 	if out := push(42, "delivery-own"); out.Queued == 0 {
 		t.Fatalf("событие своей установки не поставило прогон: %+v", out)
 	}
-	// Вебхук, настроенный руками, установки не несёт и фильтром не режется.
-	if out := push(0, "delivery-manual"); out.Duplicate {
-		t.Fatalf("доставка сочтена повтором: %+v", out)
+	// Вебхук, настроенный руками, установки не несёт и не обслуживается
+	// (решение 0034): пустая установка перестала быть джокером.
+	if out := push(0, "delivery-manual"); out.Queued != 0 || out.Ignored == "" {
+		t.Fatalf("доставка без установки обслужена: %+v", out)
 	}
 	_ = store
 }

@@ -266,6 +266,12 @@ type Repository struct {
 	Visibility    string    `json:"visibility"`
 	AccessMode    string    `json:"access_mode"`
 	RoleHint      *string   `json:"role_hint,omitempty"`
+	// Установка приложения, которой репозиторий читается (решение 0034).
+	// Пусто — учётные данные проекта или инстанса.
+	InstallationID *int64 `json:"installation_id,omitempty"`
+	// Репозиторий убран из установки на стороне GitHub: индексация стоит,
+	// собранный индекс живёт.
+	UnavailableAt *time.Time `json:"unavailable_at,omitempty"`
 }
 
 // Состояния версии цикла. Редактируется только черновик; активная версия
@@ -709,3 +715,24 @@ type Subscription struct {
 	ExternalRef *string    `json:"external_ref,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
+
+// GitHubInstallation — установка GitHub App на аккаунт человека или
+// организации (решение 0034). Принадлежит команде-арендатору; секретов не
+// несёт — токен по ней выписывает ключ приложения.
+type GitHubInstallation struct {
+	ID             uuid.UUID  `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	AccountLogin   string     `json:"account_login"`
+	AccountID      int64      `json:"account_id"`
+	AccountType    string     `json:"account_type"`
+	OwnerTeamID    uuid.UUID  `json:"owner_team_id"`
+	OwnerTeamKey   string     `json:"owner_team_key"`
+	ConnectedBy    uuid.UUID  `json:"connected_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	SuspendedAt    *time.Time `json:"suspended_at,omitempty"`
+	RemovedAt      *time.Time `json:"removed_at,omitempty"`
+}
+
+// Active — установка живая: не снята и не приостановлена на стороне GitHub.
+func (i GitHubInstallation) Active() bool { return i.SuspendedAt == nil && i.RemovedAt == nil }

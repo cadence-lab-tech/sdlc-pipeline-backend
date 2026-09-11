@@ -88,6 +88,23 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 
+	case "github":
+		// Установки GitHub App команды (решение 0034). Подключаются из
+		// интерфейса: право на установку доказывает повторная авторизация в
+		// браузере, и у CLI такого пути нет.
+		key, tail := popTask(rest)
+		if _, err := flags("team", tail, func(*flag.FlagSet) {}); err != nil {
+			return err
+		}
+		if key == "" {
+			return fmt.Errorf("clab team github <ключ команды>")
+		}
+		var out any
+		if err := c.get(ctx, "/teams/"+url.PathEscape(key)+"/github/installations", nil, &out); err != nil {
+			return err
+		}
+		return print(out)
+
 	case "plan":
 		// Тариф команды: без --set показывает действующий, с --set переводит
 		// (администратор инстанса).
@@ -314,7 +331,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		return print(map[string]any{"revoked": key, "project": projectKey})
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, convert, plan, update, archive, add, remove, groups, budget, grant, revoke", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, convert, plan, github, update, archive, add, remove, groups, budget, grant, revoke", sub)
 	}
 }
 

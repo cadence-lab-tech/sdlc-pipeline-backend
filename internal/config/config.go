@@ -58,6 +58,9 @@ type Config struct {
 	GitHubWebURL          string
 	GitHubAppClientID     string
 	GitHubAppClientSecret string
+	// Слаг приложения — имя в адресе github.com/apps/<slug>: из него
+	// строится кнопка «Подключить GitHub» (решение 0034).
+	GitHubAppSlug string
 
 	// Индексация репозиториев. Кодовая база под задачами двигается непрерывно,
 	// поэтому прогон наследует у предыдущего всё, что не изменилось, и
@@ -161,6 +164,7 @@ func Load() (Config, error) {
 		GitHubWebURL:          env("SDLC_GITHUB_URL", "https://github.com"),
 		GitHubAppClientID:     env("SDLC_GITHUB_APP_CLIENT_ID", ""),
 		GitHubAppClientSecret: env("SDLC_GITHUB_APP_CLIENT_SECRET", ""),
+		GitHubAppSlug:         env("SDLC_GITHUB_APP_SLUG", ""),
 		ProjectCreation:       env("SDLC_PROJECT_CREATION", "open"),
 		Tenancy:               env("SDLC_TENANCY", "shared"),
 		IndexEnabled:          true,

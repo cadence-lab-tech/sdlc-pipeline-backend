@@ -1,12 +1,14 @@
 package github
 
-// Вход человека через GitHub (решение 0030).
+// Вход человека через GitHub (решение 0030) и его установки (решение 0034).
 //
 // GitHub не OIDC-провайдер: ID-токена у него нет, а код авторизации меняется
 // на токен с секретом клиента. Секрет живёт на бэкенде, поэтому обмен делает
-// он, а не браузер. Токен пользователя нужен ровно на два запроса — кто он и
-// его почта — и нигде не сохраняется: репозитории система читает установкой
-// приложения, а не глазами вошедшего (решение 0028).
+// он, а не браузер. Токен пользователя живёт ровно в запросе и нигде не
+// сохраняется: на входе им спрашивают, кто вошёл; при подключении GitHub —
+// какие установки приложения ему видны и какие репозитории в них он видит
+// сам. Читает репозитории всё равно установка приложения, а не вошедший
+// (решение 0028).
 //
 // Регистрация одна: GitHub App умеет быть и OAuth-клиентом, так что вход и
 // доступ к репозиториям идут через одно приложение.
@@ -63,6 +65,12 @@ func (o *OAuth) ClientID() string { return o.clientID }
 
 // AuthorizeURL — куда браузер уводит человека за кодом.
 func (o *OAuth) AuthorizeURL() string { return o.webURL + "/login/oauth/authorize" }
+
+// InstallURL — страница установки приложения на аккаунт: GitHub сам спросит,
+// на какой аккаунт и на какие репозитории.
+func (o *OAuth) InstallURL(slug string) string {
+	return o.webURL + "/apps/" + slug + "/installations/new"
+}
 
 // Exchange меняет код авторизации на токен пользователя.
 func (o *OAuth) Exchange(ctx context.Context, code, redirectURI string) (string, error) {
@@ -186,3 +194,94 @@ func (o *OAuth) get(ctx context.Context, token, path string, out any) error {
 	}
 	return nil
 }
+
+// ── установки, видимые вошедшему ────────────────────────────────────────────
+
+// Installation — установка приложения, к которой у вошедшего есть доступ.
+type Installation struct {
+	ID           int64
+	AccountLogin string
+	AccountID    int64
+	AccountType  string
+}
+
+// UserInstallations — установки приложения, видимые предъявителю токена.
+// Это и есть доказательство права на установку: идентификаторы установок
+// идут подряд, и без этого списка любой мог бы приписать себе чужую.
+func (o *OAuth) UserInstallations(ctx context.Context, token string) ([]Installation, error) {
+	var out []Installation
+	for page := 1; page <= maxPages; page++ {
+		var resp struct {
+			Installations []struct {
+				ID      int64 `json:"id"`
+				Account struct {
+					Login string `json:"login"`
+					ID    int64  `json:"id"`
+					Type  string `json:"type"`
+				} `json:"account"`
+			} `json:"installations"`
+		}
+		if err := o.get(ctx, token, "/user/installations?per_page=100&page="+strconv.Itoa(page), &resp); err != nil {
+			return nil, err
+		}
+		for _, i := range resp.Installations {
+			out = append(out, Installation{
+				ID: i.ID, AccountLogin: i.Account.Login, AccountID: i.Account.ID, AccountType: i.Account.Type,
+			})
+		}
+		if len(resp.Installations) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// UserRepository — репозиторий установки, который вошедший видит и сам.
+type UserRepository struct {
+	Owner         string `json:"owner"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+	Private       bool   `json:"private"`
+	CloneURL      string `json:"clone_url"`
+	Description   string `json:"description,omitempty"`
+}
+
+// InstallationRepositories — пересечение репозиториев установки с личным
+// доступом вошедшего. Участник арендатора может привязать только то, что
+// видит сам на GitHub, а не всё, что отдала приложению установка.
+func (o *OAuth) InstallationRepositories(ctx context.Context, token string, installationID int64) ([]UserRepository, error) {
+	var out []UserRepository
+	path := "/user/installations/" + strconv.FormatInt(installationID, 10) + "/repositories"
+	for page := 1; page <= maxPages; page++ {
+		var resp struct {
+			Repositories []struct {
+				Name          string `json:"name"`
+				DefaultBranch string `json:"default_branch"`
+				Private       bool   `json:"private"`
+				CloneURL      string `json:"clone_url"`
+				Description   string `json:"description"`
+				Owner         struct {
+					Login string `json:"login"`
+				} `json:"owner"`
+			} `json:"repositories"`
+		}
+		if err := o.get(ctx, token, path+"?per_page=100&page="+strconv.Itoa(page), &resp); err != nil {
+			return nil, err
+		}
+		for _, r := range resp.Repositories {
+			out = append(out, UserRepository{
+				Owner: r.Owner.Login, Name: r.Name, DefaultBranch: r.DefaultBranch,
+				Private: r.Private, CloneURL: r.CloneURL, Description: r.Description,
+			})
+		}
+		if len(resp.Repositories) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// maxPages — предел листания: тысяча репозиториев на установку. Больше в
+// выпадающий список всё равно не помещается, а организации на десять тысяч
+// репозиториев подключают их не пачкой из интерфейса.
+const maxPages = 10

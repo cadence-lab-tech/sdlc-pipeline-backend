@@ -72,6 +72,8 @@ type Auth struct {
 	sessionTTL time.Duration
 	// Вход через GitHub (решение 0030). nil — выключен.
 	github *github.OAuth
+	// Адрес установки приложения (решение 0034); пусто — слаг не задан.
+	githubInstallURL string
 	// Профиль поставки (решение 0033): shared — квоты тарифа считаются,
 	// single — выделенный инстанс, пределы задаёт договор.
 	tenancy string

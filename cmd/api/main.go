@@ -121,8 +121,9 @@ func run() error {
 	}
 	if cfg.GitHubAppClientID != "" {
 		auth.UseGitHub(github.NewOAuth(cfg.GitHubWebURL, cfg.GitHubAPIURL,
-			cfg.GitHubAppClientID, cfg.GitHubAppClientSecret), cfg.SessionTTL)
-		log.Info("вход через GitHub", "client_id", cfg.GitHubAppClientID)
+			cfg.GitHubAppClientID, cfg.GitHubAppClientSecret), cfg.SessionTTL).
+			GitHubApp(cfg.GitHubAppSlug)
+		log.Info("вход через GitHub", "client_id", cfg.GitHubAppClientID, "app_slug", cfg.GitHubAppSlug)
 	}
 	switch {
 	case auth.Enforced():

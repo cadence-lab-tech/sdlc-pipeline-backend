@@ -47,24 +47,15 @@ type WebhookOutcome struct {
 }
 
 // ghInstallation — установка приложения, приславшая событие. Ноль означает
-// вебхук, настроенный на репозитории руками, а не приложением.
+// вебхук, настроенный на репозитории руками, а не приложением: такая
+// доставка не обслуживается (решение 0034) — на общем инстансе одноимённые
+// репозитории разных арендаторов различает только установка.
 type ghInstallation struct {
 	ID int64 `json:"id"`
 }
 
-// installationTargets оставляет репозитории тех проектов, которым событие
-// адресовано. Установка ноль (вебхук настроен руками) не фильтрует ничего.
-func installationTargets(targets []postgres.IndexTarget, installationID int64) []postgres.IndexTarget {
-	if installationID == 0 {
-		return targets
-	}
-	matched := make([]postgres.IndexTarget, 0, len(targets))
-	for _, t := range targets {
-		if t.InstallationID == nil || *t.InstallationID == installationID {
-			matched = append(matched, t)
-		}
-	}
-	return matched
+type ghFullName struct {
+	FullName string `json:"full_name"`
 }
 
 type ghRepo struct {
@@ -96,6 +87,10 @@ func (e *Engine) HandleGitHubEvent(ctx context.Context, event, deliveryID string
 			return nil
 		case "push":
 			return e.githubPush(ctx, tx, body, &out)
+		case "installation":
+			return e.githubInstallation(ctx, tx, body, &out)
+		case "installation_repositories":
+			return e.githubInstallationRepositories(ctx, tx, body, &out)
 		case "pull_request":
 			return e.githubPullRequest(ctx, tx, body, &out)
 		case "check_run", "check_suite", "status":
@@ -126,16 +121,19 @@ func (e *Engine) githubPush(ctx context.Context, tx pgx.Tx, body []byte, out *We
 		return nil
 	}
 
+	if p.Installation.ID == 0 {
+		out.Ignored = "доставка без установки приложения не обслуживается"
+		return nil
+	}
+	// Приложение приносит события всех своих установок, и доставка несёт
+	// installation.id. Сначала установка, потом координаты (решение 0034):
+	// одноимённый репозиторий другого арендатора событием не задевается, а
+	// репозиторий без установки событий не получает.
 	targets, err := e.store.RepositoriesByCoordinates(ctx, tx, "github",
-		p.Repository.Owner.Login, p.Repository.Name)
+		p.Repository.Owner.Login, p.Repository.Name, p.Installation.ID)
 	if err != nil {
 		return err
 	}
-	// Приложение приносит события всех своих установок, и доставка несёт
-	// installation.id (решение 0028). Если репозиторий с теми же координатами
-	// привязан к нескольким проектам, событие принадлежит тому, чья установка
-	// его прислала; проекты без установки остаются на прежнем пути.
-	targets = installationTargets(targets, p.Installation.ID)
 	for _, t := range targets {
 		watched := false
 		for _, b := range t.Branches {
@@ -157,7 +155,82 @@ func (e *Engine) githubPush(ctx context.Context, tx pgx.Tx, body []byte, out *We
 		}
 	}
 	if len(targets) == 0 {
-		out.Ignored = "репозиторий не привязан ни к одному проекту"
+		out.Ignored = "репозиторий не привязан этой установкой ни к одному проекту"
+	}
+	return nil
+}
+
+// githubInstallation — жизнь установки на стороне GitHub: снятие,
+// приостановка, возобновление. Строка остаётся, индексация останавливается,
+// собранный индекс живёт: отзыв по ошибке обычен, а переиндексация с нуля
+// стоит денег. Установку, которую никто не подключал, событие не заводит:
+// чья она, знает только тот, кто нажал кнопку.
+func (e *Engine) githubInstallation(ctx context.Context, tx pgx.Tx, body []byte, out *WebhookOutcome) error {
+	var p struct {
+		Action       string         `json:"action"`
+		Installation ghInstallation `json:"installation"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return apperr.InvalidInput("тело installation не разбирается: %v", err)
+	}
+	var state string
+	switch p.Action {
+	case "deleted":
+		state = postgres.InstallationRemoved
+	case "suspend":
+		state = postgres.InstallationSuspended
+	case "unsuspend":
+		state = postgres.InstallationUnsuspended
+	default:
+		out.Ignored = "действие " + p.Action + " не обрабатывается"
+		return nil
+	}
+	n, err := e.store.SetInstallationState(ctx, tx, p.Installation.ID, state)
+	if err != nil {
+		return err
+	}
+	out.Touched = n
+	if n == 0 {
+		out.Ignored = "установка не подключена"
+	}
+	return nil
+}
+
+// githubInstallationRepositories — репозиторий убрали из установки или
+// вернули. Убранный помечается недоступным: индексация стоит, поиск по
+// собранному индексу работает.
+func (e *Engine) githubInstallationRepositories(ctx context.Context, tx pgx.Tx, body []byte, out *WebhookOutcome) error {
+	var p struct {
+		Action       string         `json:"action"`
+		Installation ghInstallation `json:"installation"`
+		Added        []ghFullName   `json:"repositories_added"`
+		Removed      []ghFullName   `json:"repositories_removed"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return apperr.InvalidInput("тело installation_repositories не разбирается: %v", err)
+	}
+	mark := func(list []ghFullName, available bool) error {
+		for _, r := range list {
+			owner, name, ok := strings.Cut(r.FullName, "/")
+			if !ok {
+				continue
+			}
+			n, err := e.store.SetRepositoryAvailability(ctx, tx, p.Installation.ID, owner, name, available)
+			if err != nil {
+				return err
+			}
+			out.Touched += n
+		}
+		return nil
+	}
+	if err := mark(p.Removed, false); err != nil {
+		return err
+	}
+	if err := mark(p.Added, true); err != nil {
+		return err
+	}
+	if out.Touched == 0 {
+		out.Ignored = "ни один из репозиториев не привязан этой установкой"
 	}
 	return nil
 }
