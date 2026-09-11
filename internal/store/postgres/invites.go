@@ -92,12 +92,19 @@ func (s *Store) oneInvite(ctx context.Context, q Querier, where string, arg any,
 	return inv, nil
 }
 
-// ListInvites — приглашения команды или проекта, свежие сверху.
-func (s *Store) ListInvites(ctx context.Context, q Querier, teamID, projectID *uuid.UUID) ([]domain.Invite, error) {
-	rows, err := q.Query(ctx, inviteSelect+`
-		WHERE ($1::uuid IS NULL OR i.team_id = $1)
-		  AND ($2::uuid IS NULL OR i.project_id = $2)
-		ORDER BY i.created_at DESC`, teamID, projectID)
+// ListTeamInvites и ListProjectInvites — приглашения цели, свежие сверху.
+// Два запроса, а не один с «$1 IS NULL OR»: такое условие не даёт
+// планировщику частичные индексы invites_team и invites_project.
+func (s *Store) ListTeamInvites(ctx context.Context, q Querier, teamID uuid.UUID) ([]domain.Invite, error) {
+	return s.listInvites(ctx, q, `i.team_id = $1`, teamID)
+}
+
+func (s *Store) ListProjectInvites(ctx context.Context, q Querier, projectID uuid.UUID) ([]domain.Invite, error) {
+	return s.listInvites(ctx, q, `i.project_id = $1`, projectID)
+}
+
+func (s *Store) listInvites(ctx context.Context, q Querier, where string, arg any) ([]domain.Invite, error) {
+	rows, err := q.Query(ctx, inviteSelect+` WHERE `+where+` ORDER BY i.created_at DESC`, arg)
 	if err != nil {
 		return nil, translate(err)
 	}

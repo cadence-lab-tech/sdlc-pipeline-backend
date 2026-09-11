@@ -149,7 +149,7 @@ func (a *Auth) ListTeamInvites(ctx context.Context, id Identity, key string) ([]
 	if _, err := a.teamRole(ctx, q, id, team.ID, true); err != nil {
 		return nil, err
 	}
-	return a.store.ListInvites(ctx, q, &team.ID, nil)
+	return a.store.ListTeamInvites(ctx, q, team.ID)
 }
 
 // ListProjectInvites — приглашения проекта для его администратора.
@@ -162,7 +162,7 @@ func (a *Auth) ListProjectInvites(ctx context.Context, id Identity, key string) 
 	if err := a.Require(ctx, id, project.ID, domain.MemberAdmin); err != nil {
 		return nil, err
 	}
-	return a.store.ListInvites(ctx, q, nil, &project.ID)
+	return a.store.ListProjectInvites(ctx, q, project.ID)
 }
 
 // RevokeInvite — отзыв выданного. Отзывает тот, кто вправе выдать
