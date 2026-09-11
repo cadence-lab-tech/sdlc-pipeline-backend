@@ -17,13 +17,19 @@ type runner struct {
 	cfg Config
 	log *slog.Logger
 	api *client
+	// Рабочие копии задач; nil — раннер без клонов, агент в его каталоге.
+	ws *workspaces
 
 	mu      sync.Mutex
 	running map[string]bool
 }
 
 func newRunner(cfg Config, log *slog.Logger) *runner {
-	return &runner{cfg: cfg, log: log, api: newClient(cfg), running: map[string]bool{}}
+	r := &runner{cfg: cfg, log: log, api: newClient(cfg), running: map[string]bool{}}
+	if cfg.ReposDir != "" {
+		r.ws = newWorkspaces(cfg.ReposDir, cfg.WorktreesDir, log)
+	}
+	return r
 }
 
 // run опрашивает очередь и раздаёт свободные задачи слотам.
@@ -142,6 +148,17 @@ func (r *runner) mark(task string, busy bool) {
 func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	log := r.log.With("task", item.Task.Key, "role", claim.roleKey(item.RoleKey))
 
+	space, err := r.prepareWorkspace(ctx, item.Task.Key, claim)
+	if err != nil {
+		// Агент в чужом каталоге хуже, чем агент, который не запустился:
+		// задача вернётся в очередь, а причина останется в ленте.
+		log.Error("рабочая копия не подготовлена", "error", err)
+		r.releaseQuietly(ctx, item.Task.Key, "раннер не подготовил рабочую копию: "+err.Error())
+		return
+	}
+	defer r.cleanupWorkspace(ctx, space)
+	workdir := space.dir()
+
 	config, cleanup, err := r.mcpConfig()
 	if err != nil {
 		log.Error("не собрать конфигурацию MCP", "error", err)
@@ -150,19 +167,20 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	}
 	defer cleanup()
 
-	argv := r.argv(item, claim, config)
+	argv := r.argv(item, claim, config, workdir)
 	if r.cfg.DryRun {
-		log.Info("сухой прогон", "argv", strings.Join(argv, " "))
+		log.Info("сухой прогон", "argv", strings.Join(argv, " "), "workdir", workdir)
 		r.releaseQuietly(ctx, item.Task.Key, "сухой прогон раннера")
 		return
 	}
-	log.Info("запуск агента", "model", claim.model(), "command", argv[0])
+	log.Info("запуск агента", "model", claim.model(), "command", argv[0], "workdir", workdir)
 
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
 	stop := r.keepLease(runCtx, item.Task.Key, claim)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
+	cmd.Dir = workdir
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	stop()
@@ -185,6 +203,28 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 		// Молчание честнее выдуманного нуля: прогон останется «неизвестно».
 		log.Info("агент отработал, стоимость неизвестна")
 	}
+}
+
+// prepareWorkspace заводит рабочие копии по области задачи из ответа
+// захвата. Без клонов раннер работает по-старому: копий нет.
+func (r *runner) prepareWorkspace(ctx context.Context, task string, claim claimResult) (*workspace, error) {
+	if r.ws == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	return r.ws.prepare(ctx, task, claim.Context.Repositories)
+}
+
+// cleanupWorkspace убирает копии и после остановки раннера: агент уже
+// отработал, а копия без уборки занимала бы место и каталог задачи.
+func (r *runner) cleanupWorkspace(ctx context.Context, space *workspace) {
+	if r.ws == nil || space == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	r.ws.cleanup(ctx, space)
 }
 
 // keepLease продлевает аренду, пока агент работает: он может молчать долго,
@@ -222,9 +262,10 @@ func (r *runner) releaseQuietly(ctx context.Context, task, note string) {
 // argv собирает команду запуска из шаблона. Модель и инструменты приезжают из
 // версии роли: «аналитик думает большой моделью, ревьюер читает маленькой» —
 // свойство роли, а не задачи и не раннера.
-func (r *runner) argv(item queueItem, claim claimResult, mcpConfig string) []string {
+func (r *runner) argv(item queueItem, claim claimResult, mcpConfig, workdir string) []string {
 	replacer := strings.NewReplacer(
 		"{task}", item.Task.Key,
+		"{workdir}", workdir,
 		"{role}", claim.roleKey(item.RoleKey),
 		"{model}", claim.model(),
 		"{allowed_tools}", strings.Join(claim.allowTools(), ","),
