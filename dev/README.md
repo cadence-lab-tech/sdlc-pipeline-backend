@@ -196,6 +196,25 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 Гейт `human_approval` в любом режиме закрывает только принципал вида `user`:
 агент, даже сопровождающий, поставить апрув не может.
 
+**Приглашения ссылкой** (решение 0035). Лид зовёт в организацию, администратор
+проекта — в проект; права, срок (1-30 дней, по умолчанию неделя), уровни и
+роли проверяет сервер:
+
+```bash
+clab invite create --team acme --role lead --days 3
+clab invite create --project SDLC --level agent --roles developer   # без --project — SDLC_PROJECT или git remote
+clab invite list --team acme          # статус, роль или уровень, кто выдал, срок, кто принял
+clab invite revoke <id>               # полный ID из списка
+```
+
+Ссылка `<адрес хоста>/invite/clab_inv_…` печатается один раз; `clab --json
+invite create …` отдаёт ответ сервера и поле `url`. Выдаёт и принимает
+приглашение только человек, в любом режиме: в режиме заголовка актор по
+умолчанию `agent:$USER`, поэтому локально — `SDLC_ACTOR=user:<хэндл>`.
+Ссылка строится от адреса хоста clab, а на `make up` это API `:8088`, не
+интерфейс. Чтобы ссылка открывалась в интерфейсе на vite, выдавайте с
+`--host localhost:5173`: dev-сервер проксирует `/v1`, и запрос уходит туда же.
+
 **Вход CLI через браузер** ([решение 0032](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0032-cli-login-device-flow.md)).
 Человеку токен руками не нужен: `clab auth login --host http://localhost:8088`
 печатает код, открывает `/login/cli`, и после «Разрешить» в интерфейсе

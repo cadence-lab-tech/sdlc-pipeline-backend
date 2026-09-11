@@ -578,6 +578,112 @@ func renderMembers(raw json.RawMessage) error {
 	return nil
 }
 
+// inviteRow — приглашение из ответа сервера (решение 0035). Токена в нём нет:
+// его сервер отдаёт один раз рядом, в ответе на выдачу.
+type inviteRow struct {
+	ID               string     `json:"id"`
+	TargetKind       string     `json:"target_kind"`
+	TeamKey          *string    `json:"team_key"`
+	ProjectKey       *string    `json:"project_key"`
+	TargetName       string     `json:"target_name"`
+	TeamRole         *string    `json:"team_role"`
+	Level            *string    `json:"level"`
+	RoleKeys         []string   `json:"role_keys"`
+	Status           string     `json:"status"`
+	CreatedByHandle  string     `json:"created_by_handle"`
+	ExpiresAt        *time.Time `json:"expires_at"`
+	AcceptedByHandle *string    `json:"accepted_by_handle"`
+	AcceptedAt       *time.Time `json:"accepted_at"`
+	RevokedByHandle  *string    `json:"revoked_by_handle"`
+	RevokedAt        *time.Time `json:"revoked_at"`
+}
+
+func (i inviteRow) isProject() bool { return i.ProjectKey != nil || i.TargetKind == "project" }
+
+// target — «team acme — Acme» или «project CLAB — Название».
+func (i inviteRow) target() string {
+	key := ptr(i.TeamKey)
+	if i.isProject() {
+		key = ptr(i.ProjectKey)
+	}
+	s := strings.TrimSpace(i.TargetKind + " " + key)
+	if i.TargetName != "" {
+		s += " — " + i.TargetName
+	}
+	return s
+}
+
+// role — роль в команде у командного приглашения, уровень у проектного.
+func (i inviteRow) role() string {
+	if i.isProject() {
+		return dash(ptr(i.Level))
+	}
+	return dash(ptr(i.TeamRole))
+}
+
+// roles — роли специалистов проектного приглашения; nil — любые.
+func (i inviteRow) roles() string {
+	if !i.isProject() {
+		return "—"
+	}
+	return joinOr(i.RoleKeys, "любые")
+}
+
+// outcome — чем кончилось приглашение: кто принял или кто отозвал.
+func (i inviteRow) outcome() string {
+	switch {
+	case i.AcceptedByHandle != nil:
+		return *i.AcceptedByHandle + " " + when(i.AcceptedAt)
+	case i.RevokedByHandle != nil:
+		return "отозвал " + *i.RevokedByHandle + " " + when(i.RevokedAt)
+	}
+	return "—"
+}
+
+// inviteStatus — подпись статуса приглашения. Незнакомое значение
+// показывается как есть: сервер новее CLI.
+func inviteStatus(s string) string {
+	switch s {
+	case "pending":
+		return "выдан"
+	case "accepted":
+		return "принят"
+	case "expired":
+		return "протух"
+	case "revoked":
+		return "отозван"
+	}
+	return dash(s)
+}
+
+// renderInvites — список приглашений цели в порядке сервера, свежие сверху.
+// ID полностью: отзыв требует UUID целиком.
+func renderInvites(raw json.RawMessage) error {
+	var out struct {
+		Invites []inviteRow `json:"invites"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	t := newTable("ID", "СТАТУС", "РОЛЬ", "РОЛИ", "ВЫДАЛ", "ИСТЕКАЕТ", "ПРИНЯЛ")
+	for _, inv := range out.Invites {
+		t.add(inv.ID, inviteStatus(inv.Status), inv.role(), inv.roles(), dash(inv.CreatedByHandle),
+			when(inv.ExpiresAt), inv.outcome())
+	}
+	t.print()
+	return nil
+}
+
+func renderInviteRevoked(raw json.RawMessage) error {
+	var inv inviteRow
+	if err := decode(raw, &inv); err != nil {
+		return err
+	}
+	kv("ID:", inv.ID, "Куда:", inv.target(), "Статус:", inviteStatus(inv.Status),
+		"Отозвал:", dash(ptr(inv.RevokedByHandle))+" "+when(inv.RevokedAt))
+	return nil
+}
+
 func renderProjects(raw json.RawMessage) error {
 	var out struct {
 		Projects []struct {
