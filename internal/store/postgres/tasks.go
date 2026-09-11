@@ -436,6 +436,31 @@ func taskTypeInProperties(props json.RawMessage, taskType string) (json.RawMessa
 	return out, taskType, nil
 }
 
+// DeclareTaskTypes объявляет типы задач в проекте: системное свойство type
+// получает их в перечень значений, сохраняя порядок и не теряя уже
+// объявленных. Определения может не быть вовсе — миграция 000011 завела его
+// только проектам, существовавшим на тот момент, а новый проект живёт без него
+// до первого активированного цикла. Тип по умолчанию объявлен всегда: задача
+// без названного типа должна куда-то деваться.
+func (s *Store) DeclareTaskTypes(ctx context.Context, q Querier, projectID uuid.UUID, types []string) error {
+	declared := append([]string{domain.DefaultTaskType}, types...)
+	_, err := q.Exec(ctx, `
+		INSERT INTO task_property_defs
+		    (project_id, key, name, description, value_type, default_value, enum_values,
+		     is_system, expose_to_agent, position)
+		VALUES ($1, 'type', 'Тип задачи',
+		        'Определяет, по какому циклу идёт задача. Перечень типов пополняется активацией цикла.',
+		        'enum', to_jsonb($2::text), $3::text[], true, true, 0)
+		ON CONFLICT (project_id, key) DO UPDATE SET enum_values = (
+		    SELECT array_agg(v ORDER BY first)
+		    FROM (SELECT v, min(ord) AS first
+		          FROM unnest(task_property_defs.enum_values || EXCLUDED.enum_values)
+		               WITH ORDINALITY AS u(v, ord)
+		          GROUP BY v) AS merged)`,
+		projectID, domain.DefaultTaskType, declared)
+	return translate(err)
+}
+
 // checkTaskType сверяет тип с перечнем, объявленным проектом.
 func (s *Store) checkTaskType(ctx context.Context, q Querier, projectID uuid.UUID, taskType string) error {
 	values, err := s.TaskTypes(ctx, q, projectID)
