@@ -107,12 +107,21 @@ func (a *Auth) Enforced() bool { return a.mode == AuthToken }
 
 // NewToken генерирует токен, его хеш и префикс для списка.
 func NewToken() (token, hash, prefix string, err error) {
+	token, err = newSecret(TokenPrefix)
+	if err != nil {
+		return "", "", "", err
+	}
+	return token, HashToken(token), token[:12], nil
+}
+
+// newSecret — случайная строка с префиксом вида: токен доступа и
+// ссылка-приглашение различаются с первого взгляда и не подменяют друг друга.
+func newSecret(prefix string) (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
-		return "", "", "", apperr.Internal(err, "генерация токена")
+		return "", apperr.Internal(err, "генерация токена")
 	}
-	token = TokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
-	return token, HashToken(token), token[:12], nil
+	return prefix + base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 // HashToken — то, что лежит в базе вместо токена.

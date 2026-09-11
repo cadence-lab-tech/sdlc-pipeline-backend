@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)
 	maintainer := s.guard(domain.MemberMaintainer)
+	projectAdmin := s.guard(domain.MemberAdmin)
 
 	v1 := r.Group("/v1", s.authenticate(domain.PrincipalUser))
 	{
@@ -114,6 +115,13 @@ func (s *Server) Handler() http.Handler {
 		// возврат от GitHub с кодом повторной авторизации.
 		v1.GET("/teams/:teamKey/github/installations", s.teamInstallations)
 		v1.POST("/teams/:teamKey/github/connect", s.connectGitHub)
+		// Приглашения ссылкой (решение 0035): в команду выдаёт лид, в проект —
+		// администратор. Просмотр и приём — по токену в теле, любым вошедшим.
+		v1.POST("/teams/:teamKey/invites", s.createTeamInvite)
+		v1.GET("/teams/:teamKey/invites", s.listTeamInvites)
+		v1.DELETE("/invites/:inviteID", s.revokeInvite)
+		v1.POST("/invites/lookup", s.lookupInvite)
+		v1.POST("/invites/accept", s.acceptInvite)
 
 		v1.GET("/projects", s.listProjects)
 		// Кто может завести проект, решает Auth: любой вошедший при открытом
@@ -141,6 +149,10 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
 		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)
 		v1.DELETE("/projects/:projectKey/members/:handle", maintainer, s.removeMember)
+		// Гард — admin, как у правила в Auth: приглашение — отложенное
+		// добавление участника, а его делает администратор проекта.
+		v1.POST("/projects/:projectKey/invites", projectAdmin, s.createProjectInvite)
+		v1.GET("/projects/:projectKey/invites", projectAdmin, s.listProjectInvites)
 
 		// Перенос правил: экспорт и импорт связки, каталог репозиториев и
 		// документов (решение 0022).
