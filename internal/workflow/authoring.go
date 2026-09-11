@@ -622,6 +622,12 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			return err
 		}
 
+		// Типы задач цикла проект узнаёт из самой активации: иначе цикл для
+		// эпиков активен, а завести эпик нельзя — тип «не объявлен в проекте».
+		if err := a.store.DeclareTaskTypes(ctx, tx, wf.ProjectID, wf.TaskTypes); err != nil {
+			return err
+		}
+
 		for _, id := range retired {
 			carried, err := a.store.OpenTasksOnWorkflow(ctx, tx, id)
 			if err != nil {
