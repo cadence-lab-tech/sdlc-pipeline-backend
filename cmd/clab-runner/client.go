@@ -130,7 +130,23 @@ type claimResult struct {
 		ExpiresAt                time.Time `json:"expires_at"`
 		HeartbeatIntervalSeconds int       `json:"heartbeat_interval_seconds"`
 	} `json:"lease"`
+	Context claimContext `json:"context"`
 }
+
+// claimContext — область задачи из ответа захвата. Рабочие копии заводятся
+// ровно для этих репозиториев: это та область, на которую выдана аренда, и
+// отдельный запрос за ней мог бы разойтись с захватом.
+type claimContext struct {
+	Repositories []claimRepo `json:"repositories"`
+}
+
+type claimRepo struct {
+	Owner         string `json:"owner"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+}
+
+func (r claimRepo) fullName() string { return r.Owner + "/" + r.Name }
 
 func (c *client) claim(ctx context.Context, task, session string) (claimResult, error) {
 	var out claimResult
