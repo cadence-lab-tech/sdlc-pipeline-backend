@@ -18,6 +18,12 @@
 //	SDLC_RUNNER_COMMAND   чем запускать агента (по умолчанию Claude Code)
 //	SDLC_RUNNER_TIMEOUT   сколько ждать агента, прежде чем считать его мёртвым
 //	SDLC_RUNNER_ONCE      забрать одну задачу и выйти: удобно в CI
+//	SDLC_RUNNER_REPOS     каталог с клонами репозиториев проекта; клон ищется
+//	                      по origin. С ним агент работает в git worktree своей
+//	                      задачи, без него — в каталоге раннера, и тогда больше
+//	                      одного слота не дадут
+//	SDLC_RUNNER_WORKTREES куда класть рабочие копии задач (по умолчанию
+//	                      <SDLC_RUNNER_REPOS>/.worktrees)
 package main
 
 import (
@@ -44,7 +50,11 @@ func main() {
 
 	r := newRunner(cfg, log)
 	log.Info("раннер запущен", "version", version, "project", cfg.Project,
-		"roles", cfg.Roles, "slots", cfg.Slots, "command", cfg.Command)
+		"roles", cfg.Roles, "slots", cfg.Slots, "command", cfg.Command,
+		"repos", cfg.ReposDir, "worktrees", cfg.WorktreesDir)
+	if cfg.ReposDir == "" {
+		log.Warn("SDLC_RUNNER_REPOS не задан: агент работает в каталоге раннера, без рабочей копии задачи")
+	}
 
 	if err := r.run(ctx); err != nil {
 		log.Error("раннер остановлен", "error", err)

@@ -61,7 +61,7 @@ func TestArgvSubstitutions(t *testing.T) {
 	}{Key: "developer", ModelHint: &model}
 	claim.Role.ToolPolicy.Allow = []string{"Read", "Grep"}
 
-	argv := strings.Join(r.argv(item, claim, "/tmp/mcp.json"), " ")
+	argv := strings.Join(r.argv(item, claim, "/tmp/mcp.json", ""), " ")
 	if !strings.Contains(argv, "--model claude-sonnet-5") {
 		t.Fatalf("модель роли не подставлена: %s", argv)
 	}
@@ -74,9 +74,16 @@ func TestArgvSubstitutions(t *testing.T) {
 
 	// Роль без подсказки модели — законный случай: флаг уходит целиком.
 	claim.Role.ModelHint = nil
-	argv = strings.Join(r.argv(item, claim, "/tmp/mcp.json"), " ")
+	argv = strings.Join(r.argv(item, claim, "/tmp/mcp.json", ""), " ")
 	if strings.Contains(argv, "--model") {
 		t.Fatalf("пустая модель обязана убрать флаг: %s", argv)
+	}
+
+	// Каталог копии доступен агенту, которому его надо передать флагом.
+	r.cfg.Command = "agent --dir {workdir} {prompt}"
+	argv = strings.Join(r.argv(item, claim, "/tmp/mcp.json", "/w/SDLC-42/backend"), " ")
+	if !strings.Contains(argv, "--dir /w/SDLC-42/backend") {
+		t.Fatalf("каталог копии не подставлен: %s", argv)
 	}
 }
 
