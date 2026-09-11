@@ -268,11 +268,13 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	}
 	repo, rest := popTask(rest)
 	var projectFlag, hint, branch, watch string
+	var installation int64
 	_, err := flags("repo", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&hint, "hint", "", "за что отвечает: backend, frontend, docs, infra")
 		fs.StringVar(&branch, "branch", "", "основная ветка")
 		fs.StringVar(&watch, "watch", "", "ветки под индексацией через запятую")
+		fs.Int64Var(&installation, "installation", 0, "установка GitHub App команды-владельца; без неё подбирается та, которой репозиторий доступен")
 	})
 	if err != nil {
 		return err
@@ -287,6 +289,9 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	body := map[string]any{"repository": repo, "role_hint": hint, "default_branch": branch}
 	if watch != "" {
 		body["watch_branches"] = splitCSV(watch)
+	}
+	if installation != 0 {
+		body["installation_id"] = installation
 	}
 	var out any
 	if err := c.post(ctx, "/projects/"+key+"/repositories", body, &out); err != nil {

@@ -110,6 +110,10 @@ func (s *Server) Handler() http.Handler {
 		// видят участники команды.
 		v1.GET("/teams/:teamKey/budgets", s.teamBudgets)
 		v1.PUT("/teams/:teamKey/budgets", s.setTeamBudget)
+		// Установки GitHub App на команде (решение 0034): подключение —
+		// возврат от GitHub с кодом повторной авторизации.
+		v1.GET("/teams/:teamKey/github/installations", s.teamInstallations)
+		v1.POST("/teams/:teamKey/github/connect", s.connectGitHub)
 
 		v1.GET("/projects", s.listProjects)
 		// Кто может завести проект, решает Auth: любой вошедший при открытом
@@ -129,8 +133,10 @@ func (s *Server) Handler() http.Handler {
 
 		// Доступ к GitHub у проекта: установка приложения либо именованный
 		// секрет (решение 0028).
+		v1.GET("/projects/:projectKey/github", maintainer, s.projectGitHub)
 		v1.PUT("/projects/:projectKey/github", maintainer, s.setProjectGitHub)
 		v1.GET("/projects/:projectKey/github/check", maintainer, s.checkProjectGitHub)
+		v1.POST("/projects/:projectKey/github/repositories", maintainer, s.attachRepositories)
 
 		v1.GET("/projects/:projectKey/members", viewer, s.listMembers)
 		v1.PUT("/projects/:projectKey/members", maintainer, s.setMember)

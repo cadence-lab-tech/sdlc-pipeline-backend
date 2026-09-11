@@ -49,6 +49,10 @@ type AddRepositoryInput struct {
 	WatchBranches []string
 	ExcludeGlobs  []string
 	IndexEnabled  *bool
+	// Установка команды-владельца, которой читать репозиторий (решение
+	// 0034). nil — подбирается среди живых установок команды та, которой
+	// репозиторий доступен; ни одной — учётные данные проекта.
+	InstallationID *int64
 }
 
 // ParseRepository приводит "owner/name", "github.com/owner/name" и
@@ -82,8 +86,25 @@ func (e *Engine) AddRepository(ctx context.Context, projectKey string, in AddRep
 	if err != nil {
 		return domain.Repository{}, false, err
 	}
-	if err := e.checkRepoAccess(ctx, project, owner, name); err != nil {
-		return domain.Repository{}, false, err
+	installation := in.InstallationID
+	switch {
+	case installation != nil:
+		inst, err := e.installationOf(ctx, project, *installation)
+		if err != nil {
+			return domain.Repository{}, false, err
+		}
+		if err := e.probeInstallation(ctx, inst.InstallationID, owner, name); err != nil {
+			return domain.Repository{}, false, err
+		}
+	default:
+		if installation, err = e.pickInstallation(ctx, project, owner, name); err != nil {
+			return domain.Repository{}, false, err
+		}
+		if installation == nil {
+			if err := e.checkRepoAccess(ctx, project, owner, name); err != nil {
+				return domain.Repository{}, false, err
+			}
+		}
 	}
 
 	var out domain.Repository
@@ -94,7 +115,7 @@ func (e *Engine) AddRepository(ctx context.Context, projectKey string, in AddRep
 			DefaultBranch: in.DefaultBranch, CloneURL: in.CloneURL, Visibility: in.Visibility,
 			RoleHint: optional(in.RoleHint), CredentialRef: optional(in.CredentialRef),
 			WatchBranches: in.WatchBranches, ExcludeGlobs: in.ExcludeGlobs,
-			IndexEnabled: in.IndexEnabled,
+			IndexEnabled: in.IndexEnabled, InstallationID: installation,
 		})
 		return err
 	})

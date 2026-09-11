@@ -184,6 +184,80 @@ func (s *Server) setProjectGitHub(c *gin.Context) {
 	c.JSON(http.StatusOK, project)
 }
 
+// projectGitHub — установки команды-владельца и учётные данные проекта, без
+// похода в сеть: это открывается вместе с настройками.
+func (s *Server) projectGitHub(c *gin.Context) {
+	out, err := s.engine.ProjectGitHub(c.Request.Context(), c.Param("projectKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+type attachRepositoriesRequest struct {
+	InstallationID int64               `json:"installation_id" binding:"required"`
+	Repositories   []workflow.RepoPick `json:"repositories" binding:"required"`
+}
+
+// attachRepositories привязывает пачку репозиториев одной установки —
+// то, что человек отметил в списке после возврата от GitHub (решение 0034).
+func (s *Server) attachRepositories(c *gin.Context) {
+	var req attachRepositoriesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	out, err := s.engine.AttachRepositories(c.Request.Context(), c.Param("projectKey"),
+		workflow.AttachRepositoriesInput{InstallationID: req.InstallationID, Repositories: req.Repositories})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// ── установки на команде ────────────────────────────────────────────────────
+
+func (s *Server) teamInstallations(c *gin.Context) {
+	list, err := s.auth.ListInstallations(c.Request.Context(), identity(c), c.Param("teamKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"installations": list})
+}
+
+type connectGitHubRequest struct {
+	// Код повторной авторизации: им бэкенд узнаёт, какие установки видны
+	// вошедшему. Токен живёт в запросе и не сохраняется.
+	Code        string `json:"code" binding:"required"`
+	RedirectURI string `json:"redirect_uri"`
+	// Только что поставленная установка; без неё — перечитать репозитории.
+	InstallationID *int64 `json:"installation_id"`
+	// Проект, из настроек которого пришли: право участника проекта.
+	Project string `json:"project"`
+}
+
+// connectGitHub — возврат от GitHub: записать установку на команду и отдать
+// репозитории на выбор (решение 0034).
+func (s *Server) connectGitHub(c *gin.Context) {
+	var req connectGitHubRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	out, err := s.auth.ConnectGitHub(c.Request.Context(), identity(c), workflow.ConnectGitHubInput{
+		TeamKey: c.Param("teamKey"), ProjectKey: req.Project,
+		Code: req.Code, RedirectURI: req.RedirectURI, InstallationID: req.InstallationID,
+	})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 // checkProjectGitHub ходит в провайдера по каждому репозиторию проекта.
 // Ручка по кнопке из настроек: это единственное место, где система спрашивает
 // провайдера о доступе не по делу, а чтобы показать человеку результат.
@@ -278,6 +352,9 @@ type addRepositoryRequest struct {
 	WatchBranches []string `json:"watch_branches"`
 	ExcludeGlobs  []string `json:"exclude_globs"`
 	IndexEnabled  *bool    `json:"index_enabled"`
+	// Установка команды-владельца (решение 0034); без неё подбирается та,
+	// которой репозиторий доступен.
+	InstallationID *int64 `json:"installation_id"`
 }
 
 func (s *Server) addRepository(c *gin.Context) {
@@ -291,7 +368,7 @@ func (s *Server) addRepository(c *gin.Context) {
 			Repository: req.Repository, DefaultBranch: req.DefaultBranch, CloneURL: req.CloneURL,
 			Visibility: req.Visibility, RoleHint: req.RoleHint, CredentialRef: req.CredentialRef,
 			WatchBranches: req.WatchBranches, ExcludeGlobs: req.ExcludeGlobs,
-			IndexEnabled: req.IndexEnabled,
+			IndexEnabled: req.IndexEnabled, InstallationID: req.InstallationID,
 		})
 	if err != nil {
 		fail(c, s.log, err)

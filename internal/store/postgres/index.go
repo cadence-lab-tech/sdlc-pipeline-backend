@@ -23,12 +23,33 @@ type IndexTarget struct {
 	Branches      []string
 	ExcludeGlobs  []string
 	CredentialRef *string
-	// Учётные данные проекта, к которому привязан репозиторий.
+	// Установка, которой читается репозиторий: своя, а без неё — проекта
+	// (решение 0034); и имя секрета проекта.
 	InstallationID       *int64
 	ProjectCredentialRef *string
 }
 
 func (t IndexTarget) Repository() string { return t.Owner + "/" + t.Name }
+
+// indexTargetCols — столбцы цели с алиасами r (repositories) и p (projects).
+const indexTargetCols = `r.id, r.project_id, p.key, r.owner, r.name,
+	       r.watch_branches, r.exclude_globs, r.credential_ref,
+	       coalesce(r.installation_id, p.github_installation_id), p.github_credential_ref`
+
+// indexTargetLive — репозиторий читаем: не убран из установки, а его
+// установка (алиас gi, LEFT JOIN github_installations) не снята и не
+// приостановлена. Снятая установка индексацию останавливает, но собранный
+// индекс не трогает.
+const indexTargetLive = `r.unavailable_at IS NULL
+	  AND (gi.id IS NULL OR (gi.suspended_at IS NULL AND gi.removed_at IS NULL))`
+
+func scanIndexTarget(row interface{ Scan(...any) error }) (IndexTarget, error) {
+	var t IndexTarget
+	err := row.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
+		&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
+		&t.InstallationID, &t.ProjectCredentialRef)
+	return t, err
+}
 
 // IndexRun — прогон индексации репозитория на конкретном коммите.
 type IndexRun struct {
@@ -70,7 +91,7 @@ const indexRunSelect = `
 	       ir.chunks_reused, ir.chunks_embedded,
 	       ir.started_at, ir.finished_at, ir.error, ir.created_at,
 	       r.exclude_globs, r.credential_ref,
-	       p.github_installation_id, p.github_credential_ref
+	       coalesce(r.installation_id, p.github_installation_id), p.github_credential_ref
 	FROM repo_index_runs ir
 	JOIN repositories r ON r.id = ir.repository_id
 	JOIN projects p ON p.id = r.project_id`
@@ -92,12 +113,11 @@ func scanIndexRun(row interface{ Scan(...any) error }) (IndexRun, error) {
 // индексации: зеркало или архив.
 func (s *Store) IndexTargets(ctx context.Context, q Querier) ([]IndexTarget, error) {
 	rows, err := q.Query(ctx, `
-		SELECT r.id, r.project_id, p.key, r.owner, r.name,
-		       r.watch_branches, r.exclude_globs, r.credential_ref,
-		       p.github_installation_id, p.github_credential_ref
+		SELECT `+indexTargetCols+`
 		FROM repositories r
 		JOIN projects p ON p.id = r.project_id
-		WHERE r.index_enabled
+		LEFT JOIN github_installations gi ON gi.installation_id = r.installation_id
+		WHERE r.index_enabled AND `+indexTargetLive+`
 		ORDER BY p.key, r.owner, r.name`)
 	if err != nil {
 		return nil, translate(err)
@@ -106,10 +126,8 @@ func (s *Store) IndexTargets(ctx context.Context, q Querier) ([]IndexTarget, err
 
 	out := []IndexTarget{}
 	for rows.Next() {
-		var t IndexTarget
-		if err := rows.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
-			&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
-			&t.InstallationID, &t.ProjectCredentialRef); err != nil {
+		t, err := scanIndexTarget(rows)
+		if err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, t)
@@ -225,10 +243,13 @@ func (s *Store) ClaimIndexRun(ctx context.Context) (IndexRun, bool, error) {
 			    attempt = attempt + 1,
 			    error = NULL
 			WHERE id = (
-			    SELECT id FROM repo_index_runs
-			    WHERE state = 'queued' AND next_attempt_at <= now()
-			    ORDER BY created_at
-			    FOR UPDATE SKIP LOCKED
+			    SELECT ir.id FROM repo_index_runs ir
+			    JOIN repositories r ON r.id = ir.repository_id
+			    LEFT JOIN github_installations gi ON gi.installation_id = r.installation_id
+			    WHERE ir.state = 'queued' AND ir.next_attempt_at <= now()
+			      AND `+indexTargetLive+`
+			    ORDER BY ir.created_at
+			    FOR UPDATE OF ir SKIP LOCKED
 			    LIMIT 1)
 			RETURNING id`).Scan(&id)
 		if isNoRows(err) {

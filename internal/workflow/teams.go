@@ -26,6 +26,8 @@ type TeamDetail struct {
 	Projects []domain.ProjectTeam `json:"projects"`
 	// Действующий тариф: предел участников читается вместе с составом.
 	Plan domain.Plan `json:"plan"`
+	// Установки GitHub App, записанные на команду (решение 0034).
+	Installations []domain.GitHubInstallation `json:"installations"`
 }
 
 type CreateTeamInput struct {
@@ -71,7 +73,11 @@ func (a *Auth) GetTeam(ctx context.Context, id Identity, key string) (TeamDetail
 	if err != nil {
 		return TeamDetail{}, err
 	}
-	return TeamDetail{Team: team, Members: members, Projects: projects, Plan: plan}, nil
+	installations, err := a.store.ListInstallations(ctx, q, team.ID)
+	if err != nil {
+		return TeamDetail{}, err
+	}
+	return TeamDetail{Team: team, Members: members, Projects: projects, Plan: plan, Installations: installations}, nil
 }
 
 // CreateTeam заводит организацию и делает создателя её лидом: команда без

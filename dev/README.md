@@ -211,7 +211,10 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC \
 `dev/e2e.sh` и раннер.
 
 **Вход через GitHub.** У GitHub App в настройках есть раздел OAuth: Client ID
-и Client secret, callback URL — `https://<адрес интерфейса>/login/github`.
+и Client secret, callback URL — `https://<адрес интерфейса>/login/github`;
+второй callback URL и Setup URL (с «Redirect on update») —
+`https://<адрес интерфейса>/settings/github/callback`, по нему возвращается
+подключение установки.
 С `SDLC_GITHUB_APP_CLIENT_ID` и `SDLC_GITHUB_APP_CLIENT_SECRET` на странице
 входа появляется кнопка «Войти через GitHub»: браузер уходит за кодом
 авторизации, бэкенд меняет его на профиль (`POST /v1/auth/github/login`) и
@@ -220,6 +223,18 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 пользователя нигде не хранится: репозитории читаются установкой приложения,
 а не от имени вошедшего. Вошедший впервые ни в одном проекте не состоит —
 доступ ему выдаёт администратор проекта.
+
+**GitHub по кнопке.** С `SDLC_GITHUB_APP_SLUG` в настройках проекта и на
+странице команды появляется «Подключить GitHub»: человек ставит приложение
+на свой аккаунт или организацию, возвращается на
+`/settings/github/callback`, страница уводит его за кодом повторной
+авторизации (для входившего — без вопросов) и отдаёт код бэкенду
+(`POST /v1/teams/{key}/github/connect`). Тот записывает установку на
+команду, если она видна вошедшему, и возвращает репозитории установок
+команды, которые человек видит сам; отмеченные привязываются пачкой
+(`POST /v1/projects/{key}/github/repositories`). Установки команды —
+`clab team github`, привязка по координатам подбирает установку сама
+(`clab repo add`, `--installation` задаёт явно).
 
 **Создание проектов.** По умолчанию (`SDLC_PROJECT_CREATION=open`) проект
 заводит любой вошедший — из интерфейса или `clab project create`; без
@@ -260,9 +275,14 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 С секретом `SDLC_GITHUB_WEBHOOK_SECRET` сервис принимает события на
 `POST /webhooks/github` ([решение 0023](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0023-github-webhooks-write-to-queue.md)):
 `push` ставит коммит в очередь индексации, `pull_request` и `check_run`
-помечают привязанные PR к пересинхронизации. В сеть обработчик не ходит —
-воркер забирает очередь раз в `SDLC_INDEX_POLL_INTERVAL`. Локально без
-публичного адреса индексация по-прежнему идёт по таймеру.
+помечают привязанные PR к пересинхронизации, `installation` и
+`installation_repositories` отмечают снятие, приостановку и убранные из
+установки репозитории — индексация по ним останавливается, индекс остаётся.
+Доставка ищет репозиторий сначала по установке, потом по координатам:
+без `installation.id` она не обслуживается ([решение 0034](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0034-github-installation-on-tenant.md)).
+В сеть обработчик не ходит — воркер забирает очередь раз в
+`SDLC_INDEX_POLL_INTERVAL`. Локально без публичного адреса индексация
+по-прежнему идёт по таймеру.
 
 ## Объектное хранилище вместо тома
 
@@ -324,6 +344,7 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 | `SDLC_TENANCY` | `shared` | профиль поставки: `shared` — общий инстанс, пределы тарифа проверяются; `single` — выделенный, квот нет |
 | `SDLC_GITHUB_APP_CLIENT_ID` | пусто | Client ID GitHub App для входа людей через GitHub; задаётся вместе с секретом |
 | `SDLC_GITHUB_APP_CLIENT_SECRET` | пусто | Client secret того же приложения — обмен кода авторизации делает бэкенд |
+| `SDLC_GITHUB_APP_SLUG` | пусто | слаг приложения (`github.com/apps/<slug>`): адрес кнопки «Подключить GitHub»; без него кнопка выключена |
 | `SDLC_GITHUB_URL` | `https://github.com` | адрес сайта GitHub: там живёт `/login/oauth`; у GitHub Enterprise отличается от адреса API |
 | `SDLC_OIDC_ISSUER` | пусто | адрес корпоративного провайдера; пусто — вход только по выданным токенам |
 | `SDLC_OIDC_CLIENT_ID` | пусто | идентификатор приложения у провайдера; им же проверяется аудитория ID-токена |

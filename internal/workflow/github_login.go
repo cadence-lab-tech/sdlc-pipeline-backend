@@ -46,6 +46,9 @@ type GitHubSettings struct {
 	// Права, которые просит вход. У GitHub App они заданы самим приложением
 	// и параметр игнорируется; у обычного OAuth App нужны явно.
 	Scopes string `json:"scopes,omitempty"`
+	// Куда ведёт «Подключить GitHub» (решение 0034). Пусто — слаг
+	// приложения не задан.
+	InstallURL string `json:"install_url,omitempty"`
 }
 
 func (a *Auth) GitHubSettings() GitHubSettings {
@@ -56,6 +59,7 @@ func (a *Auth) GitHubSettings() GitHubSettings {
 		Enabled: true, ClientID: a.github.ClientID(),
 		AuthorizationEndpoint: a.github.AuthorizeURL(),
 		Scopes:                "read:user user:email",
+		InstallURL:            a.githubInstallURL,
 	}
 }
 

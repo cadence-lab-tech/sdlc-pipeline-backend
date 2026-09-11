@@ -126,8 +126,7 @@ func (s *Store) ProjectIDsByRepository(ctx context.Context, q Querier, owner, na
 
 func (s *Store) ListRepositories(ctx context.Context, q Querier, projectID uuid.UUID) ([]domain.Repository, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, project_id, provider, owner, name, default_branch,
-		       clone_url, visibility, access_mode, role_hint
+		SELECT `+repositoryCols+`
 		FROM repositories WHERE project_id = $1 ORDER BY owner, name`, projectID)
 	if err != nil {
 		return nil, translate(err)
@@ -136,9 +135,8 @@ func (s *Store) ListRepositories(ctx context.Context, q Querier, projectID uuid.
 
 	out := []domain.Repository{}
 	for rows.Next() {
-		var r domain.Repository
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name,
-			&r.DefaultBranch, &r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint); err != nil {
+		r, err := scanRepository(rows)
+		if err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, r)
@@ -150,16 +148,12 @@ func (s *Store) ListRepositories(ctx context.Context, q Querier, projectID uuid.
 // Второй вариант нужен агенту: в задаче он оперирует ролью репозитория
 // ("backend"), а не координатами на GitHub.
 func (s *Store) FindRepository(ctx context.Context, q Querier, projectID uuid.UUID, ref string) (domain.Repository, error) {
-	var r domain.Repository
-	err := q.QueryRow(ctx, `
-		SELECT id, project_id, provider, owner, name, default_branch,
-		       clone_url, visibility, access_mode, role_hint
+	r, err := scanRepository(q.QueryRow(ctx, `
+		SELECT `+repositoryCols+`
 		FROM repositories
 		WHERE project_id = $1 AND (owner || '/' || name = $2 OR name = $2 OR role_hint = $2)
 		ORDER BY (owner || '/' || name = $2) DESC, (name = $2) DESC
-		LIMIT 1`, projectID, ref,
-	).Scan(&r.ID, &r.ProjectID, &r.Provider, &r.Owner, &r.Name,
-		&r.DefaultBranch, &r.CloneURL, &r.Visibility, &r.AccessMode, &r.RoleHint)
+		LIMIT 1`, projectID, ref))
 	if err != nil {
 		if isNoRows(err) {
 			return r, apperr.New(apperr.CodeUnknownRepository,

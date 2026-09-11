@@ -273,8 +273,14 @@ func TestGitHubWebhooks(t *testing.T) {
 	ctx := context.Background()
 	store, engine, _, _, system := setupPhase4(t, AuthHeader)
 
+	// Доставка несёт установку, и репозиторий должен читаться ею (решение
+	// 0034): у демонстрационного проекта установка по умолчанию.
+	if _, err := engine.SetProjectGitHub(ctx, "SDLC", SetGitHubInput{InstallationID: ptr(int64(42))}); err != nil {
+		t.Fatal(err)
+	}
 	push := []byte(`{"ref":"refs/heads/main","after":"abc123abc123abc123abc123abc123abc123abc1",
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}}}`)
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}},
+		"installation":{"id":42}}`)
 	out, err := engine.HandleGitHubEvent(ctx, "push", "d-1", push)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +300,8 @@ func TestGitHubWebhooks(t *testing.T) {
 	}
 	// Ветка не под наблюдением — игнорируется.
 	feature := []byte(`{"ref":"refs/heads/feature","after":"def456def456def456def456def456def456def4",
-		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}}}`)
+		"repository":{"name":"sdlc-pipeline-backend","owner":{"login":"cadence-lab-tech"}},
+		"installation":{"id":42}}`)
 	if out, err := engine.HandleGitHubEvent(ctx, "push", "d-3", feature); err != nil || out.Queued != 0 {
 		t.Fatalf("ветка вне наблюдения: %v %+v", err, out)
 	}
