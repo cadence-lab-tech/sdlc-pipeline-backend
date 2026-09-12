@@ -159,6 +159,9 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/projects/:projectKey/export", viewer, s.exportBundle)
 		v1.POST("/projects/:projectKey/import", maintainer, s.importBundle)
 		v1.POST("/projects/:projectKey/repositories", maintainer, s.addRepository)
+		// Отвязка — уровнем выше привязки: привязка обратима, отвязка уносит
+		// знание репозитория и документы из него.
+		v1.DELETE("/projects/:projectKey/repositories/:owner/:name", projectAdmin, s.removeRepository)
 		v1.GET("/projects/:projectKey/documents", viewer, s.listDocuments)
 		v1.POST("/projects/:projectKey/documents", maintainer, s.putDocument)
 		v1.GET("/projects/:projectKey/documents/:documentID", viewer, s.getDocument)

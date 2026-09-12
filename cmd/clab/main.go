@@ -77,7 +77,7 @@ func commands() []command {
 		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "clab export [--project SDLC] > bundle.json", cmdExport},
 		{"import", "применить связку к проекту или раздать её нескольким", "clab import --file bundle.json [--dry-run] | clab import --from SDLC --to ACME,WEB", cmdImport},
 		{"import-guide", "инструкция агенту по переносу правил команды", "clab import-guide", cmdImportGuide},
-		{"repo", "привязать репозиторий к проекту", "clab repo add acme/api [--hint backend] [--branch main] [--installation 42]", cmdRepo},
+		{"repo", "привязать репозиторий к проекту или отвязать", "clab repo add acme/api [--hint backend] [--branch main] [--installation 42]\n  clab repo remove acme/api", cmdRepo},
 		{"role", "показать роль или завести версию инструкции", "clab role show analyst | clab role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
 		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},

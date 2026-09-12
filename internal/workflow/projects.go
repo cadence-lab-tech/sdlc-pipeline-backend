@@ -125,6 +125,40 @@ func (e *Engine) AddRepository(ctx context.Context, projectKey string, in AddRep
 	return out, created, err
 }
 
+// RemoveRepository отвязывает репозиторий от проекта вместе с его знанием.
+// Действие необратимо и потому запрещено, пока репозиторий стоит в области
+// задачи, не дошедшей до терминального статуса: иначе у работающего агента
+// исчезнет из-под ног и код, и базовая точка. Расширение области — решение
+// человека, снятие репозитория из-под задачи — тоже.
+func (e *Engine) RemoveRepository(ctx context.Context, projectKey, ref string, actor uuid.UUID) (domain.Repository, postgres.RemovalCounters, error) {
+	var repo domain.Repository
+	var counters postgres.RemovalCounters
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		project, err := e.store.GetProjectByKey(ctx, tx, projectKey)
+		if err != nil {
+			return err
+		}
+		repo, err = e.store.FindRepository(ctx, tx, project.ID, ref)
+		if err != nil {
+			return err
+		}
+		if err := e.store.LockRepositoryForRemoval(ctx, tx, repo.ID); err != nil {
+			return err
+		}
+		blocking, err := e.store.TasksBlockingRepositoryRemoval(ctx, tx, repo.ID)
+		if err != nil {
+			return err
+		}
+		if len(blocking) > 0 {
+			return apperr.Conflict("репозиторий %s/%s в области задач %s: отвязать можно, когда они дойдут до терминального статуса",
+				repo.Owner, repo.Name, strings.Join(blocking, ", "))
+		}
+		counters, err = e.store.DeleteRepository(ctx, tx, repo.ID, actor)
+		return err
+	})
+	return repo, counters, err
+}
+
 // PutDocumentInput — проектный документ. Ровно один из Content, URL и
 // (Repository, RepoPath) задаёт источник.
 type PutDocumentInput struct {

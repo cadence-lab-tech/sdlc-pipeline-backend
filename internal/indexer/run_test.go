@@ -478,3 +478,48 @@ func TestWorksWithoutEmbedder(t *testing.T) {
 		t.Fatalf("досчёт эмбеддингов: %d, %v", n, err)
 	}
 }
+
+// Репозиторий отвязали, пока прогон уже шёл: строка прогона ушла каскадом.
+// Воркер обязан завершиться ошибкой и не воскресить ни файла — это и есть
+// «удаление окончательно».
+func TestRunOfDetachedRepositoryWritesNothing(t *testing.T) {
+	store, pool := testStore(t)
+	ctx := context.Background()
+	log := testdb.Logger()
+	engine := workflow.NewEngine(store, log, workflow.Options{})
+
+	if _, _, err := engine.AddRepository(ctx, "SDLC", workflow.AddRepositoryInput{Repository: "acme/api"}); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeSource{
+		repo: "api",
+		head: "c1",
+		commits: map[string]map[string]string{
+			"c1": {"internal/workflow/engine.go": engineV1},
+		},
+	}
+	ix := newTestIndexer(t, store, src)
+	if _, err := ix.Enqueue(ctx); err != nil {
+		t.Fatalf("постановка в очередь: %v", err)
+	}
+	run, ok, err := store.ClaimIndexRun(ctx)
+	if err != nil || !ok {
+		t.Fatalf("забрать прогон: %v (ok=%v)", err, ok)
+	}
+
+	if _, _, err := engine.RemoveRepository(ctx, "SDLC", "acme/api", uuid.Nil); err != nil {
+		t.Fatalf("отвязка: %v", err)
+	}
+
+	if _, err := ix.process(ctx, run); err == nil {
+		t.Fatal("прогон по отвязанному репозиторию завершился успехом")
+	}
+	var files int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM code_files WHERE index_run_id = $1`, run.ID).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 0 {
+		t.Fatalf("прогон записал %d файлов по удалённому репозиторию", files)
+	}
+}
