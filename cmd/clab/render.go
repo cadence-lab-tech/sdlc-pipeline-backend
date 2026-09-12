@@ -7,6 +7,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -708,6 +710,34 @@ func renderInviteRevoked(raw json.RawMessage) error {
 	}
 	kv("ID:", inv.ID, "Куда:", inv.target(), "Статус:", inviteStatus(inv.Status),
 		"Отозвал:", dash(ptr(inv.RevokedByHandle))+" "+when(inv.RevokedAt))
+	return nil
+}
+
+// renderRepoRemoved печатает цену отвязки: что ушло вместе с репозиторием.
+func renderRepoRemoved(raw json.RawMessage) error {
+	var out struct {
+		Repository struct {
+			Owner string `json:"owner"`
+			Name  string `json:"name"`
+		} `json:"repository"`
+		Removed struct {
+			IndexRuns  int `json:"index_runs"`
+			CodeFiles  int `json:"code_files"`
+			CodeChunks int `json:"code_chunks"`
+			Documents  int `json:"documents"`
+			Drift      int `json:"drift_signals_dismissed"`
+		} `json:"removed"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	kv("Отвязан:", out.Repository.Owner+"/"+out.Repository.Name,
+		"Прогонов индексации:", strconv.Itoa(out.Removed.IndexRuns),
+		"Файлов кода:", strconv.Itoa(out.Removed.CodeFiles),
+		"Чанков:", strconv.Itoa(out.Removed.CodeChunks),
+		"Документов:", strconv.Itoa(out.Removed.Documents),
+		"Сигналов дрейфа закрыто:", strconv.Itoa(out.Removed.Drift))
+	fmt.Fprintln(os.Stderr, "Отвязка необратима: знание репозитория собирается заново при повторной привязке.")
 	return nil
 }
 

@@ -263,10 +263,18 @@ func cmdImportGuide(_ context.Context, _ *Client, _ []string) error {
 
 func cmdRepo(ctx context.Context, c *Client, args []string) error {
 	sub, rest := popTask(args)
-	if sub != "add" {
-		return fmt.Errorf("clab repo add owner/name [--hint backend] [--branch main]")
+	switch sub {
+	case "add":
+		return repoAdd(ctx, c, rest)
+	case "remove", "rm":
+		return repoRemove(ctx, c, rest)
+	default:
+		return fmt.Errorf("неизвестная подкоманда %q: add, remove", sub)
 	}
-	repo, rest := popTask(rest)
+}
+
+func repoAdd(ctx context.Context, c *Client, args []string) error {
+	repo, rest := popTask(args)
 	var projectFlag, hint, branch, watch string
 	var installation int64
 	_, err := flags("repo", rest, func(fs *flag.FlagSet) {
@@ -298,6 +306,36 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	return print(out)
+}
+
+// repoRemove отвязывает репозиторий. Подтверждения здесь нет намеренно:
+// команда названа целиком, а диалог — забота интерфейса.
+func repoRemove(ctx context.Context, c *Client, args []string) error {
+	repo, rest := popTask(args)
+	var projectFlag string
+	_, err := flags("repo", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+	})
+	if err != nil {
+		return err
+	}
+	if repo == "" {
+		return fmt.Errorf("clab repo remove owner/name: не указан репозиторий")
+	}
+	owner, name, ok := strings.Cut(strings.TrimSuffix(repo, "/"), "/")
+	if !ok || owner == "" || name == "" {
+		return fmt.Errorf("репозиторий задаётся как owner/name, а не %q", repo)
+	}
+	key, err := c.project(ctx, projectFlag)
+	if err != nil {
+		return err
+	}
+	var out json.RawMessage
+	path := "/projects/" + key + "/repositories/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	if err := c.do(ctx, "DELETE", path, nil, &out); err != nil {
+		return err
+	}
+	return emit(out, render(renderRepoRemoved, out))
 }
 
 // ── роли ────────────────────────────────────────────────────────────────────
