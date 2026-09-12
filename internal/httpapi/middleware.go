@@ -122,11 +122,17 @@ func actor(c *gin.Context) domain.Principal {
 // которыми стоит правило движка, зависящее от уровня (например, «агент
 // заводит только детей своей задачи»).
 func (s *Server) level(c *gin.Context) (domain.MemberRole, error) {
-	project, err := s.store.GetProjectByKey(c.Request.Context(), s.store.DB(), c.Param("projectKey"))
+	// Проект берётся из пути так же, как у guard: правку постановки просят по
+	// ключу задачи, и ключа проекта в таком пути нет вовсе. В режиме header
+	// прав нет, и лишнего запроса к базе тоже.
+	if !s.auth.Enforced() {
+		return s.auth.Level(c.Request.Context(), identity(c), uuid.Nil)
+	}
+	projectID, err := s.projectOf(c)
 	if err != nil {
 		return "", err
 	}
-	return s.auth.Level(c.Request.Context(), identity(c), project.ID)
+	return s.auth.Level(c.Request.Context(), identity(c), projectID)
 }
 
 // guard проверяет уровень прав в проекте, к которому относится запрос.

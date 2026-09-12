@@ -480,6 +480,20 @@ func ValidTaskLinkRel(rel string) bool {
 	return false
 }
 
+// TaskPriorities — приоритеты, которые допускает CHECK в схеме
+// (migrations/000003_tasks.up.sql). Перечень нужен наружу: правка приоритета
+// обязана отбиваться понятной ошибкой раньше, чем ошибкой базы.
+var TaskPriorities = []string{"low", "normal", "high", "urgent"}
+
+func ValidTaskPriority(priority string) bool {
+	for _, p := range TaskPriorities {
+		if p == priority {
+			return true
+		}
+	}
+	return false
+}
+
 type TaskRepository struct {
 	RepositoryID uuid.UUID `json:"repository_id"`
 	Owner        string    `json:"owner"`
@@ -680,6 +694,7 @@ const (
 	EventDriftDetected     = "drift.detected"
 	EventDriftResolved     = "drift.resolved"
 	EventUsageReported     = "usage.reported"
+	EventTaskUpdated       = "task.updated"
 )
 
 // ProjectDocument — материал проекта вне задач: API-registry, глоссарий,

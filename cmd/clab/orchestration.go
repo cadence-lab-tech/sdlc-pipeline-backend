@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -78,6 +80,75 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	return emit(out, render(renderTask, out))
+}
+
+// cmdEdit правит постановку задачи: заголовок, описание, приоритет, метки.
+//
+// Переданное флагом и не переданное — разные вещи: `--description ""`
+// очищает описание, а отсутствие флага его не трогает. Поэтому тело запроса
+// собирается по fs.Visit, а не по непустым значениям.
+func cmdEdit(ctx context.Context, c *Client, args []string) error {
+	var title, description, descriptionFile, priority, labels string
+	task, rest := popTask(args)
+	fs, err := flags("edit", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&title, "title", "", "новый заголовок, не длиннее 80 символов")
+		fs.StringVar(&description, "description", "", "новое описание; \"\" очищает, - читает со stdin")
+		fs.StringVar(&descriptionFile, "description-file", "", "файл с описанием")
+		fs.StringVar(&priority, "priority", "", "low, normal, high, urgent")
+		fs.StringVar(&labels, "labels", "", "метки через запятую; \"\" очищает")
+	})
+	if err != nil {
+		return err
+	}
+	if err := requireTask(fs, task); err != nil {
+		return err
+	}
+
+	body := map[string]any{}
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	if passed["description"] && passed["description-file"] {
+		fs.Usage()
+		return fmt.Errorf("нужен или --description, или --description-file")
+	}
+	if passed["title"] {
+		body["title"] = title
+	}
+	if passed["description"] {
+		// Описание — это абзацы: загонять их в аргумент неудобно, и «-»
+		// читает их со stdin, как это делают остальные утилиты.
+		if description == "-" {
+			text, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("чтение описания со stdin: %w", err)
+			}
+			description = string(text)
+		}
+		body["description"] = description
+	}
+	if passed["description-file"] {
+		text, err := os.ReadFile(descriptionFile)
+		if err != nil {
+			return fmt.Errorf("чтение %s: %w", descriptionFile, err)
+		}
+		body["description"] = string(text)
+	}
+	if passed["priority"] {
+		body["priority"] = priority
+	}
+	if passed["labels"] {
+		body["labels"] = splitList(labels)
+	}
+	if len(body) == 0 {
+		fs.Usage()
+		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority или --labels")
+	}
+
+	var out json.RawMessage
+	if err := c.do(ctx, "PATCH", "/tasks/"+task, body, &out); err != nil {
+		return err
+	}
+	return emit(out, render(renderEditedTask, out))
 }
 
 func cmdRelate(ctx context.Context, c *Client, args []string) error {
