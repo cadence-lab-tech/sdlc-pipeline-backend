@@ -523,3 +523,47 @@ func TestRunOfDetachedRepositoryWritesNothing(t *testing.T) {
 		t.Fatalf("прогон записал %d файлов по удалённому репозиторию", files)
 	}
 }
+
+// То же для удаления проекта целиком: репозитории уходят вместе с ним, и
+// прогон, забранный воркером до удаления, не должен ничего записать.
+func TestRunOfDeletedProjectWritesNothing(t *testing.T) {
+	store, pool := testStore(t)
+	ctx := context.Background()
+	log := testdb.Logger()
+	engine := workflow.NewEngine(store, log, workflow.Options{})
+
+	if _, _, err := engine.AddRepository(ctx, "SDLC", workflow.AddRepositoryInput{Repository: "acme/api"}); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeSource{
+		repo: "api",
+		head: "c1",
+		commits: map[string]map[string]string{
+			"c1": {"internal/workflow/engine.go": engineV1},
+		},
+	}
+	ix := newTestIndexer(t, store, src)
+	if _, err := ix.Enqueue(ctx); err != nil {
+		t.Fatalf("постановка в очередь: %v", err)
+	}
+	run, ok, err := store.ClaimIndexRun(ctx)
+	if err != nil || !ok {
+		t.Fatalf("забрать прогон: %v (ok=%v)", err, ok)
+	}
+
+	if _, _, err := engine.DeleteProject(ctx, "SDLC", uuid.Nil); err != nil {
+		t.Fatalf("удаление проекта: %v", err)
+	}
+
+	if _, err := ix.process(ctx, run); err == nil {
+		t.Fatal("прогон по удалённому проекту завершился успехом")
+	}
+	var files int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM code_files WHERE index_run_id = $1`, run.ID).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 0 {
+		t.Fatalf("прогон записал %d файлов по удалённому проекту", files)
+	}
+}

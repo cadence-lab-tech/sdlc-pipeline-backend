@@ -741,6 +741,52 @@ func renderRepoRemoved(raw json.RawMessage) error {
 	return nil
 }
 
+// renderProjectDeleted печатает цену удаления: что ушло вместе с проектом.
+func renderProjectDeleted(raw json.RawMessage) error {
+	var out struct {
+		Project struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+		} `json:"project"`
+		Removed struct {
+			Tasks        int     `json:"tasks"`
+			StageRuns    int     `json:"stage_runs"`
+			Artifacts    int     `json:"artifacts"`
+			Repositories int     `json:"repositories"`
+			IndexRuns    int     `json:"index_runs"`
+			CodeFiles    int     `json:"code_files"`
+			CodeChunks   int     `json:"code_chunks"`
+			Documents    int     `json:"documents"`
+			Members      int     `json:"members"`
+			Tokens       int     `json:"tokens"`
+			Roles        int     `json:"roles"`
+			Workflows    int     `json:"workflows"`
+			Invites      int     `json:"invites"`
+			CostUSD      float64 `json:"cost_usd"`
+		} `json:"removed"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	kv("Удалён:", out.Project.Key+"  "+out.Project.Name,
+		"Задач:", strconv.Itoa(out.Removed.Tasks),
+		"Прогонов этапов:", strconv.Itoa(out.Removed.StageRuns),
+		"Артефактов:", strconv.Itoa(out.Removed.Artifacts),
+		"Репозиториев:", strconv.Itoa(out.Removed.Repositories),
+		"Прогонов индексации:", strconv.Itoa(out.Removed.IndexRuns),
+		"Файлов кода:", strconv.Itoa(out.Removed.CodeFiles),
+		"Чанков:", strconv.Itoa(out.Removed.CodeChunks),
+		"Документов:", strconv.Itoa(out.Removed.Documents),
+		"Участников:", strconv.Itoa(out.Removed.Members),
+		"Токенов проекта:", strconv.Itoa(out.Removed.Tokens),
+		"Ролей:", strconv.Itoa(out.Removed.Roles),
+		"Версий цикла:", strconv.Itoa(out.Removed.Workflows),
+		"Приглашений:", strconv.Itoa(out.Removed.Invites),
+		"Учтено стоимости:", fmt.Sprintf("$%.2f", out.Removed.CostUSD))
+	fmt.Fprintln(os.Stderr, "Удаление необратимо: восстановить проект нечем, место в блобах освободит сборка мусора.")
+	return nil
+}
+
 func renderProjects(raw json.RawMessage) error {
 	var out struct {
 		Projects []struct {

@@ -5,11 +5,14 @@ package main
 // проекты, администратор инстанса выдаёт право на проекты и тариф.
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 )
 
 func cmdTeam(ctx context.Context, c *Client, args []string) error {
@@ -433,7 +436,64 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 
+	case "delete":
+		return projectDelete(ctx, c, rest)
+
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, create, teams, github", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, create, delete, teams, github", sub)
 	}
+}
+
+// projectDelete удаляет проект. Подтверждение ключом здесь, а не в ручке:
+// диалог — забота края, как и у отвязки репозитория. Проект, в отличие от
+// команд чтения, из git remote не угадывается: удалять то, что подобралось
+// само по текущему каталогу, нельзя — ключ называется явно.
+func projectDelete(ctx context.Context, c *Client, args []string) error {
+	key, rest := popTask(args)
+	var projectFlag, confirm string
+	fs, err := flags("project", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+		fs.StringVar(&confirm, "confirm", "", "ключ проекта ещё раз: подтверждение без терминала")
+	})
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		key = projectFlag
+	}
+	if key == "" {
+		fs.Usage()
+		return fmt.Errorf("clab project delete <КЛЮЧ> [--confirm <КЛЮЧ>]: не указан проект")
+	}
+	if err := confirmProjectKey(key, confirm); err != nil {
+		return err
+	}
+	var out json.RawMessage
+	if err := c.do(ctx, "DELETE", "/projects/"+url.PathEscape(key), nil, &out); err != nil {
+		return err
+	}
+	return emit(out, render(renderProjectDeleted, out))
+}
+
+// confirmProjectKey сверяет подтверждение: из флага или из stdin. Терминал
+// специально не определяется — это ioctl ради одной ветки; важно не то, откуда
+// пришёл ключ, а то, что его назвали ещё раз. Пустой stdin — отказ, поэтому
+// удалить проект строкой в скрипте, не дописав --confirm, не выйдет.
+func confirmProjectKey(key, confirm string) error {
+	if confirm != "" {
+		if confirm != key {
+			return fmt.Errorf("подтверждение %q не совпало с ключом проекта %q", confirm, key)
+		}
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Проект %s удаляется вместе с задачами, артефактами и индексом. Отменить нельзя.\n", key)
+	fmt.Fprintf(os.Stderr, "Введите ключ проекта для подтверждения: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return fmt.Errorf("подтверждение не прочитано: повторите ключ флагом --confirm %s", key)
+	}
+	if strings.TrimSpace(line) != key {
+		return fmt.Errorf("введено не то: проект %s не удалён", key)
+	}
+	return nil
 }
