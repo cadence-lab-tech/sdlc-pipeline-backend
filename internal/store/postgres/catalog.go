@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -100,6 +101,109 @@ func (s *Store) UpsertRepository(ctx context.Context, q Querier, in RepositoryIn
 		return r, false, translate(err)
 	}
 	return r, created, nil
+}
+
+// RemovalCounters — что ушло вместе с репозиторием. Считается до удаления:
+// после него посчитать уже нечего, а человеку важно видеть цену действия.
+type RemovalCounters struct {
+	IndexRuns  int `json:"index_runs"`
+	CodeFiles  int `json:"code_files"`
+	CodeChunks int `json:"code_chunks"`
+	Documents  int `json:"documents"`
+	Drift      int `json:"drift_signals_dismissed"`
+}
+
+// TasksBlockingRepositoryRemoval — ключи задач, у которых репозиторий стоит в
+// области и которые ещё не дошли до терминального статуса. Терминальность
+// берётся из цикла, а не из списка имён: статусы — данные.
+func (s *Store) TasksBlockingRepositoryRemoval(ctx context.Context, q Querier, repoID uuid.UUID) ([]string, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.key
+		FROM task_repositories tr
+		JOIN tasks t ON t.id = tr.task_id
+		JOIN workflow_statuses ws ON ws.id = t.status_id
+		WHERE tr.repository_id = $1
+		  AND t.closed_at IS NULL AND ws.is_terminal = false
+		ORDER BY t.key`, repoID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, key)
+	}
+	return out, translate(rows.Err())
+}
+
+// LockRepositoryForRemoval берёт строку репозитория под FOR UPDATE. Без этого
+// задача успеет добавить репозиторий в свою область между проверкой запрета и
+// удалением: вставка в task_repositories проверяет внешний ключ и на время
+// блокировки ждёт. Заодно два одновременных удаления выстраиваются в очередь.
+func (s *Store) LockRepositoryForRemoval(ctx context.Context, tx pgx.Tx, repoID uuid.UUID) error {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id FROM repositories WHERE id = $1 FOR UPDATE`, repoID).Scan(&id)
+	if err != nil {
+		return notFound(err, "репозиторий не найден")
+	}
+	return nil
+}
+
+// DeleteRepository убирает репозиторий вместе с его знанием. Почти всё уносит
+// каскад схемы (прогоны индексации, файлы, чанки, символы, базовые точки,
+// область задач); руками делаются два случая, где каскад обнуляет ссылку:
+//
+//   - документы из этого репозитория удаляются. Обнулить их источник нельзя:
+//     CHECK project_documents_source_shape требует repository_id у источника
+//     repo_path, и DELETE упал бы нарушением ограничения;
+//   - открытые сигналы дрейфа закрываются. Их repository_id обнуляется
+//     каскадом, и сигнал повис бы в карточке задачи без репозитория, разобрать
+//     его было бы нечем.
+//
+// Блобы не трогаются: они общие по sha256 и уходят сборкой мусора.
+func (s *Store) DeleteRepository(ctx context.Context, tx pgx.Tx, repoID, actor uuid.UUID) (RemovalCounters, error) {
+	var c RemovalCounters
+	err := tx.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM repo_index_runs WHERE repository_id = $1),
+		       (SELECT count(*) FROM code_files     WHERE repository_id = $1),
+		       (SELECT count(*) FROM code_chunks ch
+		          JOIN code_files f ON f.id = ch.code_file_id
+		         WHERE f.repository_id = $1),
+		       (SELECT count(*) FROM project_documents WHERE repository_id = $1)`, repoID,
+	).Scan(&c.IndexRuns, &c.CodeFiles, &c.CodeChunks, &c.Documents)
+	if err != nil {
+		return c, translate(err)
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE task_drift_signals
+		   SET state = 'dismissed', resolution = $2,
+		       resolved_by = nullif($3, '00000000-0000-0000-0000-000000000000'::uuid),
+		       resolved_at = now()
+		 WHERE repository_id = $1 AND state IN ('open', 'acknowledged')`,
+		repoID, "репозиторий отвязан от проекта", actor)
+	if err != nil {
+		return c, translate(err)
+	}
+	c.Drift = int(tag.RowsAffected())
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM project_documents WHERE repository_id = $1`, repoID); err != nil {
+		return c, translate(err)
+	}
+	tag, err = tx.Exec(ctx, `DELETE FROM repositories WHERE id = $1`, repoID)
+	if err != nil {
+		return c, translate(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return c, apperr.New(apperr.CodeUnknownRepository, "репозиторий уже отвязан")
+	}
+	return c, nil
 }
 
 // RepositorySettings — то, что не входит в domain.Repository, но нужно

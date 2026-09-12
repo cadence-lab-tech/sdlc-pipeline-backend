@@ -381,6 +381,18 @@ func (s *Server) addRepository(c *gin.Context) {
 	c.JSON(status, repo)
 }
 
+// removeRepository отвязывает репозиторий от проекта. Координаты берутся из
+// пути, а не из тела: это удаление, и адрес обязан называть, что удаляется.
+func (s *Server) removeRepository(c *gin.Context) {
+	repo, counters, err := s.engine.RemoveRepository(c.Request.Context(), c.Param("projectKey"),
+		c.Param("owner")+"/"+c.Param("name"), actor(c).ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"repository": repo, "removed": counters})
+}
+
 func (s *Server) listDocuments(c *gin.Context) {
 	docs, err := s.engine.ListDocuments(c.Request.Context(), c.Param("projectKey"))
 	if err != nil {
