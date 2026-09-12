@@ -445,6 +445,43 @@ func (s *Server) decideGate(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+type updateTaskRequest struct {
+	// nil — поле не трогать; пустое описание очищает его.
+	Title       *string   `json:"title"`
+	Description *string   `json:"description"`
+	Priority    *string   `json:"priority"`
+	Labels      *[]string `json:"labels"`
+}
+
+// updateTask меняет постановку задачи. Право проверяет движок: у агента она
+// та же, что у заведения задач — своя задача и её дети (решение 0024).
+func (s *Server) updateTask(c *gin.Context) {
+	var req updateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	level, err := s.level(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+
+	task, err := s.engine.UpdateTask(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
+		workflow.UpdateTaskInput{
+			Title:       req.Title,
+			Description: req.Description,
+			Priority:    req.Priority,
+			Labels:      req.Labels,
+			Level:       level,
+		})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
 type updateScopeRequest struct {
 	AddRepositories []string        `json:"add_repositories"`
 	Properties      json.RawMessage `json:"properties"`

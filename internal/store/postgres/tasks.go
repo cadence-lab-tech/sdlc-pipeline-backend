@@ -384,6 +384,51 @@ func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid
 	return translate(err)
 }
 
+// UpdateTaskFieldsInput — постановка задачи: заголовок, описание, приоритет и
+// метки. nil означает «не трогать»: правка одного поля не должна затирать
+// остальные.
+type UpdateTaskFieldsInput struct {
+	Title       *string
+	Description *string
+	Priority    *string
+	Labels      *[]string
+}
+
+// Any отвечает на вопрос, есть ли что писать.
+func (in UpdateTaskFieldsInput) Any() bool {
+	return in.Title != nil || in.Description != nil || in.Priority != nil || in.Labels != nil
+}
+
+// UpdateTaskFields пишет переданные поля постановки и двигает updated_at.
+//
+// Пустое описание — это очистка: NULL и пустая строка для читателя одно и то
+// же, а хранить два способа сказать «описания нет» незачем.
+func (s *Store) UpdateTaskFields(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, in UpdateTaskFieldsInput) error {
+	var description *string
+	if in.Description != nil && *in.Description != "" {
+		description = in.Description
+	}
+	// Метки едут значением, а не указателем на срез: nil-срез драйвер кладёт
+	// как NULL, и coalesce оставляет прежний набор; пустой срез его очищает.
+	var labels []string
+	if in.Labels != nil {
+		labels = *in.Labels
+		if labels == nil {
+			labels = []string{}
+		}
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE tasks
+		SET title       = coalesce($2, title),
+		    description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+		    priority    = coalesce($5, priority),
+		    labels      = coalesce($6::text[], labels),
+		    updated_at  = now()
+		WHERE id = $1`,
+		taskID, in.Title, in.Description != nil, description, in.Priority, labels)
+	return translate(err)
+}
+
 func (s *Store) AddTaskRepository(ctx context.Context, tx pgx.Tx, t domain.Task, repoID uuid.UUID, stageRunID *uuid.UUID, actor uuid.UUID, note string) error {
 	if !t.MultiRepo() && len(t.Repositories) > 0 {
 		return apperr.New(apperr.CodeScopeExpansionForbidden,

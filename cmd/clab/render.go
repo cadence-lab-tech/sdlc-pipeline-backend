@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type taskRow struct {
@@ -254,6 +255,32 @@ func renderTask(raw json.RawMessage) error {
 	}
 	fmt.Printf("%s  %s  [%s, %s]\n", t.Key, t.Title, taskType(t.Properties), t.StatusKey)
 	return nil
+}
+
+// renderEditedTask показывает постановку после правки целиком: иначе у
+// правки приоритета или меток не видно, что она применилась.
+func renderEditedTask(raw json.RawMessage) error {
+	var t struct {
+		taskRow
+		Labels      []string `json:"labels"`
+		Description *string  `json:"description"`
+	}
+	if err := decode(raw, &t); err != nil {
+		return err
+	}
+	fmt.Printf("%s  %s  [%s, %s]\n", t.Key, t.Title, taskType(t.Properties), t.StatusKey)
+	fmt.Printf("Приоритет: %s   Метки: %s   Описание: %s\n",
+		t.Priority, dash(strings.Join(t.Labels, ", ")), dash(describeLength(t.Description)))
+	return nil
+}
+
+// describeLength не печатает описание целиком: это абзацы, и в сводке правки
+// важно, что оно есть или очищено, а не его текст.
+func describeLength(description *string) string {
+	if description == nil || *description == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d символов", utf8.RuneCountInString(*description))
 }
 
 func renderArtifact(raw json.RawMessage) error {
