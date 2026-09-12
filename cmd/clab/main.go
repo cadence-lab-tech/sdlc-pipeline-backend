@@ -48,6 +48,7 @@ func commands() []command {
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
 		{"create", "завести задачу или эпик", "clab create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot]", cmdCreate},
+		{"edit", "поправить постановку задачи", "clab edit SDLC-42 [--title ...] [--description ... | --description - | --description-file d.md] [--priority high] [--labels bug,phase8]", cmdEdit},
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
 		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},

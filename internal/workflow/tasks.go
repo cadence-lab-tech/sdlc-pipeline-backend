@@ -3,7 +3,10 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -253,6 +256,165 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 	return out, err
 }
 
+// maxTaskTitleRunes — предел заголовка задачи. Считается рунами, а не
+// байтами: русский заголовок в байтах вдвое длиннее, и байтовый предел резал
+// бы его посередине слова. Предел живёт в коде, а не в схеме: менять его не
+// должно стоить миграции.
+const maxTaskTitleRunes = 80
+
+// UpdateTaskInput — правка постановки задачи. nil означает «не трогать»:
+// правка описания не должна затирать заголовок.
+type UpdateTaskInput struct {
+	Title       *string
+	Description *string
+	Priority    *string
+	Labels      *[]string
+	// Уровень актора в проекте. Ниже сопровождающего действует правило
+	// агента: править можно задачу с его живой арендой и её дочерние —
+	// ровно та рамка, в которой он их заводит. Пусто — правило выключено:
+	// в режиме header прав нет вовсе.
+	Level domain.MemberRole
+}
+
+// UpdateTask меняет постановку задачи: заголовок, описание, приоритет, метки.
+//
+// Тип, статус, родитель, область и исполнитель этой ручкой не меняются — у
+// каждого своя операция и свои правила. Особого правила для терминальных
+// статусов нет: агента и так ограничивает аренда, которой у закрытой задачи
+// не бывает, а сопровождающий вправе поправить опечатку и в закрытой
+// постановке.
+func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID, in UpdateTaskInput) (domain.Task, error) {
+	fields := postgres.UpdateTaskFieldsInput{
+		Description: in.Description, Priority: in.Priority, Labels: in.Labels,
+	}
+	if in.Title != nil {
+		title := strings.TrimSpace(*in.Title)
+		if title == "" {
+			return domain.Task{}, apperr.InvalidInput("заголовок задачи не может быть пустым")
+		}
+		if n := utf8.RuneCountInString(title); n > maxTaskTitleRunes {
+			return domain.Task{}, apperr.InvalidInput(
+				"заголовок длиннее %d символов (в нём %d): уточнение места — в описании",
+				maxTaskTitleRunes, n)
+		}
+		fields.Title = &title
+	}
+	if in.Priority != nil && !domain.ValidTaskPriority(*in.Priority) {
+		return domain.Task{}, apperr.InvalidInput(
+			"приоритет %q не поддерживается: %v", *in.Priority, domain.TaskPriorities)
+	}
+	if !fields.Any() {
+		return domain.Task{}, apperr.InvalidInput(
+			"не указано ни одно поле: править можно title, description, priority, labels")
+	}
+
+	var out domain.Task
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
+		if err != nil {
+			return err
+		}
+		if err := e.agentMayEdit(ctx, tx, actor, task, in.Level); err != nil {
+			return err
+		}
+		if err := e.store.UpdateTaskFields(ctx, tx, task.ID, fields); err != nil {
+			return err
+		}
+
+		// Прежние значения пишутся в ленту: версий у постановки нет, и лента
+		// событий — единственное место, где остаётся, что было до правки.
+		changed := map[string]any{}
+		if fields.Title != nil {
+			changed["title"] = map[string]any{"from": task.Title, "to": *fields.Title}
+		}
+		if fields.Description != nil {
+			changed["description"] = map[string]any{
+				"from": task.Description, "to": nullIfEmpty(*fields.Description),
+			}
+		}
+		if fields.Priority != nil {
+			changed["priority"] = map[string]any{"from": task.Priority, "to": *fields.Priority}
+		}
+		if fields.Labels != nil {
+			changed["labels"] = map[string]any{"from": task.Labels, "to": *fields.Labels}
+		}
+		fieldNames := make([]string, 0, len(changed))
+		for name := range changed {
+			fieldNames = append(fieldNames, name)
+		}
+		sort.Strings(fieldNames)
+
+		var run *uuid.UUID
+		if r, err := e.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID); err == nil {
+			run = &r.ID
+		}
+		if err := e.store.AppendEvent(ctx, tx, task.ID, run, domain.EventTaskUpdated, actor,
+			map[string]any{"fields": fieldNames, "changed": changed}); err != nil {
+			return err
+		}
+
+		out, err = e.store.GetTaskByKey(ctx, tx, taskKey)
+		return err
+	})
+
+	return out, err
+}
+
+// nullIfEmpty отличает «описания нет» от пустой строки: в ленте у очистки
+// описания и у правки на пустую строку обязан быть один и тот же вид, потому
+// что в базе это одно и то же.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// agentMayEdit — рамка, в которой агент вправе править постановку.
+//
+// Она повторяет рамку заведения задач (agentMayCreate): аналитик уточняет
+// нарезку эпика, который держит, и не трогает чужие задачи. Сопровождающий и
+// выше не ограничены ничем — в том числе на закрытых задачах.
+func (e *Engine) agentMayEdit(ctx context.Context, q postgres.Querier, actor uuid.UUID, task domain.Task, level domain.MemberRole) error {
+	if level == "" || level.Covers(domain.MemberMaintainer) {
+		return nil
+	}
+	held, err := e.holdsLease(ctx, q, task, actor)
+	if err != nil {
+		return err
+	}
+	if held {
+		return nil
+	}
+	if task.ParentKey != nil {
+		parent, err := e.store.GetTaskByKey(ctx, q, *task.ParentKey)
+		if err != nil {
+			return err
+		}
+		held, err := e.holdsLease(ctx, q, parent, actor)
+		if err != nil {
+			return err
+		}
+		if held {
+			return nil
+		}
+	}
+	return apperr.Forbidden(
+		"задачу %s держите не вы: править постановку может тот, кто забрал её этап "+
+			"или этап её родительской задачи", task.Key)
+}
+
+// holdsLease отвечает, держит ли актор живую аренду текущего этапа задачи.
+// Это и есть право агента на задачу: аренда снимается явно, и протухшая
+// аренда права не даёт.
+func (e *Engine) holdsLease(ctx context.Context, q postgres.Querier, task domain.Task, actor uuid.UUID) (bool, error) {
+	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
+	if err != nil {
+		return false, err
+	}
+	return run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now()), nil
+}
+
 // CreateTaskInput — заведение задачи движком: то же, что у хранилища, плюс
 // связи, назначение и уровень актора.
 type CreateTaskInput struct {
@@ -359,11 +521,11 @@ func (e *Engine) agentMayCreate(ctx context.Context, q postgres.Querier, actor u
 	if err != nil {
 		return err
 	}
-	run, err := e.store.CurrentStageRun(ctx, q, parent.ID, parent.StatusID)
+	held, err := e.holdsLease(ctx, q, parent, actor)
 	if err != nil {
 		return err
 	}
-	if run.ClaimedBy == nil || *run.ClaimedBy != actor || !run.LeaseHeld(time.Now()) {
+	if !held {
 		return apperr.Forbidden(
 			"задачу %s держите не вы: нарезать её на дочерние может только тот, кто её забрал",
 			parent.Key)

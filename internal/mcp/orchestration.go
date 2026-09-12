@@ -25,6 +25,13 @@ func (s *Server) registerOrchestrationTools() {
 			"Агент вправе создавать только дочерние задачи той, которую держит, и только "+
 			"внутри её области репозиториев.",
 		s.createTask)
+	add(s, "sdlc_update_task",
+		"Поправить постановку задачи: заголовок, описание, приоритет, метки. Так аналитик "+
+			"уточняет нарезку эпика, когда код ушёл вперёд её описания. Агент вправе править "+
+			"задачу, которую держит, и её дочерние. Не переданное поле не меняется, пустое "+
+			"описание очищает его, метки заменяются списком целиком. Тип, статус, родитель, "+
+			"область и исполнитель этой ручкой не меняются — у каждого своя.",
+		s.updateTask)
 	add(s, "sdlc_link_tasks",
 		"Связать задачи: blocks задаёт порядок (его читает гейт dependencies_closed), "+
 			"relates_to, duplicates, shares_surface и split_from — контекст. remove=true снимает связь.",
@@ -87,6 +94,39 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		"key": task.Key, "title": task.Title, "type": task.Type(),
 		"status": task.StatusKey, "parent": task.ParentKey,
 		"assignee": task.AssigneeHandle, "repositories": repoNames(task),
+	})
+}
+
+type updateTaskInput struct {
+	TaskKey     string    `json:"task_key" jsonschema:"ключ задачи, например SDLC-42"`
+	Title       *string   `json:"title,omitempty" jsonschema:"новый заголовок, не длиннее 80 символов"`
+	Description *string   `json:"description,omitempty" jsonschema:"новое описание; пустая строка очищает его"`
+	Priority    *string   `json:"priority,omitempty" jsonschema:"low, normal, high, urgent"`
+	Labels      *[]string `json:"labels,omitempty" jsonschema:"метки целиком: список заменяет прежний набор"`
+}
+
+func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
+	if err := s.inProject(ctx, in.TaskKey); err != nil {
+		return fail(err)
+	}
+	level, err := s.level(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
+	task, err := s.engine.UpdateTask(ctx, in.TaskKey, actor(ctx).ID, workflow.UpdateTaskInput{
+		Title: in.Title, Description: in.Description, Priority: in.Priority,
+		Labels: in.Labels, Level: level,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	return ok(map[string]any{
+		"key": task.Key, "title": task.Title, "description": task.Description,
+		"priority": task.Priority, "labels": task.Labels, "status": task.StatusKey,
 	})
 }
 
