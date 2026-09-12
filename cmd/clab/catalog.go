@@ -268,6 +268,15 @@ func cmdRepo(ctx context.Context, c *Client, args []string) error {
 		return repoAdd(ctx, c, rest)
 	case "remove", "rm":
 		return repoRemove(ctx, c, rest)
+	case "":
+		// "clab repo" и "clab repo --help" обязаны показать синтаксис обеих
+		// подкоманд: имена без формы вызова не говорят, как отвязать.
+		fs, err := flags("repo", rest, func(*flag.FlagSet) {})
+		if err != nil {
+			return err
+		}
+		fs.Usage()
+		return fmt.Errorf("не указана подкоманда: add, remove")
 	default:
 		return fmt.Errorf("неизвестная подкоманда %q: add, remove", sub)
 	}

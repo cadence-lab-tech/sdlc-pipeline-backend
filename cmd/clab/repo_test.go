@@ -54,15 +54,25 @@ func TestRepoRemoveChecksArguments(t *testing.T) {
 	}
 }
 
-// Отвязка обязана быть видна в подсказке: иначе её найдут только в исходниках.
-func TestRepoRemoveIsListedInHelp(t *testing.T) {
-	for _, c := range commands() {
-		if c.name == "repo" {
-			if !strings.Contains(c.usage, "repo remove") {
-				t.Fatalf("строка использования: %s", c.usage)
+// Отвязка обязана быть видна в подсказке, причём напечатанной: проверять поле
+// структуры бессмысленно, человек видит только вывод команды.
+func TestRepoRemoveIsPrintedInHelp(t *testing.T) {
+	c, rec := newInviteClient(t, 200, repoRemoved)
+
+	for _, args := range [][]string{{}, {"--help"}} {
+		_, errOut, err := capture(t, func() error {
+			return cmdRepo(context.Background(), c, args)
+		})
+		if err == nil {
+			t.Fatalf("clab repo %v завершилась успехом", args)
+		}
+		for _, want := range []string{"clab repo add", "clab repo remove"} {
+			if !strings.Contains(errOut, want) {
+				t.Fatalf("подсказка clab repo %v не называет %q:\n%s", args, want, errOut)
 			}
-			return
 		}
 	}
-	t.Fatal("команды repo нет в списке")
+	if rec.calls != 0 {
+		t.Fatalf("подсказка сходила на сервер %d раз", rec.calls)
+	}
 }
