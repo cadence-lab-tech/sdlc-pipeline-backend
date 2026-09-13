@@ -193,6 +193,35 @@ func (s *Store) RetireActiveWorkflows(ctx context.Context, q Querier, projectID 
 	return out, translate(rows.Err())
 }
 
+// RetiredWorkflows — снятые версии циклов проекта, которые вели те же типы
+// задач, что и переданные. Нужны при активации: задача из бэклога могла
+// остаться не на только что снятой версии, а на более ранней — если её
+// никто не трогал две активации подряд или прежняя активация ещё не умела
+// переносить бэклог (решение 0036).
+func (s *Store) RetiredWorkflows(ctx context.Context, q Querier, projectID uuid.UUID, taskTypes []string) ([]uuid.UUID, error) {
+	if len(taskTypes) == 0 {
+		taskTypes = []string{domain.DefaultTaskType}
+	}
+	rows, err := q.Query(ctx, `
+		SELECT id FROM workflows
+		WHERE project_id = $1 AND state = 'retired' AND task_types && $2
+		ORDER BY version`, projectID, taskTypes)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, id)
+	}
+	return out, translate(rows.Err())
+}
+
 // OpenTaskOnWorkflow — незакрытая задача, оставшаяся на прежней версии цикла.
 type OpenTaskOnWorkflow struct {
 	Key       string `json:"task"`

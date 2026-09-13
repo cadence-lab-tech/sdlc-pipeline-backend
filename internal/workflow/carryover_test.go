@@ -125,3 +125,71 @@ func TestActivationMovesWaitingTasksToNewVersion(t *testing.T) {
 		}
 	}
 }
+
+// Задача из бэклога могла остаться не на только что снятой версии, а на
+// более ранней: прежнюю активацию сделали без переноса бэклога. Следующая
+// активация подбирает и такие задачи.
+func TestActivationMovesTasksLeftOnOlderVersions(t *testing.T) {
+	ctx := context.Background()
+	store, engine, authoring, _, system := setupPhase4(t, AuthHeader)
+
+	left, err := engine.CreateTask(ctx, "SDLC", system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{Title: "Осталась на первой версии"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := left.WorkflowID
+
+	// Вторая версия активируется «по-старому»: без переноса бэклога.
+	second, err := authoring.CreateDraft(ctx, "SDLC", system.ID, DraftInput{Name: "Default SDLC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RetireActiveWorkflows(ctx, store.DB(), second.ProjectID, second.TaskTypes); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetWorkflowState(ctx, store.DB(), second.ID, domain.WorkflowActive); err != nil {
+		t.Fatal(err)
+	}
+	onSecond, err := engine.CreateTask(ctx, "SDLC", system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{Title: "Заведена на второй версии"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onSecond.WorkflowID != second.ID {
+		t.Fatalf("новая задача должна лечь на вторую версию: %s", onSecond.WorkflowID)
+	}
+
+	third, err := authoring.CreateDraft(ctx, "SDLC", system.ID, DraftInput{Name: "Default SDLC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := authoring.Activate(ctx, third.ID, system.ID)
+	if err != nil {
+		t.Fatalf("активация: %v", err)
+	}
+	if len(res.Retired) != 1 || res.Retired[0] != second.ID {
+		t.Fatalf("снимается только вторая версия: %+v", res.Retired)
+	}
+	moved := map[string]bool{}
+	for _, m := range res.Moved {
+		moved[m.Key] = true
+	}
+	if !moved[left.Key] || !moved[onSecond.Key] {
+		t.Fatalf("переезжают задачи и с первой, и со второй версии: %+v", res.Moved)
+	}
+	for _, key := range []string{left.Key, onSecond.Key} {
+		task, err := store.GetTaskByKey(ctx, store.DB(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.WorkflowID != third.ID || task.StatusKey != "new" {
+			t.Fatalf("%s должна стоять на третьей версии: цикл %s, статус %s", key, task.WorkflowID, task.StatusKey)
+		}
+	}
+	if first == third.ID {
+		t.Fatal("третья версия — новый цикл")
+	}
+}
