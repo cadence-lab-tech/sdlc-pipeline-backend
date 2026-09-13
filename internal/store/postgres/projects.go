@@ -293,17 +293,24 @@ func (s *Store) LockProjectForRemoval(ctx context.Context, tx pgx.Tx, projectID 
 // stage_runs_role_id_fkey, как только у проекта был хоть один захваченный
 // этап. Поэтому задачи убираются первыми — они уносят каскадом прогоны,
 // артефакты, гейты, события и область, — и только потом уходит сам проект,
-// после чего роли, версии цикла, статусы, репозитории с индексом, документы,
-// участники, токены и приглашения удаляются каскадом без конфликтов.
+// после чего роли, версии цикла, статусы, репозитории с индексом, участники,
+// токены и приглашения удаляются каскадом без конфликтов.
 //
-// Порядок задаётся здесь явно, а не доверяется очерёдности срабатывания
-// триггеров: на неё же завязано то, что документы с source = 'repo_path'
-// уходят раньше, чем каскад репозиториев обнулит им repository_id и нарушит
-// project_documents_source_shape.
+// Документы убираются вторым шагом, тоже явно: project_documents.repository_id
+// — ON DELETE SET NULL, а project_documents_source_shape требует у source =
+// 'repo_path' непустой repository_id, и обнуление ломает документ. Само по
+// себе удаление проекта до этого не доводит — каскад документов и каскад
+// репозиториев висят на projects одним уровнем, а обнуление приходит вторым,
+// когда документов уже нет, — но это дисциплина очереди после-триггеров, а не
+// обещание схемы. Строка ниже делает порядок обещанием кода, как в
+// DeleteRepository.
 //
 // Блобы и кэш эмбеддингов не трогаются: они общие и уходят сборкой мусора.
 func (s *Store) DeleteProject(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM tasks WHERE project_id = $1`, projectID); err != nil {
+		return translate(err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM project_documents WHERE project_id = $1`, projectID); err != nil {
 		return translate(err)
 	}
 	tag, err := tx.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)

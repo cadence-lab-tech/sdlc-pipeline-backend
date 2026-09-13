@@ -3,11 +3,13 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -28,6 +30,7 @@ var projectOwnedTables = []string{
 	"document_chunks", "project_documents", "project_members", "project_teams",
 	"agent_tokens", "roles", "role_versions", "workflows", "workflow_statuses",
 	"workflow_transitions", "gates", "invites", "stage_run_usage",
+	"task_property_defs",
 }
 
 // Проект, набитый всем, что на него ссылается: задача с прогонами и цепочкой
@@ -159,13 +162,33 @@ func TestDeleteProjectTakesEverythingWithIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Соседний проект той же команды: удаление обязано пройти мимо него.
+	// Соседний проект той же команды: удаление обязано пройти мимо него. Он
+	// не пустой намеренно — проверять надо, что уцелело содержимое, а не что
+	// строка проекта осталась.
 	neighbour, err := engine.CreateProject(ctx, system.ID, postgres.CreateProjectInput{
 		Key: "NEXT", Name: "Соседний", OwnerTeamID: *project.OwnerTeamID})
 	if err != nil {
 		t.Fatal(err)
 	}
+	neighbourRepo, _, err := engine.AddRepository(ctx, "NEXT", AddRepositoryInput{Repository: "acme/web", RoleHint: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	neighbourRun, _, err := store.EnqueueIndexRun(ctx, store.DB(), postgres.EnqueueIndexRunInput{
+		RepositoryID: neighbourRepo.ID, Branch: "main", CommitSHA: strings.Repeat("b", 40), Trigger: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(ctx, `
+		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes)
+		VALUES ($1, $2, 'web.ts', 'ts', 10)`, neighbourRun.ID, neighbourRepo.ID); err != nil {
+		t.Fatal(err)
+	}
 	blobsBefore := countRows(t, ctx, store, `SELECT count(*) FROM blobs`)
+	// Снимок содержимого до вызова: счётчики в ответе сверяются с ним, а не с
+	// подобранными числами — ошибка на единицу иначе проходит незамеченной.
+	before := projectContents(t, ctx, store, project.ID)
 
 	deleted, counters, err := engine.DeleteProject(ctx, "SDLC", system.ID)
 	if err != nil {
@@ -174,12 +197,25 @@ func TestDeleteProjectTakesEverythingWithIt(t *testing.T) {
 	if deleted.ID != project.ID {
 		t.Fatalf("удалён не тот проект: %s", deleted.ID)
 	}
-	if counters.Tasks == 0 || counters.StageRuns == 0 || counters.Artifacts != 2 ||
-		counters.Repositories == 0 || counters.IndexRuns != 1 || counters.CodeFiles != 1 ||
-		counters.CodeChunks != 1 || counters.Documents != 2 || counters.Members == 0 ||
-		counters.Tokens != 1 || counters.Roles == 0 || counters.Workflows == 0 ||
-		counters.Invites != 1 || counters.CostUSD != 1.5 {
-		t.Fatalf("счётчики удалённого: %+v", counters)
+	got := map[string]int{
+		"tasks": counters.Tasks, "stage_runs": counters.StageRuns,
+		"artifacts": counters.Artifacts, "repositories": counters.Repositories,
+		"repo_index_runs": counters.IndexRuns, "code_files": counters.CodeFiles,
+		"code_chunks": counters.CodeChunks, "project_documents": counters.Documents,
+		"project_members": counters.Members, "agent_tokens": counters.Tokens,
+		"roles": counters.Roles, "workflows": counters.Workflows,
+		"invites": counters.Invites,
+	}
+	for table, want := range before {
+		if want == 0 {
+			t.Fatalf("проект не набит: в %s не было ни строки", table)
+		}
+		if got[table] != want {
+			t.Fatalf("счётчик %s: в ответе %d, в базе до удаления было %d", table, got[table], want)
+		}
+	}
+	if counters.CostUSD != 1.5 {
+		t.Fatalf("расход в счётчиках: %v", counters.CostUSD)
 	}
 
 	// Считается вся таблица, а не строки удалённого проекта: осиротевшая
@@ -196,6 +232,12 @@ func TestDeleteProjectTakesEverythingWithIt(t *testing.T) {
 	}
 	if _, err := store.GetProjectByKey(ctx, store.DB(), "NEXT"); err != nil {
 		t.Fatalf("удаление задело соседний проект: %v", err)
+	}
+	// У соседа на месте не только строка проекта, но и содержимое.
+	for table, want := range map[string]int{"repositories": 1, "repo_index_runs": 1, "code_files": 1} {
+		if n := countRows(t, ctx, store, fmt.Sprintf(projectScopes[table], neighbour.ID)); n != want {
+			t.Fatalf("у соседнего проекта в %s осталось %d вместо %d", table, n, want)
+		}
 	}
 
 	// Блобы общие по sha256: их чистит сборка мусора, а не удаление проекта.
@@ -235,14 +277,117 @@ func TestDeleteProjectTakesEverythingWithIt(t *testing.T) {
 }
 
 // neighbourOwns — все ли оставшиеся в таблице строки принадлежат соседнему
-// проекту. Таблицы без project_id считаются пустыми только буквально.
+// проекту. Таблицы, у которых нет project_id и нет пути к нему в
+// projectScopes, считаются пустыми только буквально.
 func neighbourOwns(t *testing.T, ctx context.Context, store *postgres.Store, table string, projectID uuid.UUID, total int) bool {
 	t.Helper()
+	query, ok := projectScopes[table]
+	if !ok {
+		query = fmt.Sprintf(`SELECT count(*) FROM %s WHERE project_id = '%%s'`, table)
+	}
 	var n int
-	err := store.DB().QueryRow(ctx,
-		fmt.Sprintf(`SELECT count(*) FROM %s WHERE project_id = $1`, table), projectID).Scan(&n)
-	if err != nil {
+	if err := store.DB().QueryRow(ctx, fmt.Sprintf(query, projectID)).Scan(&n); err != nil {
 		return false
 	}
 	return n == total
+}
+
+// projectScopes — как посчитать строки проекта в таблице: у большинства есть
+// project_id, индекс репозиториев достаётся через сам репозиторий. Список
+// покрывает всё, что попадает в счётчики ручки.
+var projectScopes = map[string]string{
+	"tasks":             `SELECT count(*) FROM tasks WHERE project_id = '%s'`,
+	"stage_runs":        `SELECT count(*) FROM stage_runs sr JOIN tasks t ON t.id = sr.task_id WHERE t.project_id = '%s'`,
+	"artifacts":         `SELECT count(*) FROM artifacts WHERE project_id = '%s'`,
+	"repositories":      `SELECT count(*) FROM repositories WHERE project_id = '%s'`,
+	"repo_index_runs":   `SELECT count(*) FROM repo_index_runs ir JOIN repositories r ON r.id = ir.repository_id WHERE r.project_id = '%s'`,
+	"code_files":        `SELECT count(*) FROM code_files cf JOIN repositories r ON r.id = cf.repository_id WHERE r.project_id = '%s'`,
+	"code_chunks":       `SELECT count(*) FROM code_chunks WHERE project_id = '%s'`,
+	"project_documents": `SELECT count(*) FROM project_documents WHERE project_id = '%s'`,
+	"project_members":   `SELECT count(*) FROM project_members WHERE project_id = '%s'`,
+	"agent_tokens":      `SELECT count(*) FROM agent_tokens WHERE project_id = '%s'`,
+	"roles":             `SELECT count(*) FROM roles WHERE project_id = '%s'`,
+	"workflows":         `SELECT count(*) FROM workflows WHERE project_id = '%s'`,
+	"invites":           `SELECT count(*) FROM invites WHERE project_id = '%s'`,
+}
+
+// projectContents — что лежит в проекте прямо сейчас. Запросы независимые:
+// счётчики ручки не должны сверяться сами с собой.
+func projectContents(t *testing.T, ctx context.Context, store *postgres.Store, projectID uuid.UUID) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for table, query := range projectScopes {
+		out[table] = countRows(t, ctx, store, fmt.Sprintf(query, projectID))
+	}
+	return out
+}
+
+// Удаление идёт одной транзакцией: ошибка в середине оставляет проект целиком,
+// полуудалённого состояния не возникает.
+func TestDeleteProjectRollsBackWhole(t *testing.T) {
+	ctx := context.Background()
+	store, engine, _, _, system := setupPhase4(t, AuthHeader)
+	projectWithEverything(t, ctx, store, engine, system)
+
+	project, err := store.GetProjectByKey(ctx, store.DB(), "SDLC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := projectContents(t, ctx, store, project.ID)
+
+	boom := errors.New("искусственная ошибка после удаления")
+	err = store.InTx(ctx, func(tx pgx.Tx) error {
+		if err := store.DeleteProject(ctx, tx, project.ID); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("ожидалась искусственная ошибка: %v", err)
+	}
+
+	if _, err := store.GetProjectByKey(ctx, store.DB(), "SDLC"); err != nil {
+		t.Fatalf("проект не вернулся после отката: %v", err)
+	}
+	after := projectContents(t, ctx, store, project.ID)
+	for table, want := range before {
+		if after[table] != want {
+			t.Fatalf("после отката в %s осталось %d строк вместо %d", table, after[table], want)
+		}
+	}
+}
+
+// Агент, державший аренду этапа удалённого проекта, получает «не найдено», а не
+// пятисотку: прогон ушёл каскадом задачи, и работать больше не с чем.
+func TestAgentOfDeletedProjectIsToldNotFound(t *testing.T) {
+	ctx := context.Background()
+	_, engine, _, _, system := setupPhase4(t, AuthHeader)
+
+	task, err := engine.CreateTask(ctx, "SDLC", system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{Title: "Живая задача"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Execute(ctx, task.Key, "start", system.ID, "поехали"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := engine.Claim(ctx, task.Key, system.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.DeleteProject(ctx, "SDLC", system.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := engine.Heartbeat(ctx, claimed.StageRunID, system.ID); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("heartbeat после удаления проекта: код %q, ошибка %v", apperr.As(err).Code, err)
+	}
+	if _, err := engine.SubmitArtifact(ctx, task.Key, system.ID, SubmitArtifactInput{
+		Kind: "analysis.brief", Title: "Бриф", Content: []byte("# Бриф"),
+	}); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("сдача артефакта после удаления проекта: код %q, ошибка %v", apperr.As(err).Code, err)
+	}
+	if _, err := engine.Execute(ctx, task.Key, "analysis_done", system.ID, ""); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("переход после удаления проекта: код %q, ошибка %v", apperr.As(err).Code, err)
+	}
 }
