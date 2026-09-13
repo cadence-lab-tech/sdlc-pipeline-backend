@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -211,4 +212,113 @@ func (s *Store) ListProjectDocuments(ctx context.Context, q Querier, projectID u
 		out = append(out, d)
 	}
 	return out, translate(rows.Err())
+}
+
+// ProjectRemovalCounters — что ушло вместе с проектом. Как и у отвязки
+// репозитория, считается до удаления: после него считать нечего, а человеку
+// важно видеть цену действия.
+type ProjectRemovalCounters struct {
+	Tasks        int `json:"tasks"`
+	StageRuns    int `json:"stage_runs"`
+	Artifacts    int `json:"artifacts"`
+	Repositories int `json:"repositories"`
+	IndexRuns    int `json:"index_runs"`
+	CodeFiles    int `json:"code_files"`
+	CodeChunks   int `json:"code_chunks"`
+	Documents    int `json:"documents"`
+	Members      int `json:"members"`
+	Tokens       int `json:"tokens"`
+	Roles        int `json:"roles"`
+	Workflows    int `json:"workflows"`
+	Invites      int `json:"invites"`
+	// Расход прогонов проекта: он исчезает вместе с задачами, а бюджет команды
+	// считается по живым строкам. Пусть хотя бы останется в событии аудита.
+	CostUSD float64 `json:"cost_usd"`
+}
+
+// CountProjectContents считает содержимое проекта одним запросом.
+func (s *Store) CountProjectContents(ctx context.Context, q Querier, projectID uuid.UUID) (ProjectRemovalCounters, error) {
+	var c ProjectRemovalCounters
+	err := q.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM tasks              WHERE project_id = $1),
+		       (SELECT count(*) FROM stage_runs sr
+		          JOIN tasks t ON t.id = sr.task_id     WHERE t.project_id = $1),
+		       (SELECT count(*) FROM artifacts          WHERE project_id = $1),
+		       (SELECT count(*) FROM repositories       WHERE project_id = $1),
+		       (SELECT count(*) FROM repo_index_runs ir
+		          JOIN repositories r ON r.id = ir.repository_id
+		                                             WHERE r.project_id = $1),
+		       (SELECT count(*) FROM code_files cf
+		          JOIN repositories r ON r.id = cf.repository_id
+		                                             WHERE r.project_id = $1),
+		       (SELECT count(*) FROM code_chunks ch
+		          JOIN code_files cf ON cf.id = ch.code_file_id
+		          JOIN repositories r ON r.id = cf.repository_id
+		                                             WHERE r.project_id = $1),
+		       (SELECT count(*) FROM project_documents  WHERE project_id = $1),
+		       (SELECT count(*) FROM project_members    WHERE project_id = $1),
+		       (SELECT count(*) FROM agent_tokens       WHERE project_id = $1),
+		       (SELECT count(*) FROM roles              WHERE project_id = $1),
+		       (SELECT count(*) FROM workflows          WHERE project_id = $1),
+		       (SELECT count(*) FROM invites            WHERE project_id = $1),
+		       (SELECT coalesce(sum(u.cost_usd), 0)::float8 FROM stage_run_usage u
+		          JOIN stage_runs sr ON sr.id = u.run_id
+		          JOIN tasks t ON t.id = sr.task_id     WHERE t.project_id = $1)`, projectID,
+	).Scan(&c.Tasks, &c.StageRuns, &c.Artifacts, &c.Repositories, &c.IndexRuns,
+		&c.CodeFiles, &c.CodeChunks, &c.Documents, &c.Members, &c.Tokens,
+		&c.Roles, &c.Workflows, &c.Invites, &c.CostUSD)
+	if err != nil {
+		return c, translate(err)
+	}
+	return c, nil
+}
+
+// LockProjectForRemoval берёт строку проекта под FOR UPDATE. Без этого задача
+// или репозиторий успеют появиться между подсчётом и удалением: их вставка
+// проверяет внешний ключ и на время блокировки ждёт. Заодно два одновременных
+// удаления выстраиваются в очередь.
+func (s *Store) LockProjectForRemoval(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) error {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id = $1 FOR UPDATE`, projectID).Scan(&id)
+	if err != nil {
+		return notFound(err, "проект не найден")
+	}
+	return nil
+}
+
+// DeleteProject удаляет проект целиком. Каскада схемы для этого недостаточно:
+// задачи и прогоны ссылаются на цикл и роли того же проекта связями без
+// каскада (tasks.workflow_id, tasks.status_id, stage_runs.role_id,
+// role_version_id, status_id), и прямой DELETE FROM projects падает на
+// stage_runs_role_id_fkey, как только у проекта был хоть один захваченный
+// этап. Поэтому задачи убираются первыми — они уносят каскадом прогоны,
+// артефакты, гейты, события и область, — и только потом уходит сам проект,
+// после чего роли, версии цикла, статусы, репозитории с индексом, участники,
+// токены и приглашения удаляются каскадом без конфликтов.
+//
+// Документы убираются вторым шагом, тоже явно: project_documents.repository_id
+// — ON DELETE SET NULL, а project_documents_source_shape требует у source =
+// 'repo_path' непустой repository_id, и обнуление ломает документ. Само по
+// себе удаление проекта до этого не доводит — каскад документов и каскад
+// репозиториев висят на projects одним уровнем, а обнуление приходит вторым,
+// когда документов уже нет, — но это дисциплина очереди после-триггеров, а не
+// обещание схемы. Строка ниже делает порядок обещанием кода, как в
+// DeleteRepository.
+//
+// Блобы и кэш эмбеддингов не трогаются: они общие и уходят сборкой мусора.
+func (s *Store) DeleteProject(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM tasks WHERE project_id = $1`, projectID); err != nil {
+		return translate(err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM project_documents WHERE project_id = $1`, projectID); err != nil {
+		return translate(err)
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
+	if err != nil {
+		return translate(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.NotFound("проект уже удалён")
+	}
+	return nil
 }

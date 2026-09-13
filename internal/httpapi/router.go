@@ -129,6 +129,9 @@ func (s *Server) Handler() http.Handler {
 		// это. Guard'а по уровню здесь нет: проверка внутри.
 		v1.POST("/projects", s.createProject)
 		v1.GET("/projects/:projectKey", viewer, s.getProject)
+		// Удаление — уровнем выше правки: оно уносит задачи со всей их
+		// историей, индекс репозиториев и доступ к проекту целиком.
+		v1.DELETE("/projects/:projectKey", projectAdmin, s.deleteProject)
 		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)
 		v1.GET("/projects/:projectKey/tasks", viewer, s.listTasks)
 		// Заводить задачи вправе и агент, но только дочерние к той, которую он
