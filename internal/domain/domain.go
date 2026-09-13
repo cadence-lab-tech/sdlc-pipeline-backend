@@ -695,6 +695,8 @@ const (
 	EventDriftResolved     = "drift.resolved"
 	EventUsageReported     = "usage.reported"
 	EventTaskUpdated       = "task.updated"
+	// Задача из бэклога переехала на новую версию цикла при активации.
+	EventTaskWorkflowMoved = "task.workflow_moved"
 )
 
 // TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где

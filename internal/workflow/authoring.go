@@ -576,10 +576,13 @@ type ActivationResult struct {
 	// быть несколько, если новый цикл ведёт несколько типов задач.
 	RetiredID *uuid.UUID  `json:"retired_workflow_id,omitempty"`
 	Retired   []uuid.UUID `json:"retired_workflow_ids,omitempty"`
-	// Задачи, которые доходят по прежней версии: задача идёт по тому циклу, на
-	// котором начата, и активация её не двигает.
+	// Задачи, которые доходят по прежней версии: начатая задача идёт по тому
+	// циклу, на котором начата, и активация её не двигает.
 	OnPreviousVersion []postgres.OpenTaskOnWorkflow `json:"tasks_on_previous_version"`
-	Warnings          []Problem                     `json:"warnings"`
+	// Задачи, переехавшие на новую версию: стояли в бэклоге, никто их не
+	// забирал — им нужны актуальные правила (решение 0036).
+	Moved    []postgres.MovedTask `json:"tasks_moved"`
+	Warnings []Problem            `json:"warnings"`
 }
 
 // Activate делает черновик действующим циклом проекта.
@@ -587,6 +590,9 @@ type ActivationResult struct {
 // Задачи, начатые на прежней версии, остаются на ней и доходят по её правилам
 // (см. Engine.Execute). Это не забывчивость: переписать под задачей набор
 // гейтов посреди этапа — значит обнулить уже вынесенные по ним решения.
+// Задачи, которые ещё не начинались, — другое дело: они переезжают на новую
+// версию, потому что терять им нечего, а работать они должны по актуальным
+// правилам (решение 0036).
 func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID) (ActivationResult, error) {
 	var res ActivationResult
 
@@ -628,7 +634,19 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			return err
 		}
 
+		res.Moved = []postgres.MovedTask{}
 		for _, id := range retired {
+			moved, err := a.store.MoveWaitingTasks(ctx, tx, id, full)
+			if err != nil {
+				return err
+			}
+			for _, m := range moved {
+				if err := a.recordMove(ctx, tx, m, id, full, actor); err != nil {
+					return err
+				}
+			}
+			res.Moved = append(res.Moved, moved...)
+
 			carried, err := a.store.OpenTasksOnWorkflow(ctx, tx, id)
 			if err != nil {
 				return err
@@ -661,6 +679,32 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			"version", res.Workflow.Version, "actor", actor)
 	}
 	return res, err
+}
+
+// recordMove пишет в ленту задачи, что она переехала на новую версию цикла:
+// по ленте видно, почему у неё две попытки на начальном статусе.
+func (a *Authoring) recordMove(ctx context.Context, tx pgx.Tx, m postgres.MovedTask, fromWorkflowID uuid.UUID, to domain.Workflow, actor uuid.UUID) error {
+	task, err := a.store.GetTaskByKey(ctx, tx, m.Key)
+	if err != nil {
+		return err
+	}
+	run, err := a.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"from_workflow_id": fromWorkflowID.String(),
+		"to_workflow_id":   to.ID.String(),
+		"workflow":         to.Name,
+		"version":          to.Version,
+		"from_status":      m.FromStatus,
+		"to_status":        m.ToStatus,
+	}
+	if err := a.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventTaskWorkflowMoved, actor, payload); err != nil {
+		return err
+	}
+	return a.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventStageEntered, actor,
+		map[string]any{"status": m.ToStatus, "attempt": run.Attempt})
 }
 
 // typesWithoutWorkflow — типы задач, объявленные проектом, которые не ведёт
