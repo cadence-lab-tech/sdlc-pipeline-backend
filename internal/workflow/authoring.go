@@ -634,8 +634,27 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			return err
 		}
 
-		res.Moved = []postgres.MovedTask{}
+		// Бэклог переезжает со всех прежних версий цикла, а не только со
+		// снятой сейчас: задача могла остаться на более ранней версии
+		// (решение 0036). Список только что снятых идёт первым — по нему
+		// же считаются задачи, которые доходят по прежней версии.
+		previous, err := a.store.RetiredWorkflows(ctx, tx, wf.ProjectID, wf.TaskTypes)
+		if err != nil {
+			return err
+		}
+		sources := append([]uuid.UUID{}, retired...)
+		seen := map[uuid.UUID]bool{}
 		for _, id := range retired {
+			seen[id] = true
+		}
+		for _, id := range previous {
+			if !seen[id] {
+				sources = append(sources, id)
+			}
+		}
+
+		res.Moved = []postgres.MovedTask{}
+		for _, id := range sources {
 			moved, err := a.store.MoveWaitingTasks(ctx, tx, id, full)
 			if err != nil {
 				return err
