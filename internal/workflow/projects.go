@@ -159,6 +159,48 @@ func (e *Engine) RemoveRepository(ctx context.Context, projectKey, ref string, a
 	return repo, counters, err
 }
 
+// DeleteProject удаляет проект целиком и необратимо: задачи со всеми прогонами
+// и артефактами, репозитории с индексом, документы, участников, токены
+// проекта, роли, версии цикла и приглашения. Архива и срока хранения нет —
+// освобождать место иначе нечем (docs/SAAS.md §7), а `projects.archived_at`
+// проектам никто не проставляет.
+//
+// Запрета по незакрытым задачам, в отличие от отвязки репозитория, здесь нет:
+// там задача остаётся жить и теряет из-под ног код, здесь задачи не остаётся
+// вовсе, и рассогласовать нечего. Живой проект почти всегда имеет открытые
+// задачи, так что запрет сделал бы удаление недостижимым. Явным действием
+// служит подтверждение на краю — ключ проекта в CLI и диалог в интерфейсе.
+func (e *Engine) DeleteProject(ctx context.Context, projectKey string, actor uuid.UUID) (domain.Project, postgres.ProjectRemovalCounters, error) {
+	var project domain.Project
+	var counters postgres.ProjectRemovalCounters
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		project, err = e.store.GetProjectByKey(ctx, tx, projectKey)
+		if err != nil {
+			return err
+		}
+		if err := e.store.LockProjectForRemoval(ctx, tx, project.ID); err != nil {
+			return err
+		}
+		counters, err = e.store.CountProjectContents(ctx, tx, project.ID)
+		if err != nil {
+			return err
+		}
+		// Событие пишется до удаления: команда-владелец нужна, пока строка
+		// проекта жива, а лента задачи уходит вместе с задачей — следа не
+		// осталось бы нигде. Владелец у проекта есть всегда (решение 0033,
+		// NOT NULL с миграции 000018); проверка — от разыменования nil.
+		if project.OwnerTeamID != nil {
+			if err := e.store.AppendTeamEvent(ctx, tx, *project.OwnerTeamID, domain.EventProjectDeleted, actor,
+				map[string]any{"project_key": project.Key, "project_name": project.Name, "removed": counters}); err != nil {
+				return err
+			}
+		}
+		return e.store.DeleteProject(ctx, tx, project.ID)
+	})
+	return project, counters, err
+}
+
 // PutDocumentInput — проектный документ. Ровно один из Content, URL и
 // (Repository, RepoPath) задаёт источник.
 type PutDocumentInput struct {

@@ -697,6 +697,24 @@ const (
 	EventTaskUpdated       = "task.updated"
 )
 
+// TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где
+// следу негде остаться на задаче: удалённый проект уносит свои task_events с
+// собой, а команда-владелец остаётся.
+type TeamEvent struct {
+	ID          uuid.UUID       `json:"id"`
+	TeamID      uuid.UUID       `json:"team_id"`
+	Type        string          `json:"type"`
+	ActorID     *uuid.UUID      `json:"actor_id,omitempty"`
+	ActorHandle *string         `json:"actor_handle,omitempty"`
+	Payload     json.RawMessage `json:"payload"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
+
+// Типы событий ленты команды.
+const (
+	EventProjectDeleted = "project.deleted"
+)
+
 // ProjectDocument — материал проекта вне задач: API-registry, глоссарий,
 // схема взаимодействия. Едет агенту в контексте захвата списком.
 type ProjectDocument struct {

@@ -393,6 +393,19 @@ func (s *Server) removeRepository(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"repository": repo, "removed": counters})
 }
 
+// deleteProject удаляет проект целиком. Подтверждения ручка не спрашивает:
+// оно живёт на краю — ключ проекта в CLI, диалог в интерфейсе, — как и у
+// отвязки репозитория.
+func (s *Server) deleteProject(c *gin.Context) {
+	project, counters, err := s.engine.DeleteProject(c.Request.Context(),
+		c.Param("projectKey"), actor(c).ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"project": project, "removed": counters})
+}
+
 func (s *Server) listDocuments(c *gin.Context) {
 	docs, err := s.engine.ListDocuments(c.Request.Context(), c.Param("projectKey"))
 	if err != nil {
