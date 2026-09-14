@@ -537,6 +537,36 @@ func (s *Store) CachedEmbeddings(ctx context.Context, q Querier, model string, s
 	return out, translate(rows.Err())
 }
 
+// TouchEmbeddings отмечает попадания в кэш: строки живут, пока ими
+// пользуются, и вытеснение смотрит именно на эту отметку.
+//
+// Один UPDATE на всю пачку, ровно тот же набор sha, которым ходил
+// CachedEmbeddings. Запрос на чанк здесь запрещён: пачка прогона — это сотни
+// sha, и индексация встала бы на отметке, которая никому не видна.
+//
+// staleAfter — порог, ниже которого строку не переписывают. Без него каждая
+// пачка каждого прогона переписывала бы четырёхкилобайтные строки и индекс по
+// last_used_at ради времени, которое по существу не изменилось. Ноль означает
+// «отмечать всегда» и нужен разве что тесту.
+//
+// Возвращает число обновлённых строк.
+func (s *Store) TouchEmbeddings(ctx context.Context, q Querier, model string, shas []string, staleAfter time.Duration) (int, error) {
+	if len(shas) == 0 {
+		return 0, nil
+	}
+	if staleAfter < 0 {
+		staleAfter = 0
+	}
+	tag, err := q.Exec(ctx, `
+		UPDATE embedding_cache SET last_used_at = now()
+		WHERE model = $1 AND text_sha = ANY($2)
+		  AND last_used_at < now() - $3::interval`, model, shas, staleAfter)
+	if err != nil {
+		return 0, translate(err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *Store) CacheEmbeddings(ctx context.Context, q Querier, model string, vectors map[string][]float32) error {
 	if len(vectors) == 0 {
 		return nil

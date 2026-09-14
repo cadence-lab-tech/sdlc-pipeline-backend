@@ -511,7 +511,7 @@ func TestRunOfDetachedRepositoryWritesNothing(t *testing.T) {
 		t.Fatalf("отвязка: %v", err)
 	}
 
-	if _, err := ix.process(ctx, run); err == nil {
+	if _, _, err := ix.process(ctx, run); err == nil {
 		t.Fatal("прогон по отвязанному репозиторию завершился успехом")
 	}
 	var files int
@@ -555,7 +555,7 @@ func TestRunOfDeletedProjectWritesNothing(t *testing.T) {
 		t.Fatalf("удаление проекта: %v", err)
 	}
 
-	if _, err := ix.process(ctx, run); err == nil {
+	if _, _, err := ix.process(ctx, run); err == nil {
 		t.Fatal("прогон по удалённому проекту завершился успехом")
 	}
 	var files int

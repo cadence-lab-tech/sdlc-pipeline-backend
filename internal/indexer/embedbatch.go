@@ -20,6 +20,20 @@ type embedBatch struct {
 	pending   []pendingFile
 	count     int
 	embedded  int
+	cache     cacheCounters
+}
+
+// cacheCounters — сколько sha спрашивали у кэша эмбеддингов и сколько он
+// закрыл. В repo_index_runs эти цифры не пишутся: доля попаданий нужна в
+// сводке прогона в логе, а не в карточке задачи.
+type cacheCounters struct {
+	lookups int
+	hits    int
+}
+
+func (c *cacheCounters) add(other cacheCounters) {
+	c.lookups += other.lookups
+	c.hits += other.hits
 }
 
 type pendingFile struct {
@@ -57,15 +71,17 @@ func (b *embedBatch) flush(ctx context.Context) error {
 		}
 	}
 
-	vectors, model, sent, err := embedTexts(ctx, b.ix, texts)
+	res, err := embedTexts(ctx, b.ix, texts)
 	if err != nil {
 		// Индекс без векторов остаётся полезным: полнотекстовый поиск и
 		// детектор дрейфа работают и так. Векторы досчитает backfill —
 		// валить из-за чужого API прогон, от которого зависит дрейф, нельзя.
 		b.ix.log.Warn("эмбеддинги не посчитаны, куски записаны без векторов", "error", err)
-		vectors, model, sent = nil, "", 0
+		res = embedResult{}
 	}
-	b.embedded += sent
+	vectors, model := res.vectors, res.model
+	b.embedded += res.sent
+	b.cache.add(res.cache)
 
 	for _, f := range pending {
 		rows := make([]postgres.CodeChunkInput, 0, len(f.chunks))
@@ -86,11 +102,20 @@ func (b *embedBatch) flush(ctx context.Context) error {
 	return nil
 }
 
-// embedTexts возвращает векторы по sha текстов, имя модели и число текстов,
-// реально ушедших в модель (остальное закрыл кэш).
-func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (map[string][]float32, string, int, error) {
+// embedResult — что дала пачка: векторы по sha текстов, имя модели, число
+// текстов, реально ушедших в модель (остальное закрыл кэш), и сам счёт
+// обращений к кэшу.
+type embedResult struct {
+	vectors map[string][]float32
+	model   string
+	sent    int
+	cache   cacheCounters
+}
+
+// embedTexts считает векторы пачки: сперва кэш, моделью — только промахи.
+func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (embedResult, error) {
 	if ix.embedder == nil || len(texts) == 0 {
-		return nil, "", 0, nil
+		return embedResult{}, nil
 	}
 	model := ix.embedder.Model()
 
@@ -100,8 +125,10 @@ func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (map[
 	}
 	cached, err := ix.store.CachedEmbeddings(ctx, ix.store.DB(), model, shas)
 	if err != nil {
-		return nil, "", 0, err
+		return embedResult{}, err
 	}
+	res := embedResult{model: model, cache: cacheCounters{lookups: len(shas), hits: len(cached)}}
+	touchCache(ctx, ix, model, cached)
 
 	missingSHA := make([]string, 0, len(texts))
 	missingText := make([]string, 0, len(texts))
@@ -113,15 +140,16 @@ func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (map[
 		missingText = append(missingText, text)
 	}
 	if len(missingText) == 0 {
-		return cached, model, 0, nil
+		res.vectors = cached
+		return res, nil
 	}
 
 	vectors, err := ix.embedder.Embed(ctx, missingText, embed.KindDocument)
 	if err != nil {
-		return nil, "", 0, err
+		return embedResult{}, err
 	}
 	if len(vectors) != len(missingText) {
-		return nil, "", 0, errCount(len(vectors), len(missingText))
+		return embedResult{}, errCount(len(vectors), len(missingText))
 	}
 
 	fresh := make(map[string][]float32, len(vectors))
@@ -130,9 +158,29 @@ func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (map[
 		cached[sha] = vectors[i]
 	}
 	if err := ix.store.CacheEmbeddings(ctx, ix.store.DB(), model, fresh); err != nil {
-		return nil, "", 0, err
+		return embedResult{}, err
 	}
-	return cached, model, len(missingText), nil
+	res.vectors, res.sent = cached, len(missingText)
+	return res, nil
+}
+
+// touchCache отмечает попадания одним запросом на всю пачку — строки живут,
+// пока ими пользуются, и вытеснение смотрит именно на эту отметку.
+//
+// Сбой отметки прогон не роняет: векторы уже на руках у вызывающего, и
+// платить за них второй раз из-за дедлока с соседним прогоном незачем.
+// Худшее, что даёт потерянная отметка, — строка, вытесненная раньше срока.
+func touchCache(ctx context.Context, ix *Indexer, model string, cached map[string][]float32) {
+	if len(cached) == 0 {
+		return
+	}
+	hits := make([]string, 0, len(cached))
+	for sha := range cached {
+		hits = append(hits, sha)
+	}
+	if _, err := ix.store.TouchEmbeddings(ctx, ix.store.DB(), model, hits, ix.opts.CacheTouchAfter); err != nil {
+		ix.log.Warn("попадания в кэш эмбеддингов не отмечены", "count", len(hits), "error", err)
+	}
 }
 
 func errCount(got, want int) error {

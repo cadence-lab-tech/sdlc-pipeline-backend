@@ -79,10 +79,13 @@ type Options struct {
 	ChunkChars   int
 	// Сколько кусков накапливать перед обращением к модели: у вызова
 	// накладные расходы больше, чем у лишнего текста в нём.
-	EmbedBatch   int
-	MaxAttempts  int
-	RetryBackoff time.Duration
-	StuckAfter   time.Duration
+	EmbedBatch int
+	// Порог отметки попадания в кэш эмбеддингов: чаще этого last_used_at не
+	// переписывается. Ноль означает «отмечать каждое попадание».
+	CacheTouchAfter time.Duration
+	MaxAttempts     int
+	RetryBackoff    time.Duration
+	StuckAfter      time.Duration
 }
 
 const (
@@ -225,7 +228,7 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 	}
 
 	started := time.Now()
-	counters, err := ix.process(ctx, run)
+	counters, cache, err := ix.process(ctx, run)
 	if err != nil {
 		attempts := ix.opts.MaxAttempts
 		if errors.As(err, &permanentError{}) {
@@ -255,26 +258,31 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 		"files_indexed", counters.FilesIndexed, "files_reused", counters.FilesReused,
 		"chunks_indexed", counters.ChunksIndexed, "chunks_reused", counters.ChunksReused,
 		"chunks_embedded", counters.ChunksEmbedded,
+		// Доля попаданий в кэш эмбеддингов: вместе с chunks_embedded это
+		// единственное, по чему видно, что кэш работает и во что обходится
+		// прогон у провайдера.
+		"cache_lookups", cache.lookups, "cache_hits", cache.hits,
 		"took", time.Since(started).Round(time.Millisecond))
 	return &done, nil
 }
 
-func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, error) {
+func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, cacheCounters, error) {
 	var counters postgres.IndexCounters
+	var cache cacheCounters
 	repo := Repo{run.Owner, run.Name}
 	src, err := ix.source.ForRepository(ctx, credentialsOf(run.InstallationID, run.CredentialRef, run.ProjectCredentialRef))
 	if err != nil {
-		return counters, err
+		return counters, cache, err
 	}
 
 	entries, truncated, err := src.Tree(ctx, repo, run.CommitSHA)
 	if err != nil {
-		return counters, err
+		return counters, cache, err
 	}
 	if truncated {
 		// Неполный листинг выглядит как массовое удаление файлов и завёл бы
 		// ложные сигналы дрейфа по всем задачам репозитория.
-		return counters, permanent("листинг дерева %s обрезан провайдером: репозиторий слишком велик для индексации целиком", repo)
+		return counters, cache, permanent("листинг дерева %s обрезан провайдером: репозиторий слишком велик для индексации целиком", repo)
 	}
 
 	files := make([]Entry, 0, len(entries))
@@ -285,18 +293,18 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		files = append(files, e)
 	}
 	if len(files) > ix.opts.MaxFiles {
-		return counters, permanent("в %s %d файлов при пределе %d: сузьте exclude_globs",
+		return counters, cache, permanent("в %s %d файлов при пределе %d: сузьте exclude_globs",
 			repo, len(files), ix.opts.MaxFiles)
 	}
 
 	parent, hasParent, err := ix.store.LatestCompletedRun(ctx, ix.store.DB(), run.RepositoryID, run.Branch)
 	if err != nil {
-		return counters, err
+		return counters, cache, err
 	}
 	parentFiles := map[string]postgres.ParentFile{}
 	if hasParent {
 		if parentFiles, err = ix.store.ParentFiles(ctx, ix.store.DB(), parent.ID); err != nil {
-			return counters, err
+			return counters, cache, err
 		}
 		counters.ParentID = &parent.ID
 		counters.Kind = "incremental"
@@ -307,7 +315,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 	// Повторная попытка того же прогона начинает с чистого листа: часть
 	// файлов от прошлой попытки уже записана, а (index_run_id, path) уникален.
 	if err := ix.clearRun(ctx, run.ID); err != nil {
-		return counters, err
+		return counters, cache, err
 	}
 
 	batch := newEmbedBatch(ix, run.ProjectID)
@@ -322,7 +330,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 			// Файл не изменился: ни сети, ни модели он не стоит.
 			chunks, err := ix.store.CopyFileFromParent(ctx, ix.store.DB(), run.ID, prev.ID)
 			if err != nil {
-				return counters, err
+				return counters, cache, err
 			}
 			counters.FilesReused++
 			counters.ChunksReused += chunks
@@ -331,7 +339,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 
 		content, err := src.Blob(ctx, repo, e.SHA)
 		if err != nil {
-			return counters, fmt.Errorf("файл %s: %w", e.Path, err)
+			return counters, cache, fmt.Errorf("файл %s: %w", e.Path, err)
 		}
 		if SkipContent(content) {
 			continue
@@ -339,12 +347,12 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 
 		fileID, chunks, err := ix.writeFile(ctx, run, e, content)
 		if err != nil {
-			return counters, err
+			return counters, cache, err
 		}
 		counters.FilesIndexed++
 		counters.ChunksIndexed += len(chunks)
 		if err := batch.add(ctx, fileID, chunks); err != nil {
-			return counters, err
+			return counters, cache, err
 		}
 
 		if !hasParent {
@@ -359,7 +367,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 			change.ChangeType = "modified"
 			before, err := ix.previousContent(ctx, prev)
 			if err != nil {
-				return counters, err
+				return counters, cache, err
 			}
 			change.ChangedSymbols = ChangedSymbols(e.Path, before, content)
 			change.Additions, change.Deletions = lineDelta(before, content)
@@ -371,9 +379,10 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 	}
 
 	if err := batch.flush(ctx); err != nil {
-		return counters, err
+		return counters, cache, err
 	}
 	counters.ChunksEmbedded = batch.embedded
+	cache = batch.cache
 
 	if hasParent {
 		for path, prev := range parentFiles {
@@ -382,7 +391,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 			}
 			before, err := ix.previousContent(ctx, prev)
 			if err != nil {
-				return counters, err
+				return counters, cache, err
 			}
 			changes = append(changes, postgres.FileChangeInput{
 				RunID: run.ID, RepositoryID: run.RepositoryID, Path: path,
@@ -394,9 +403,9 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 	}
 
 	if err := ix.store.InsertFileChanges(ctx, ix.store.DB(), changes); err != nil {
-		return counters, err
+		return counters, cache, err
 	}
-	return counters, nil
+	return counters, cache, nil
 }
 
 // clearRun сносит следы предыдущей попытки этого же прогона.
