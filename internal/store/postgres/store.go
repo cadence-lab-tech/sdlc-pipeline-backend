@@ -39,10 +39,22 @@ func (s *Store) DB() Querier { return s.pool }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// InTx прогоняет fn в транзакции. Откат при панике обязателен: без него
-// соединение вернётся в пул с открытой транзакцией и отравит следующего.
+// InTx прогоняет fn в транзакции.
 func (s *Store) InTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+	return runInTx(ctx, s.pool, fn)
+}
+
+// beginner — то, на чём можно начать транзакцию: и пул, и отдельное
+// соединение из него. Соединение нужно там, где транзакция обязана идти в той
+// же сессии, что и взятый до неё сессионный замок (см. withBlobLock).
+type beginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// runInTx прогоняет fn в транзакции. Откат при панике обязателен: без него
+// соединение вернётся в пул с открытой транзакцией и отравит следующего.
+func runInTx(ctx context.Context, b beginner, fn func(tx pgx.Tx) error) error {
+	tx, err := b.Begin(ctx)
 	if err != nil {
 		return apperr.Internal(err, "начало транзакции")
 	}

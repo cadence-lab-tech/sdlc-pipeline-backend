@@ -529,3 +529,93 @@ func TestBlobGCSkipsExternalWithoutStore(t *testing.T) {
 		t.Fatal("строка удалена, а объект удалить было нечем")
 	}
 }
+
+// hookBlobs — хранилище, которое даёт заглянуть внутрь удаления объекта:
+// before зовётся в тот самый момент, когда строка блоба уже удалена и
+// закоммичена, а объект ещё на месте. Это окно и было дырой.
+type hookBlobs struct {
+	*fakeBlobs
+	before func(uri string)
+}
+
+func (h *hookBlobs) Delete(ctx context.Context, uri string) error {
+	if h.before != nil {
+		before := h.before
+		h.before = nil
+		before(uri)
+	}
+	return h.fakeBlobs.Delete(ctx, uri)
+}
+
+// Вторая половина той же гонки: писатель приходит не до удаляющей транзакции,
+// а после её коммита — когда строки уже нет, а объект ещё есть. Транзакционный
+// замок к этому моменту отпущен коммитом, и без сессионного PutBlob проходил
+// свободно: Put не перезаливал объект, найденный на месте, строка вставлялась
+// со старым адресом, а сборщик следом уносил объект из-под неё.
+//
+// Проверяется ровно то, что удаление объекта идёт под тем же замком: писатель,
+// пришедший в это окно, обязан ждать, а дождавшись — получить строку вместе с
+// объектом.
+func TestBlobGCHoldsLockUntilObjectGone(t *testing.T) {
+	f := newGCFixture(t)
+	hooked := &hookBlobs{fakeBlobs: f.blobs}
+	f.store.UseBlobStore(hooked, 1, 1<<20)
+
+	content := "содержимое, которое перезапишут в окне"
+	sha := f.put(content)
+
+	taskID, projectID := f.demoTask()
+	written := make(chan error, 1)
+	hooked.before = func(string) {
+		go func() {
+			written <- f.store.InTx(f.ctx, func(tx pgx.Tx) error {
+				if _, err := f.store.PutBlob(f.ctx, tx, []byte(content), "text/plain"); err != nil {
+					return err
+				}
+				_, err := tx.Exec(f.ctx, `
+					INSERT INTO artifacts (task_id, project_id, kind, title, blob_sha, status)
+					VALUES ($1, $2, 'dev.change_summary', 'гонка', $3, 'submitted')`,
+					taskID, projectID, sha)
+				return err
+			})
+		}()
+		// Писатель стоит на замке, пока объект не удалён. Если прошёл —
+		// окно открыто, и строка вот-вот останется без содержимого.
+		select {
+		case err := <-written:
+			t.Errorf("параллельная запись прошла в окне между строкой и объектом: %v", err)
+			written <- err // вернуть, чтобы проверки после прохода не ждали впустую
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	stats, failed := f.collect(gcOpts())
+	if stats.Deleted != 1 || len(failed) != 0 {
+		t.Fatalf("проход сборщика: %+v, сбои %v", stats, failed)
+	}
+
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatalf("параллельная запись: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("параллельная запись не дождалась снятия замка")
+	}
+
+	// Писатель дождался пустого хранилища, залил объект заново и вставил
+	// строку: пара цела с обеих сторон.
+	if !f.alive(sha) {
+		t.Fatal("строка блоба, записанная после прохода, потеряна")
+	}
+	if !f.blobs.has("fake://" + sha) {
+		t.Fatal("строка блоба осталась без объекта")
+	}
+	got, _, err := f.store.BlobContent(f.ctx, f.pool, sha)
+	if err != nil {
+		t.Fatalf("чтение содержимого после гонки: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("содержимое после гонки: %q", got)
+	}
+}

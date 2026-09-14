@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 )
 
 // BlobRef — строка blobs глазами сборщика мусора: что удалять и сколько места
@@ -74,11 +77,11 @@ func (s *Store) UnreferencedBlobs(ctx context.Context, q Querier, limit int, min
 // целиком. false без ошибки — ссылка появилась или строки уже нет.
 //
 // Перед удалением берётся advisory-замок по sha, тот же, что берёт PutBlob:
-// он держится до конца транзакции и закрывает окно между удалением строки и
-// удалением объекта из хранилища. Без него параллельная запись того же
-// содержимого увидела бы объект на месте (S3.Put пропускает заливку по head,
-// FS.Put — по os.Stat), не залила бы его заново, вставила бы строку — и эту
-// строку сборщик оставил бы без содержимого.
+// он не даёт удалить строку из-под транзакции, которая прямо сейчас пишет то
+// же содержимое. Замок транзакционный и отпускается коммитом — то есть до
+// удаления объекта из хранилища; окно между этими двумя шагами закрывает не
+// он, а сессионный замок, который держит вокруг всего этого withBlobLock.
+// Вызывать метод в обход withBlobLock — значит вернуть гонку, описанную там.
 func (s *Store) DeleteBlobIfUnreferenced(ctx context.Context, q Querier, sha string, minAge time.Duration) (BlobRef, bool, error) {
 	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(`+blobLockKey+`)`, sha); err != nil {
 		return BlobRef{}, false, translate(err)
@@ -104,11 +107,56 @@ func (s *Store) DeleteBlobIfUnreferenced(ctx context.Context, q Querier, sha str
 // lockBlob берёт тот же advisory-замок, что и сборщик мусора, до конца
 // транзакции. Зовёт его запись содержимого: пока пишущая транзакция не
 // закоммичена, сборщик не тронет ни строку, ни объект.
+//
+// Со стороны сборщика тот же ключ занят сессионным замком (withBlobLock), а
+// пространство ключей у сессионных и транзакционных advisory-замков общее —
+// поэтому запись и проход сборщика взаимно исключают друг друга целиком, а не
+// только на время удаляющей транзакции.
 func (s *Store) lockBlob(ctx context.Context, q Querier, sha string) error {
 	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(`+blobLockKey+`)`, sha); err != nil {
 		return translate(err)
 	}
 	return nil
+}
+
+// withBlobLock держит advisory-замок по sha на одном соединении, пока идёт fn,
+// и отдаёт это же соединение внутрь.
+//
+// Замок сессионный, а не транзакционный, намеренно. Транзакционный
+// отпускается коммитом, а объект из хранилища удаляется уже после коммита
+// удаляющей транзакции — таков порядок, и менять его нельзя (см. CollectBlobs).
+// Между коммитом и удалением объекта оставалось окно: параллельный PutBlob
+// того же содержимого заставал замок свободным, строки уже не было, а объект
+// ещё был — и Put его не перезаливал (S3.Put пропускает заливку по head,
+// FS.Put — по os.Stat). Писатель вставлял строку со старым адресом, а сборщик
+// следом уносил объект из-под неё: артефакт с живой строкой и без содержимого.
+// Сессионный замок накрывает оба шага разом и это окно закрывает.
+//
+// fn получает то самое соединение: удаляющую транзакцию надо вести на нём.
+// Начатая из пула, она встала бы на том же ключе из другой сессии и проход
+// повис бы сам на себе. В пределах одной сессии advisory-замки счётные,
+// поэтому pg_advisory_xact_lock внутри транзакции берётся сразу.
+func (s *Store) withBlobLock(ctx context.Context, sha string, fn func(conn *pgxpool.Conn) error) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return apperr.Internal(err, "соединение под замок блоба")
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(`+blobLockKey+`)`, sha); err != nil {
+		return translate(err)
+	}
+	defer func() {
+		// Снятие идёт без отмены: отменённый проход, оставивший замок на
+		// живом соединении, увёз бы его обратно в пул — и все, кто пишет это
+		// содержимое, встали бы навсегда. Если снять не вышло, соединение в
+		// пул не возвращается: Release разрушит закрытое.
+		if _, err := conn.Exec(context.WithoutCancel(ctx),
+			`SELECT pg_advisory_unlock(`+blobLockKey+`)`, sha); err != nil {
+			_ = conn.Conn().Close(context.WithoutCancel(ctx))
+		}
+	}()
+	return fn(conn)
 }
 
 // BlobGCOptions — настройки одного прохода сборщика.
@@ -160,6 +208,12 @@ var errNoBlobStore = errors.New("внешнее хранилище не наст
 // оставляет осиротевший объект: это утечка места на один блоб, и следующая
 // запись того же содержимого объект переиспользует.
 //
+// Оба шага по одному блобу идут под сессионным advisory-замком по его sha
+// (withBlobLock) — тем же, что берёт PutBlob. Транзакционного замка здесь мало:
+// он отпускается коммитом, то есть до похода в хранилище, и оставлял бы окно,
+// в котором параллельная запись того же содержимого получает строку без
+// объекта. Разбор окна — в комментарии к withBlobLock.
+//
 // Каждый блоб идёт своей транзакцией: проход на пятьсот блобов не должен
 // держать одну транзакцию открытой на всё время походов в хранилище, а сбой
 // на одном блобе не должен откатывать удалённые до него.
@@ -200,10 +254,24 @@ func (s *Store) CollectBlobs(ctx context.Context, opts BlobGCOptions, onFail fun
 
 		var deleted BlobRef
 		var ok bool
-		err := s.InTx(ctx, func(tx pgx.Tx) error {
-			var err error
-			deleted, ok, err = s.DeleteBlobIfUnreferenced(ctx, tx, c.SHA256, opts.MinAge)
-			return err
+		// Сбой удаления объекта проход не роняет и не откатывает удаление
+		// строки: ссылок на неё уже нет, а воскресшая строка без содержимого
+		// была бы хуже утечки места. Поэтому он не ошибка замка, а поле
+		// статистики — и считается после того, как замок снят.
+		var storageErr error
+		err := s.withBlobLock(ctx, c.SHA256, func(conn *pgxpool.Conn) error {
+			if err := runInTx(ctx, conn, func(tx pgx.Tx) error {
+				var err error
+				deleted, ok, err = s.DeleteBlobIfUnreferenced(ctx, tx, c.SHA256, opts.MinAge)
+				return err
+			}); err != nil {
+				return err
+			}
+			if !ok || deleted.Storage != "external" || deleted.ExternalURI == "" {
+				return nil
+			}
+			storageErr = s.blobs.Delete(ctx, deleted.ExternalURI)
+			return nil
 		})
 		if err != nil {
 			return stats, err
@@ -213,16 +281,10 @@ func (s *Store) CollectBlobs(ctx context.Context, opts BlobGCOptions, onFail fun
 			continue
 		}
 		stats.count(deleted)
-
-		if deleted.Storage != "external" || deleted.ExternalURI == "" {
-			continue
-		}
-		// Сбой удаления объекта строку не воскрешает: ссылок на неё уже нет,
-		// а повторное появление строки без содержимого было бы хуже утечки.
-		if err := s.blobs.Delete(ctx, deleted.ExternalURI); err != nil {
+		if storageErr != nil {
 			stats.Failed++
 			if onFail != nil {
-				onFail(deleted.SHA256, err)
+				onFail(deleted.SHA256, storageErr)
 			}
 		}
 	}
