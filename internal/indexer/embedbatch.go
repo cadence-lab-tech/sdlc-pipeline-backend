@@ -76,9 +76,12 @@ func (b *embedBatch) flush(ctx context.Context) error {
 		// Индекс без векторов остаётся полезным: полнотекстовый поиск и
 		// детектор дрейфа работают и так. Векторы досчитает backfill —
 		// валить из-за чужого API прогон, от которого зависит дрейф, нельзя.
+		// Счёт обращений к кэшу при этом не обнуляется: в кэш пачка сходила,
+		// и доля попаданий в сводке прогона обязана это показать.
 		b.ix.log.Warn("эмбеддинги не посчитаны, куски записаны без векторов", "error", err)
-		res = embedResult{}
 	}
+	// Векторов на ошибке нет (res.vectors остаётся nil), и ни один кусок их
+	// не получит.
 	vectors, model := res.vectors, res.model
 	b.embedded += res.sent
 	b.cache.add(res.cache)
@@ -146,10 +149,10 @@ func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (embe
 
 	vectors, err := ix.embedder.Embed(ctx, missingText, embed.KindDocument)
 	if err != nil {
-		return embedResult{}, err
+		return res, err
 	}
 	if len(vectors) != len(missingText) {
-		return embedResult{}, errCount(len(vectors), len(missingText))
+		return res, errCount(len(vectors), len(missingText))
 	}
 
 	fresh := make(map[string][]float32, len(vectors))
@@ -158,7 +161,7 @@ func embedTexts(ctx context.Context, ix *Indexer, texts map[string]string) (embe
 		cached[sha] = vectors[i]
 	}
 	if err := ix.store.CacheEmbeddings(ctx, ix.store.DB(), model, fresh); err != nil {
-		return embedResult{}, err
+		return res, err
 	}
 	res.vectors, res.sent = cached, len(missingText)
 	return res, nil

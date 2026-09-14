@@ -71,7 +71,6 @@ func (ix *Indexer) textChunks(ctx context.Context, t postgres.PendingChunkTarget
 	if err != nil {
 		ix.log.Warn("эмбеддинги для текста не посчитаны, кладём без векторов",
 			"kind", t.Kind, "title", t.Title, "error", err)
-		res = embedResult{}
 	}
 	vectors, model := res.vectors, res.model
 

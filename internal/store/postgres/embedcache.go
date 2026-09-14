@@ -31,11 +31,13 @@ type EmbeddingCacheGCOptions struct {
 // нет, поэтому цифры возвращаются вызывающему и уходят полями
 // структурированного лога.
 type EmbeddingCacheGCStats struct {
-	// RowsBefore и Bytes — размер кэша до прохода. Байты считаются с TOAST и
-	// индексами (pg_total_relation_size): оператору важно место на диске, а
-	// не размер одной кучи.
-	RowsBefore int
-	Bytes      int64
+	// RowsBefore и BytesBefore — размер кэша до прохода. Байты считаются с
+	// TOAST и индексами (pg_total_relation_size): оператору важно место на
+	// диске, а не размер одной кучи. Именно до прохода, а не освобождённое:
+	// DELETE места на диске не возвращает до автовакуума, и цифра
+	// «освобождено», как у сборщика блобов, здесь была бы выдумкой.
+	RowsBefore  int
+	BytesBefore int64
 	// DeletedStale и DeletedOverflow — вытеснено по сроку и сверх границы (в
 	// сухом прогоне — сколько вытеснилось бы). Причины разные: первая говорит,
 	// что кэш остыл, вторая — что он не помещается.
@@ -71,7 +73,7 @@ func (s *Store) EvictEmbeddingCache(ctx context.Context, opts EmbeddingCacheGCOp
 	// несколько часов полный проход по таблице допустим.
 	err := s.DB().QueryRow(ctx, `
 		SELECT count(*), pg_total_relation_size('embedding_cache')
-		FROM embedding_cache`).Scan(&stats.RowsBefore, &stats.Bytes)
+		FROM embedding_cache`).Scan(&stats.RowsBefore, &stats.BytesBefore)
 	if err != nil {
 		return stats, translate(err)
 	}

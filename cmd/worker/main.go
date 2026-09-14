@@ -263,7 +263,7 @@ func evictEmbeddings(ctx context.Context, store *postgres.Store, log *slog.Logge
 		return
 	}
 	log.Info("вытеснение кэша эмбеддингов",
-		"rows_before", stats.RowsBefore, "bytes", stats.Bytes,
+		"rows_before", stats.RowsBefore, "bytes_before", stats.BytesBefore,
 		"stale", stats.DeletedStale, "overflow", stats.DeletedOverflow,
 		"dry_run", cfg.EmbeddingCacheGCDryRun)
 }

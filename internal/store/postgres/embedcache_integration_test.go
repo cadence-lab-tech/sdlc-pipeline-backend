@@ -96,8 +96,8 @@ func TestEvictEmbeddingCacheByTTL(t *testing.T) {
 	switch {
 	case stats.RowsBefore != 2:
 		t.Fatalf("размер до прохода %d", stats.RowsBefore)
-	case stats.Bytes <= 0:
-		t.Fatalf("размер в байтах %d", stats.Bytes)
+	case stats.BytesBefore <= 0:
+		t.Fatalf("размер в байтах %d", stats.BytesBefore)
 	case stats.DeletedStale != 1 || stats.DeletedOverflow != 0:
 		t.Fatalf("вытеснено stale=%d overflow=%d", stats.DeletedStale, stats.DeletedOverflow)
 	case f.alive(sha("stale")):
