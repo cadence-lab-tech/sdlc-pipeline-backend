@@ -3,6 +3,11 @@ package main
 // Команды и проекты команды (решения 0027, 0033). Те же операции, что в
 // интерфейсе: любой вошедший заводит организацию, лид ведёт состав и заводит
 // проекты, администратор инстанса выдаёт право на проекты и тариф.
+//
+// Удаления команды здесь нет намеренно (CLAB-13): оно уносит проекты команды
+// со всем содержимым и необратимо, а подтверждается диалогом в интерфейсе, а
+// не флагом в скрипте. Ручка DELETE /v1/teams/{key} при этом остаётся
+// публичной частью API. `clab team remove` — про вывод человека из состава.
 
 import (
 	"bufio"
@@ -180,19 +185,6 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 
-	case "archive":
-		key, tail := popTask(rest)
-		if _, err := flags("team", tail, func(*flag.FlagSet) {}); err != nil {
-			return err
-		}
-		if key == "" {
-			return fmt.Errorf("clab team archive <ключ команды>")
-		}
-		if err := c.do(ctx, "DELETE", "/teams/"+url.PathEscape(key), nil, nil); err != nil {
-			return err
-		}
-		return print(map[string]any{"archived": key})
-
 	case "add":
 		key, tail := popTask(rest)
 		principal, tail := popTask(tail)
@@ -334,7 +326,7 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		return print(map[string]any{"revoked": key, "project": projectKey})
 
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, convert, plan, github, update, archive, add, remove, groups, budget, grant, revoke", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, show, create, convert, plan, github, update, add, remove, groups, budget, grant, revoke", sub)
 	}
 }
 

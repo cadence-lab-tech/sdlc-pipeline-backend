@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -105,17 +106,107 @@ func (s *Store) ListTeams(ctx context.Context, q Querier, principalID *uuid.UUID
 	return out, translate(rows.Err())
 }
 
-// ArchiveTeam прячет команду, не снося её участие в проектах: строки аудита
-// и проекты ссылаются на команду, и удаление переписало бы историю.
-func (s *Store) ArchiveTeam(ctx context.Context, q Querier, id uuid.UUID) error {
-	tag, err := q.Exec(ctx, `
-		UPDATE teams SET archived_at = now(), updated_at = now()
-		WHERE id = $1 AND archived_at IS NULL`, id)
+// ── удаление арендатора ─────────────────────────────────────────────────────
+
+// TeamRemovalCounters — что ушло вместе с командой. Как у проекта и отвязки
+// репозитория, считается до удаления: после него считать нечего, а человеку
+// важно видеть цену действия.
+//
+// Проекты заполняет вызывающий: он и так держит их список под блокировкой,
+// и второй счёт той же строки разошёлся бы с первым при первой же правке.
+type TeamRemovalCounters struct {
+	Projects    int      `json:"projects"`
+	ProjectKeys []string `json:"project_keys"`
+	Members     int      `json:"members"`
+	// Участие команды в чужих проектах: эти проекты остаются жить, а доступ,
+	// который команда давала своим людям, исчезает. Участие в собственных
+	// проектах сюда не входит — они уходят целиком и считаются отдельно.
+	ProjectGrants int `json:"project_grants"`
+	Invites       int `json:"invites"`
+	Installations int `json:"installations"`
+	Budgets       int `json:"budgets"`
+	IdPGroups     int `json:"idp_groups"`
+}
+
+// CountTeamContents считает содержимое команды одним запросом.
+func (s *Store) CountTeamContents(ctx context.Context, q Querier, teamID uuid.UUID) (TeamRemovalCounters, error) {
+	c := TeamRemovalCounters{ProjectKeys: []string{}}
+	err := q.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM team_members         WHERE team_id = $1),
+		       (SELECT count(*) FROM project_teams pt
+		          JOIN projects p ON p.id = pt.project_id
+		                                                  WHERE pt.team_id = $1
+		                                                    AND p.owner_team_id <> $1),
+		       (SELECT count(*) FROM invites              WHERE team_id = $1),
+		       (SELECT count(*) FROM github_installations WHERE owner_team_id = $1),
+		       (SELECT count(*) FROM team_budgets         WHERE team_id = $1),
+		       (SELECT count(*) FROM team_idp_groups      WHERE team_id = $1)`, teamID,
+	).Scan(&c.Members, &c.ProjectGrants, &c.Invites, &c.Installations, &c.Budgets, &c.IdPGroups)
+	if err != nil {
+		return c, translate(err)
+	}
+	return c, nil
+}
+
+// LockTeamForRemoval берёт строку команды под FOR UPDATE. Этим же держатся
+// её проекты и установки: вставка проверяет внешний ключ на teams и на время
+// блокировки ждёт, так что между подсчётом и удалением у команды не появится
+// ни проекта, ни установки. Заодно два одновременных удаления одного ключа
+// выстраиваются в очередь, и второе видит уже удалённую команду.
+func (s *Store) LockTeamForRemoval(ctx context.Context, tx pgx.Tx, teamID uuid.UUID) error {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id FROM teams WHERE id = $1 FOR UPDATE`, teamID).Scan(&id)
+	if err != nil {
+		return notFound(err, "команда не найдена")
+	}
+	return nil
+}
+
+// ProjectsOfTeam — проекты, которыми команда владеет, под FOR UPDATE и в
+// порядке ключа: удаление идёт по ним по одному, и порядок держит очередь
+// блокировок предсказуемой.
+func (s *Store) ProjectsOfTeam(ctx context.Context, tx pgx.Tx, teamID uuid.UUID) ([]domain.Project, error) {
+	rows, err := tx.Query(ctx, `SELECT `+projectCols+`
+		FROM projects WHERE owner_team_id = $1 ORDER BY key FOR UPDATE`, teamID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.Project{}
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, p)
+	}
+	return out, translate(rows.Err())
+}
+
+// DeleteTeam удаляет команду. Установки GitHub убираются явно: у
+// github_installations.owner_team_id стоит ON DELETE RESTRICT
+// (migrations/000019_github_installations.up.sql:21), и без этой строки
+// удаление команды с подключённым GitHub падало бы на внешнем ключе.
+// Потерять чужое этим нельзя: установка видна только проектам своей
+// команды-владельца (workflow/installations.go, installationOf), а доставки
+// вебхуков по ней дальше идут штатным путём «установка не подключена».
+// Остальное — состав, участие в проектах, приглашения, бюджеты, группы
+// провайдера, подписка и лента team_events — уходит каскадом схемы.
+//
+// Проекты команды должны быть удалены до вызова: на projects.owner_team_id
+// тоже RESTRICT, и это намеренно — проект удаляется кодом DeleteProject, а не
+// каскадом.
+func (s *Store) DeleteTeam(ctx context.Context, tx pgx.Tx, teamID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM github_installations WHERE owner_team_id = $1`, teamID); err != nil {
+		return translate(err)
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM teams WHERE id = $1`, teamID)
 	if err != nil {
 		return translate(err)
 	}
 	if tag.RowsAffected() == 0 {
-		return apperr.NotFound("команда не найдена или уже в архиве")
+		return apperr.NotFound("команда уже удалена")
 	}
 	return nil
 }

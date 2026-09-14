@@ -80,12 +80,16 @@ func (s *Server) updateTeam(c *gin.Context) {
 	c.JSON(http.StatusOK, team)
 }
 
-func (s *Server) archiveTeam(c *gin.Context) {
-	if err := s.auth.ArchiveTeam(c.Request.Context(), identity(c), c.Param("teamKey")); err != nil {
+// deleteTeam удаляет арендатора целиком и необратимо. Подтверждения ручка не
+// спрашивает: оно живёт на краю — диалог в интерфейсе, — как и у удаления
+// проекта. Ответ называет цену действия: что именно ушло вместе с командой.
+func (s *Server) deleteTeam(c *gin.Context) {
+	team, counters, err := s.auth.DeleteTeam(c.Request.Context(), identity(c), c.Param("teamKey"))
+	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, gin.H{"team": team, "removed": counters})
 }
 
 type setTeamMemberRequest struct {
