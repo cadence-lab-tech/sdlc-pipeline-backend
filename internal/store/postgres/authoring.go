@@ -270,74 +270,108 @@ type MovedTask struct {
 //
 // Статус выбирается по ключу, если в новой версии есть такой же статус той же
 // категории; иначе — начальный статус новой версии. Старая попытка закрывается
-// как abandoned/cancelled, на новом статусе открывается свежая.
-func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID uuid.UUID, to domain.Workflow) ([]MovedTask, error) {
+// как abandoned/cancelled, на новом статусе открывается свежая с текущей
+// версией роли, в ленту задачи ложатся события переезда и входа в статус.
+//
+// Всё — одним запросом: бэклог проекта может быть в тысячи задач, а перенос
+// идёт в транзакции активации, и построчный цикл (десяток запросов на задачу)
+// упирался бы в таймаут запроса уже на десятке тысяч. Задачи держатся
+// FOR UPDATE до коммита: start и cancel по ним дождутся новой версии.
+func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID uuid.UUID, to domain.Workflow, actor uuid.UUID) ([]MovedTask, error) {
 	initial, err := s.InitialStatus(ctx, tx, to.ID)
 	if err != nil {
 		return nil, err
 	}
-	target := map[string]domain.Status{}
-	for _, st := range to.Statuses {
-		if st.Category == "backlog" {
-			target[st.Key] = st
-		}
-	}
-
 	rows, err := tx.Query(ctx, `
-		SELECT t.id, t.key, ws.key, sr.id
-		FROM tasks t
-		JOIN workflow_statuses ws ON ws.id = t.status_id
-		JOIN LATERAL (
-			SELECT id, state, claimed_by FROM stage_runs
-			WHERE task_id = t.id AND status_id = t.status_id AND kind = 'stage'
-			ORDER BY attempt DESC LIMIT 1
-		) sr ON true
-		WHERE t.workflow_id = $1 AND t.closed_at IS NULL
-		  AND ws.category = $2
-		  AND sr.state = 'pending' AND sr.claimed_by IS NULL
-		ORDER BY t.seq
-		FOR UPDATE OF t`, fromWorkflowID, "backlog")
+		WITH waiting AS (
+			SELECT t.id AS task_id, t.key, t.seq, ws.key AS from_status, sr.id AS run_id
+			FROM tasks t
+			JOIN workflow_statuses ws ON ws.id = t.status_id
+			JOIN LATERAL (
+				SELECT id, state, claimed_by FROM stage_runs
+				WHERE task_id = t.id AND status_id = t.status_id AND kind = 'stage'
+				ORDER BY attempt DESC LIMIT 1
+			) sr ON true
+			WHERE t.workflow_id = $1 AND t.closed_at IS NULL
+			  AND ws.category = 'backlog'
+			  AND sr.state = 'pending' AND sr.claimed_by IS NULL
+			FOR UPDATE OF t
+		),
+		dest AS MATERIALIZED (
+			SELECT w.task_id, w.key, w.seq, w.from_status, w.run_id,
+			       coalesce(same.id, $3::uuid) AS to_status_id,
+			       coalesce(same.key, $4::text) AS to_status,
+			       gen_random_uuid() AS new_run_id,
+			       coalesce((SELECT max(attempt) FROM stage_runs x
+			                 WHERE x.task_id = w.task_id
+			                   AND x.status_id = coalesce(same.id, $3::uuid)
+			                   AND x.kind = 'stage'), 0) + 1 AS attempt
+			FROM waiting w
+			LEFT JOIN workflow_statuses same
+			       ON same.workflow_id = $2 AND same.key = w.from_status AND same.category = 'backlog'
+		),
+		closed AS (
+			UPDATE stage_runs SET state = 'abandoned', outcome = 'cancelled',
+			                      finished_at = now(), lease_expires_at = NULL
+			WHERE id IN (SELECT run_id FROM dest)
+			RETURNING id
+		),
+		moved AS (
+			UPDATE tasks t SET workflow_id = $2, status_id = d.to_status_id, updated_at = now()
+			FROM dest d WHERE t.id = d.task_id
+			RETURNING t.id
+		),
+		status_role AS (
+			SELECT sr.status_id, r.id AS role_id, rv.id AS role_version_id
+			FROM status_roles sr
+			JOIN roles r ON r.id = sr.role_id
+			JOIN LATERAL (
+				SELECT id FROM role_versions WHERE role_id = r.id ORDER BY version DESC LIMIT 1
+			) rv ON true
+			WHERE sr.is_primary AND sr.status_id IN (SELECT DISTINCT to_status_id FROM dest)
+		),
+		opened AS (
+			INSERT INTO stage_runs (id, task_id, status_id, role_id, role_version_id, attempt, state)
+			SELECT d.new_run_id, d.task_id, d.to_status_id, ro.role_id, ro.role_version_id,
+			       d.attempt, 'pending'
+			FROM dest d
+			LEFT JOIN status_role ro ON ro.status_id = d.to_status_id
+			RETURNING id
+		),
+		events AS (
+			INSERT INTO task_events (task_id, stage_run_id, type, actor_id, payload, created_at)
+			SELECT d.task_id, d.new_run_id, $5::text, $9::uuid,
+			       jsonb_build_object(
+			           'from_workflow_id', $1::text, 'to_workflow_id', $2::text,
+			           'workflow', $7::text, 'version', $8::int,
+			           'from_status', d.from_status, 'to_status', d.to_status),
+			       clock_timestamp()
+			FROM dest d
+			UNION ALL
+			SELECT d.task_id, d.new_run_id, $6::text, $9::uuid,
+			       jsonb_build_object('status', d.to_status, 'attempt', d.attempt),
+			       clock_timestamp()
+			FROM dest d
+			RETURNING id
+		)
+		SELECT key, from_status, to_status FROM dest ORDER BY seq`,
+		fromWorkflowID, to.ID, initial.ID, initial.Key,
+		domain.EventTaskWorkflowMoved, domain.EventStageEntered,
+		to.Name, to.Version, actor)
 	if err != nil {
 		return nil, translate(err)
 	}
-	type waiting struct {
-		id, runID   uuid.UUID
-		key, status string
-	}
-	var found []waiting
-	for rows.Next() {
-		var w waiting
-		if err := rows.Scan(&w.id, &w.key, &w.status, &w.runID); err != nil {
-			rows.Close()
-			return nil, translate(err)
-		}
-		found = append(found, w)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, translate(err)
-	}
+	defer rows.Close()
 
 	out := []MovedTask{}
-	for _, w := range found {
-		dst, ok := target[w.status]
-		if !ok {
-			dst = initial
-		}
-		if err := s.FinishStageRun(ctx, tx, w.runID, domain.StageAbandoned, "cancelled"); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE tasks SET workflow_id = $2, status_id = $3, updated_at = now()
-			WHERE id = $1`, w.id, to.ID, dst.ID); err != nil {
+	for rows.Next() {
+		var m MovedTask
+		if err := rows.Scan(&m.Key, &m.FromStatus, &m.ToStatus); err != nil {
 			return nil, translate(err)
 		}
-		if _, err := s.EnterStatus(ctx, tx, w.id, dst.ID, nil); err != nil {
-			return nil, err
-		}
-		out = append(out, MovedTask{Key: w.key, FromStatus: w.status, ToStatus: dst.Key})
+		out = append(out, m)
 	}
-	return out, nil
+	return out, translate(rows.Err())
 }
 
 // ── статусы ─────────────────────────────────────────────────────────────────
