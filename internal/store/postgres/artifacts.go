@@ -24,6 +24,8 @@ const InlineMaxBytes = 4 << 20
 type BlobStore interface {
 	Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error)
 	Get(ctx context.Context, uri string) ([]byte, error)
+	// Delete зовёт сборщик мусора — после того, как удалил строку blobs.
+	Delete(ctx context.Context, uri string) error
 }
 
 // UseBlobStore включает вынос: содержимое больше inlineMax уходит во внешнее
@@ -46,6 +48,18 @@ func (s *Store) inlineLimit() int {
 // Дедупликация бесплатна: одинаковое содержимое даёт одинаковый sha, и второй
 // INSERT ничего не делает. Крупное уходит во внешнее хранилище до записи
 // строки — иначе строка с адресом появилась бы раньше содержимого.
+//
+// Перед записью берётся advisory-замок по sha, тот же, что берёт сборщик
+// мусора (CollectBlobs). Он держится до конца этой транзакции — то есть и
+// после того, как ссылающаяся строка вставлена, — и потому сборщик не удалит
+// блоб, на который ссылка вот-вот появится.
+//
+// Обратную гонку — объект, унесённый из-под только что вставленной строки, —
+// этот замок сам по себе не закрывает: между коммитом удаляющей транзакции
+// сборщика и удалением объекта из хранилища он свободен. Её закрывает
+// сборщик со своей стороны, держа тот же ключ сессионным замком на оба шага
+// (withBlobLock в blobs.go). Здесь важно одно: замок берётся до похода в
+// хранилище, а не после, — иначе Put успевал бы отработать вне замка.
 func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaType string) (string, error) {
 	if len(content) == 0 {
 		return "", apperr.InvalidInput("содержимое артефакта пустое")
@@ -56,6 +70,10 @@ func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaTyp
 
 	sum := sha256.Sum256(content)
 	sha := hex.EncodeToString(sum[:])
+
+	if err := s.lockBlob(ctx, q, sha); err != nil {
+		return "", err
+	}
 
 	if len(content) <= s.inlineLimit() {
 		if _, err := q.Exec(ctx, `

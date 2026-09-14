@@ -1,8 +1,8 @@
 // Команда worker — фоновые задания, которые никто не дёргает запросом.
 //
-// Заданий четыре: возврат задач с протухшей арендой, инкрементальная
+// Заданий пять: возврат задач с протухшей арендой, инкрементальная
 // индексация репозиториев с детектором дрейфа сразу после неё, синхронизация
-// состояния привязанных PR и векторизация артефактов.
+// состояния привязанных PR, векторизация артефактов и сборка мусора в блобах.
 //
 // Все они идут последовательно в одном цикле: воркер один, и параллелить
 // внутри него нечего — узкое место у всех заданий одно и то же, чужой API.
@@ -102,7 +102,9 @@ func run() error {
 	log.Info("воркер запущен",
 		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL,
 		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
-		"embeddings", cfg.EmbeddingProvider)
+		"embeddings", cfg.EmbeddingProvider,
+		"blob_gc_enabled", cfg.BlobGCEnabled, "blob_gc_interval", cfg.BlobGCInterval,
+		"blob_gc_dry_run", cfg.BlobGCDryRun)
 
 	leaseTicker := time.NewTicker(cfg.LeaseSweepInterval)
 	defer leaseTicker.Stop()
@@ -112,6 +114,16 @@ func run() error {
 	// коммит в очередь сразу, и ждать полного интервала до него незачем.
 	queueTicker := time.NewTicker(cfg.IndexPollInterval)
 	defer queueTicker.Stop()
+	// Сборка мусора идёт реже всех: место освобождается не срочно, а каждый
+	// проход — это поход в объектное хранилище на каждый удалённый блоб.
+	// Выключенная не заводит тикера вовсе: nil-канал в select молчит всегда,
+	// и до базы дело не доходит ни разу.
+	var blobGC <-chan time.Time
+	if cfg.BlobGCEnabled {
+		blobGCTicker := time.NewTicker(cfg.BlobGCInterval)
+		defer blobGCTicker.Stop()
+		blobGC = blobGCTicker.C
+	}
 
 	sweepLeases(ctx, engine, log, system.ID)
 	if cfg.IndexEnabled {
@@ -133,6 +145,8 @@ func run() error {
 			if cfg.IndexEnabled {
 				drainQueue(ctx, ix, engine, log, system.ID)
 			}
+		case <-blobGC:
+			collectBlobs(ctx, store, log, cfg)
 		}
 	}
 }
@@ -178,6 +192,37 @@ func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Eng
 		}
 	}
 	return done
+}
+
+// collectBlobs освобождает место под блобами, на которые не осталось ссылок.
+//
+// Первого прохода на старте нет намеренно, в отличие от аренд и индексации:
+// освобождение места не срочно, а сразу после выкладки лучше дать инстансу
+// подняться. Ошибка прохода воркер не роняет — база могла быть недоступна
+// секунду, а следующий тик всё равно наступит.
+func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config) {
+	stats, err := store.CollectBlobs(ctx, postgres.BlobGCOptions{
+		Limit:  cfg.BlobGCLimit,
+		MinAge: cfg.BlobGCMinAge,
+		DryRun: cfg.BlobGCDryRun,
+	}, func(sha string, err error) {
+		// Строка уже удалена, а объект остался: это утечка места, но не
+		// потеря данных — ссылок на него нет. В логе sha, чтобы было по чему
+		// разбирать хранилище руками.
+		log.Warn("объект остался в хранилище после удаления строки блоба",
+			"sha256", sha, "error", err)
+	})
+	if err != nil {
+		logJobError(ctx, log, "сборка мусора в блобах", err)
+		return
+	}
+	if stats.Empty() {
+		return
+	}
+	log.Info("сборка мусора в блобах",
+		"blobs", stats.Deleted, "bytes", stats.Bytes(),
+		"inline_bytes", stats.InlineBytes, "external_bytes", stats.ExternalBytes,
+		"skipped", stats.Skipped, "failed", stats.Failed, "dry_run", cfg.BlobGCDryRun)
 }
 
 // newEmbedder выбирает, кто считает векторы. Провайдера может не быть вовсе:

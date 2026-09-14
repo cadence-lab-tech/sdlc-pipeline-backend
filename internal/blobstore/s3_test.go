@@ -20,6 +20,7 @@ type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string][]byte
 	puts    int
+	deletes int
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +44,11 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			w.Write(content)
 		}
+	case http.MethodDelete:
+		// Настоящий S3 отвечает 204 и на удаление того, чего не было.
+		delete(f.objects, r.URL.Path)
+		f.deletes++
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -226,4 +232,71 @@ func keysOf(b *fakeS3) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// Сборка мусора приходит в хранилище после удаления строки в blobs: адрес
+// должен разбираться в тот же ключ, что писал Put, а повтор — быть безвредным.
+func TestS3Delete(t *testing.T) {
+	s3, bucket := newTestS3(t)
+	ctx := context.Background()
+	content := []byte("осиротевший артефакт")
+	sum := sha256.Sum256(content)
+	sha := hex.EncodeToString(sum[:])
+
+	uri, err := s3.Put(ctx, sha, content, "text/markdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s3.Delete(ctx, uri); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bucket.objects["/sdlc-blobs/artifacts/"+sha[:2]+"/"+sha]; ok {
+		t.Fatalf("объект остался: %v", keysOf(bucket))
+	}
+	if _, err := s3.Get(ctx, uri); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("после удаления: ожидали ErrNotFound, получили %v", err)
+	}
+	if err := s3.Delete(ctx, uri); err != nil {
+		t.Fatalf("повторное удаление: %v", err)
+	}
+	if bucket.deletes != 2 {
+		t.Fatalf("удалений %d, ожидали два", bucket.deletes)
+	}
+	// Чужой бакет и файловый адрес отбиваются так же, как в Get.
+	if err := s3.Delete(ctx, "s3://other/artifacts/00/"+sha); err == nil {
+		t.Fatal("чужой бакет должен отбиваться")
+	}
+	if err := s3.Delete(ctx, "file://"+sha); err == nil {
+		t.Fatal("файловый адрес должен отбиваться")
+	}
+}
+
+// 404 — успех: объекта нет, а сборщику нужно именно это. Всё остальное —
+// ошибка, иначе утечка места прошла бы незамеченной.
+func TestS3DeleteStatuses(t *testing.T) {
+	sha := hex.EncodeToString(make([]byte, 32))
+	for status, wantErr := range map[int]bool{
+		http.StatusNoContent:           false,
+		http.StatusOK:                  false,
+		http.StatusNotFound:            false,
+		http.StatusForbidden:           true,
+		http.StatusInternalServerError: true,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		s3, err := NewS3(S3Config{
+			Endpoint: server.URL, Region: "eu-central-1", Bucket: "sdlc-blobs",
+			AccessKey: "AKIAEXAMPLE", SecretKey: testSecret, PathStyle: true,
+			HTTP: server.Client(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = s3.Delete(context.Background(), "s3://sdlc-blobs/00/"+sha)
+		if (err != nil) != wantErr {
+			t.Fatalf("код %d: получили %v, ошибка ожидалась: %v", status, err, wantErr)
+		}
+		server.Close()
+	}
 }

@@ -403,6 +403,11 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 | `SDLC_GITHUB_WEBHOOK_SECRET` | пусто | секрет подписи вебхуков; без него ручка выключена |
 | `SDLC_INDEX_POLL_INTERVAL` | `15s` | как часто воркер смотрит в очередь прогонов между опросами |
 | `SDLC_INDEX_RETAIN_RUNS` | `5` | сколько завершённых прогонов хранить на ветку |
+| `SDLC_BLOB_GC_ENABLED` | `true` | собирать ли мусор в блобах: блоб без ссылок из артефактов, файлов индекса и документов |
+| `SDLC_BLOB_GC_INTERVAL` | `1h` | как часто воркер гоняет сборку (в compose — `5m`) |
+| `SDLC_BLOB_GC_LIMIT` | `500` | сколько блобов удалять за проход |
+| `SDLC_BLOB_GC_MIN_AGE` | `24h` | насколько старым должен быть кандидат (в compose — `1h`) |
+| `SDLC_BLOB_GC_DRY_RUN` | `false` | считать и не удалять: посмотреть в лог перед включением |
 | `SDLC_MCP_ENABLED` | `true` | поднимать ли MCP-сервер в этом же процессе |
 | `SDLC_LEASE_TTL` | `30m` | сколько живёт аренда без heartbeat |
 | `SDLC_HEARTBEAT_INTERVAL` | `5m` | как часто агент обязан её продлевать |

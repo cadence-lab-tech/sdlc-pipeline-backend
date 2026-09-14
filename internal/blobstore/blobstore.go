@@ -24,6 +24,10 @@ type Store interface {
 	// Повторная запись того же sha безвредна: адресация по содержимому.
 	Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error)
 	Get(ctx context.Context, uri string) ([]byte, error)
+	// Delete убирает содержимое по адресу. Отсутствие объекта — не ошибка:
+	// сборщик мусора приходит сюда после удаления строки в blobs и может
+	// прийти второй раз после падения между этими шагами.
+	Delete(ctx context.Context, uri string) error
 }
 
 // Open выбирает хранилище по настройкам: бакет важнее каталога, потому что
@@ -110,4 +114,19 @@ func (f *FS) Get(_ context.Context, uri string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	return content, err
+}
+
+// Delete уносит файл. Чужой адрес отбивается так же, как в Get: он мог
+// остаться от прежней установки, и удалить по нему что-нибудь своё было бы
+// хуже, чем отказать. Пустой каталог после удаления не подчищается — в него
+// тут же может лечь следующий блоб с тем же префиксом.
+func (f *FS) Delete(_ context.Context, uri string) error {
+	sha, ok := strings.CutPrefix(uri, fsScheme)
+	if !ok || len(sha) < 3 {
+		return fmt.Errorf("blobstore: адрес %q не из файлового хранилища", uri)
+	}
+	if err := os.Remove(f.path(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
