@@ -58,8 +58,23 @@ func TestBlobGCFromEnv(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("нулевой период принят")
 	}
-	// Выключенная сборка период не проверяет: тикер не заводится.
+	t.Setenv("SDLC_BLOB_GC_INTERVAL", "90s")
+
+	// Непозитивный предел за проход оставлял бы сборку включённой, но
+	// бездействующей: тикер ходит, ничего не удаляет, лог молчит.
+	t.Setenv("SDLC_BLOB_GC_LIMIT", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("нулевой предел за проход принят")
+	}
+	t.Setenv("SDLC_BLOB_GC_LIMIT", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("отрицательный предел за проход принят")
+	}
+
+	// Выключенная сборка ни периода, ни предела не проверяет: тикер не
+	// заводится, и значения ни на что не влияют.
 	t.Setenv("SDLC_BLOB_GC_ENABLED", "false")
+	t.Setenv("SDLC_BLOB_GC_INTERVAL", "0s")
 	if c, err := Load(); err != nil || c.BlobGCEnabled {
 		t.Fatalf("выключенная сборка: %v, enabled=%v", err, c.BlobGCEnabled)
 	}
@@ -141,6 +156,17 @@ func TestEmbeddingCacheGCFromEnv(t *testing.T) {
 	if _, err := Load(); err != nil {
 		t.Fatalf("проход по одной границе: %v", err)
 	}
+	// Непозитивный предел за проход оставлял бы вытеснение включённым, но
+	// бездействующим — та же ловушка, что у сборки блобов.
+	t.Setenv("SDLC_EMBEDDING_CACHE_GC_LIMIT", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("нулевой предел за проход принят")
+	}
+	t.Setenv("SDLC_EMBEDDING_CACHE_GC_LIMIT", "-5")
+	if _, err := Load(); err == nil {
+		t.Fatal("отрицательный предел за проход принят")
+	}
+
 	// Выключенное вытеснение ни периода, ни пределов не проверяет.
 	t.Setenv("SDLC_EMBEDDING_CACHE_GC_ENABLED", "false")
 	t.Setenv("SDLC_EMBEDDING_CACHE_MAX_ROWS", "0")

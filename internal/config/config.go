@@ -310,6 +310,13 @@ func Load() (Config, error) {
 	if c.BlobGCEnabled && c.BlobGCInterval <= 0 {
 		return c, fmt.Errorf("SDLC_BLOB_GC_INTERVAL (%s) не больше нуля", c.BlobGCInterval)
 	}
+	// Предел за проход — предохранитель от затянувшегося тика, а не выключатель:
+	// с непозитивным пределом сборка ходит по тикеру и молча ничего не удаляет,
+	// и оператор узнаёт об этом по выросшей таблице. Ошибка на старте дешевле.
+	if c.BlobGCEnabled && c.BlobGCLimit < 1 {
+		return c, fmt.Errorf("сборка блобов включена, но SDLC_BLOB_GC_LIMIT (%d) не больше нуля: "+
+			"проход ничего не удалит; выключается сборка через SDLC_BLOB_GC_ENABLED", c.BlobGCLimit)
+	}
 	if c.EmbeddingCacheGCEnabled, err = envBool("SDLC_EMBEDDING_CACHE_GC_ENABLED", c.EmbeddingCacheGCEnabled); err != nil {
 		return c, err
 	}
@@ -339,6 +346,13 @@ func Load() (Config, error) {
 	if c.EmbeddingCacheGCEnabled && c.EmbeddingCacheTTL <= 0 && c.EmbeddingCacheMaxRows <= 0 {
 		return c, fmt.Errorf("вытеснение кэша эмбеддингов включено, но и SDLC_EMBEDDING_CACHE_TTL, " +
 			"и SDLC_EMBEDDING_CACHE_MAX_ROWS выключены: проходу нечего удалять")
+	}
+	// Тот же предохранитель, что у сборки блобов: непозитивный предел за проход
+	// оставляет вытеснение включённым, но бездействующим.
+	if c.EmbeddingCacheGCEnabled && c.EmbeddingCacheGCLimit < 1 {
+		return c, fmt.Errorf("вытеснение кэша эмбеддингов включено, но SDLC_EMBEDDING_CACHE_GC_LIMIT (%d) "+
+			"не больше нуля: проход ничего не удалит; выключается вытеснение через "+
+			"SDLC_EMBEDDING_CACHE_GC_ENABLED", c.EmbeddingCacheGCLimit)
 	}
 	if c.IndexEnabled, err = envBool("SDLC_INDEX_ENABLED", c.IndexEnabled); err != nil {
 		return c, err

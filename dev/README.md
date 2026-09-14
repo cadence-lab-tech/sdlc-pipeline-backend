@@ -451,14 +451,14 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 | `SDLC_INDEX_RETAIN_RUNS` | `5` | сколько завершённых прогонов хранить на ветку |
 | `SDLC_BLOB_GC_ENABLED` | `true` | собирать ли мусор в блобах: блоб без ссылок из артефактов, файлов индекса и документов |
 | `SDLC_BLOB_GC_INTERVAL` | `1h` | как часто воркер гоняет сборку (в compose — `5m`) |
-| `SDLC_BLOB_GC_LIMIT` | `500` | сколько блобов удалять за проход |
+| `SDLC_BLOB_GC_LIMIT` | `500` | сколько блобов удалять за проход; только положительное — непозитивное не выключает сборку, а роняет старт, выключается сборка через `SDLC_BLOB_GC_ENABLED` |
 | `SDLC_BLOB_GC_MIN_AGE` | `24h` | насколько старым должен быть кандидат (в compose — `1h`) |
 | `SDLC_BLOB_GC_DRY_RUN` | `false` | считать и не удалять: посмотреть в лог перед включением |
 | `SDLC_EMBEDDING_CACHE_GC_ENABLED` | `true` | вытеснять ли кэш эмбеддингов: ключ по содержимому, владельца нет, уменьшать его больше некому |
 | `SDLC_EMBEDDING_CACHE_GC_INTERVAL` | `6h` | как часто воркер гоняет вытеснение (в compose — `5m`) |
 | `SDLC_EMBEDDING_CACHE_TTL` | `720h` | сколько строка живёт без использования (в compose — `24h`); `0` — не вытеснять по сроку |
 | `SDLC_EMBEDDING_CACHE_MAX_ROWS` | `1000000` | верхняя граница размера в строках (~4 ГБ при `vector(1024)`); `0` — без границы |
-| `SDLC_EMBEDDING_CACHE_GC_LIMIT` | `10000` | сколько строк удалять за проход |
+| `SDLC_EMBEDDING_CACHE_GC_LIMIT` | `10000` | сколько строк удалять за проход; только положительное — непозитивное не выключает вытеснение, а роняет старт, выключается вытеснение через `SDLC_EMBEDDING_CACHE_GC_ENABLED` |
 | `SDLC_EMBEDDING_CACHE_GC_DRY_RUN` | `false` | считать и не удалять |
 | `SDLC_EMBEDDING_CACHE_TOUCH_AFTER` | `1h` | не переписывать отметку использования чаще этого |
 | `SDLC_MCP_ENABLED` | `true` | поднимать ли MCP-сервер в этом же процессе |
