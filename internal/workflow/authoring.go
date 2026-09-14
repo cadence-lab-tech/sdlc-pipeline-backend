@@ -655,14 +655,9 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 
 		res.Moved = []postgres.MovedTask{}
 		for _, id := range sources {
-			moved, err := a.store.MoveWaitingTasks(ctx, tx, id, full)
+			moved, err := a.store.MoveWaitingTasks(ctx, tx, id, full, actor)
 			if err != nil {
 				return err
-			}
-			for _, m := range moved {
-				if err := a.recordMove(ctx, tx, m, id, full, actor); err != nil {
-					return err
-				}
 			}
 			res.Moved = append(res.Moved, moved...)
 
@@ -698,32 +693,6 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			"version", res.Workflow.Version, "actor", actor)
 	}
 	return res, err
-}
-
-// recordMove пишет в ленту задачи, что она переехала на новую версию цикла:
-// по ленте видно, почему у неё две попытки на начальном статусе.
-func (a *Authoring) recordMove(ctx context.Context, tx pgx.Tx, m postgres.MovedTask, fromWorkflowID uuid.UUID, to domain.Workflow, actor uuid.UUID) error {
-	task, err := a.store.GetTaskByKey(ctx, tx, m.Key)
-	if err != nil {
-		return err
-	}
-	run, err := a.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{
-		"from_workflow_id": fromWorkflowID.String(),
-		"to_workflow_id":   to.ID.String(),
-		"workflow":         to.Name,
-		"version":          to.Version,
-		"from_status":      m.FromStatus,
-		"to_status":        m.ToStatus,
-	}
-	if err := a.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventTaskWorkflowMoved, actor, payload); err != nil {
-		return err
-	}
-	return a.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventStageEntered, actor,
-		map[string]any{"status": m.ToStatus, "attempt": run.Attempt})
 }
 
 // typesWithoutWorkflow — типы задач, объявленные проектом, которые не ведёт
