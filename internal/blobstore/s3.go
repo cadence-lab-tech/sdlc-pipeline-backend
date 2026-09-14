@@ -146,6 +146,31 @@ func (s *S3) Get(ctx context.Context, uri string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+// Delete уносит объект. И 204, и 404 — успех: сборщик мусора приходит сюда
+// после удаления строки в blobs и может прийти второй раз после падения
+// между этими шагами.
+func (s *S3) Delete(ctx context.Context, uri string) error {
+	key, err := s.keyOf(uri)
+	if err != nil {
+		return err
+	}
+	req, err := s.request(ctx, http.MethodDelete, key, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK, http.StatusNotFound:
+		return nil
+	default:
+		return s3Error("удаление", resp)
+	}
+}
+
 // keyOf разбирает адрес s3://bucket/key. Чужой бакет не читаем: адрес мог
 // остаться от прежней установки, и молча отдать пустоту хуже, чем отказать.
 func (s *S3) keyOf(uri string) (string, error) {

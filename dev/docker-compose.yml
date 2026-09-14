@@ -161,6 +161,14 @@ services:
       SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
       SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
       SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
+      # Сборка мусора в блобах: удаление проекта и репозитория блобы не
+      # трогают — они общие по sha256, — и освобождать место больше некому.
+      # Локально интервал и возраст занижены, чтобы проход было видно в логе.
+      SDLC_BLOB_GC_ENABLED: ${SDLC_BLOB_GC_ENABLED:-true}
+      SDLC_BLOB_GC_INTERVAL: ${SDLC_BLOB_GC_INTERVAL:-5m}
+      SDLC_BLOB_GC_LIMIT: ${SDLC_BLOB_GC_LIMIT:-500}
+      SDLC_BLOB_GC_MIN_AGE: ${SDLC_BLOB_GC_MIN_AGE:-1h}
+      SDLC_BLOB_GC_DRY_RUN: ${SDLC_BLOB_GC_DRY_RUN:-false}
       SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
       SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
       # Те же настройки эмбеддингов, что у api: индекс считает воркер, вектор

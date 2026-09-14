@@ -128,6 +128,21 @@ type Config struct {
 	// Ключи доступа берутся из окружения и в базу не попадают.
 	BlobS3 blobstore.S3Config
 
+	// Сборка мусора в блобах: блоб без ссылок из артефактов, файлов прогонов
+	// индексации и документов проекта — место, которое никому не принадлежит.
+	// Освобождать его обязан кто-то: удаление проекта и репозитория блобы
+	// намеренно не трогают, они общие по sha256 между арендаторами.
+	BlobGCEnabled  bool
+	BlobGCInterval time.Duration
+	BlobGCLimit    int
+	// Минимальный возраст кандидата: только что записанный блоб может ждать
+	// ссылки из ещё не закоммиченной транзакции, и сутки запаса стоят дешевле
+	// потерянного содержимого. Заодно это время на разбор аварии.
+	BlobGCMinAge time.Duration
+	// Сухой прогон: посчитать и не удалять. Оператор смотрит в лог перед тем,
+	// как включить сборку на засиженной базе.
+	BlobGCDryRun bool
+
 	// Вебхуки GitHub: без секрета ручка выключена — принимать неподписанные
 	// события значит позволить кому угодно ставить прогоны в очередь.
 	GitHubWebhookSecret string
@@ -198,8 +213,14 @@ func Load() (Config, error) {
 			SecretKey:    env("SDLC_BLOB_S3_SECRET_ACCESS_KEY", env("AWS_SECRET_ACCESS_KEY", "")),
 			SessionToken: env("SDLC_BLOB_S3_SESSION_TOKEN", env("AWS_SESSION_TOKEN", "")),
 		},
-		BlobInlineMaxBytes:  256 << 10,
-		BlobMaxBytes:        64 << 20,
+		BlobInlineMaxBytes: 256 << 10,
+		BlobMaxBytes:       64 << 20,
+		BlobGCEnabled:      true,
+		BlobGCInterval:     time.Hour,
+		// Пятьсот за проход: тик не затягивается, а следующий всё равно
+		// наступит — хвост разбирается за несколько проходов.
+		BlobGCLimit:         500,
+		BlobGCMinAge:        24 * time.Hour,
 		GitHubWebhookSecret: env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
 		IndexPollInterval:   15 * time.Second,
 		IndexRetainRuns:     5,
@@ -236,6 +257,26 @@ func Load() (Config, error) {
 	if c.HeartbeatInterval >= c.LeaseTTL {
 		return c, fmt.Errorf("SDLC_HEARTBEAT_INTERVAL (%s) не меньше SDLC_LEASE_TTL (%s): "+
 			"аренда протухнет раньше первого продления", c.HeartbeatInterval, c.LeaseTTL)
+	}
+	if c.BlobGCEnabled, err = envBool("SDLC_BLOB_GC_ENABLED", c.BlobGCEnabled); err != nil {
+		return c, err
+	}
+	if c.BlobGCInterval, err = envDuration("SDLC_BLOB_GC_INTERVAL", c.BlobGCInterval); err != nil {
+		return c, err
+	}
+	if c.BlobGCLimit, err = envInt("SDLC_BLOB_GC_LIMIT", c.BlobGCLimit); err != nil {
+		return c, err
+	}
+	if c.BlobGCMinAge, err = envDuration("SDLC_BLOB_GC_MIN_AGE", c.BlobGCMinAge); err != nil {
+		return c, err
+	}
+	if c.BlobGCDryRun, err = envBool("SDLC_BLOB_GC_DRY_RUN", c.BlobGCDryRun); err != nil {
+		return c, err
+	}
+	// Тикер с неположительным периодом роняет воркер паникой на старте, а
+	// сборка включена по умолчанию: ошибку лучше назвать здесь.
+	if c.BlobGCEnabled && c.BlobGCInterval <= 0 {
+		return c, fmt.Errorf("SDLC_BLOB_GC_INTERVAL (%s) не больше нуля", c.BlobGCInterval)
 	}
 	if c.IndexEnabled, err = envBool("SDLC_INDEX_ENABLED", c.IndexEnabled); err != nil {
 		return c, err
