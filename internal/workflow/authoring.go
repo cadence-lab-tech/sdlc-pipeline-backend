@@ -578,12 +578,21 @@ type ActivationResult struct {
 	Retired   []uuid.UUID `json:"retired_workflow_ids,omitempty"`
 	// Задачи, которые доходят по прежней версии: начатая задача идёт по тому
 	// циклу, на котором начата, и активация её не двигает.
-	OnPreviousVersion []postgres.OpenTaskOnWorkflow `json:"tasks_on_previous_version"`
+	// Список обрезан до activationReportLimit, полное число — в Total.
+	OnPreviousVersion      []postgres.OpenTaskOnWorkflow `json:"tasks_on_previous_version"`
+	OnPreviousVersionTotal int                           `json:"tasks_on_previous_version_total"`
 	// Задачи, переехавшие на новую версию: стояли в бэклоге, никто их не
-	// забирал — им нужны актуальные правила (решение 0036).
-	Moved    []postgres.MovedTask `json:"tasks_moved"`
-	Warnings []Problem            `json:"warnings"`
+	// забирал — им нужны актуальные правила (решение 0036). Список обрезан
+	// до activationReportLimit, полное число — в MovedTotal.
+	Moved      []postgres.MovedTask `json:"tasks_moved"`
+	MovedTotal int                  `json:"tasks_moved_total"`
+	Warnings   []Problem            `json:"warnings"`
 }
+
+// activationReportLimit — сколько задач перечисляется в отчёте активации.
+// Бэклог проекта может быть в тысячи задач; человеку нужен счётчик и первые
+// ключи, а не список на весь экран.
+const activationReportLimit = 50
 
 // Activate делает черновик действующим циклом проекта.
 //
@@ -612,6 +621,13 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 				WithDetails(map[string]any{"problems": v.Problems, "warnings": v.Warnings})
 		}
 		res.Warnings = v.Warnings
+
+		// Замок проекта: создание задачи берёт ключ под тем же замком, так
+		// что задача, заводимая в момент активации, либо переедет вместе с
+		// бэклогом, либо сразу ляжет на новую версию.
+		if err := a.store.LockProject(ctx, tx, wf.ProjectID); err != nil {
+			return err
+		}
 
 		// На покой уходят циклы тех же типов задач: активация цикла эпиков не
 		// должна оставить обычные задачи без цикла (решение 0024).
@@ -681,6 +697,15 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 				Code: "task_type_without_workflow",
 				Message: fmt.Sprintf(
 					"тип задачи %q объявлен в проекте, но активного цикла для него нет", taskType)})
+		}
+
+		res.MovedTotal = len(res.Moved)
+		if len(res.Moved) > activationReportLimit {
+			res.Moved = res.Moved[:activationReportLimit]
+		}
+		res.OnPreviousVersionTotal = len(res.OnPreviousVersion)
+		if len(res.OnPreviousVersion) > activationReportLimit {
+			res.OnPreviousVersion = res.OnPreviousVersion[:activationReportLimit]
 		}
 
 		res.Workflow, err = a.store.GetWorkflow(ctx, tx, wf.ID)
