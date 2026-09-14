@@ -3,7 +3,7 @@
 BIN     := bin
 VERSION ?= dev
 
-.PHONY: build run test test-integration lint tidy up down logs psql reset image
+.PHONY: build run test test-integration lint tidy up down logs psql reset image task-up task-down task-ls
 
 # Четыре бинарника: сервис, фоновые задания, CLI для CI и раннер саб-агентов.
 # Раннер живёт не в образе, а там, где есть CLI агента и код (решение 0025).
@@ -48,6 +48,18 @@ reset:
 
 logs:
 	docker compose -f dev/docker-compose.yml logs -f api
+
+# Стек на задачу: своя база, свои порты, свои данные. Нужен, когда параллельно
+# идут несколько задач — общий стек они делят вместе с тестовыми данными.
+# Подробности и остальные команды — dev/stack.sh и dev/README.md.
+task-up:
+	dev/stack.sh up $(KEY)
+
+task-down:
+	dev/stack.sh down $(KEY)
+
+task-ls:
+	dev/stack.sh ls
 
 psql:
 	docker compose -f dev/docker-compose.yml exec postgres psql -U sdlc -d sdlc
