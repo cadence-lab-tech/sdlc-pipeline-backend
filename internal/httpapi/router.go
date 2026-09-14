@@ -99,7 +99,7 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/teams", s.createTeam)
 		v1.GET("/teams/:teamKey", s.getTeam)
 		v1.PATCH("/teams/:teamKey", s.updateTeam)
-		v1.DELETE("/teams/:teamKey", s.archiveTeam)
+		v1.DELETE("/teams/:teamKey", s.deleteTeam)
 		v1.POST("/teams/:teamKey/convert", s.convertTeam)
 		v1.PUT("/teams/:teamKey/plan", s.setTeamPlan)
 		v1.GET("/plans", s.listPlans)

@@ -138,16 +138,76 @@ func (a *Auth) UpdateTeam(ctx context.Context, id Identity, key string, in Updat
 	return out, err
 }
 
-func (a *Auth) ArchiveTeam(ctx context.Context, id Identity, key string) error {
-	if err := a.RequireAdmin(id); err != nil {
-		return err
-	}
-	q := a.store.DB()
-	team, err := a.store.GetTeamByKey(ctx, q, key)
+// DeleteTeam удаляет арендатора целиком и необратимо: проекты команды со всем
+// содержимым — тем же кодом, что ручка проекта, — состав, участие в чужих
+// проектах, приглашения, бюджеты, подписку, группы провайдера и установки
+// GitHub. Архива и срока хранения нет, восстановления тоже: освобождать место
+// иначе нечем (docs/SAAS.md §7), а решение общее с удалением проекта.
+// `teams.archived_at` после этого никто не проставляет — колонка остаётся в
+// схеме, её судьба решается отдельно.
+//
+// Право — у лида команды, а не у администратора инстанса: арендатор
+// распоряжается собой сам. Администратор проходит тем же путём внутри
+// teamRole, отдельной проверки ему не нужно.
+//
+// Личная команда не удаляется никогда, включая администратора: она заводится
+// входом и уходит вместе с человеком, а снос оставил бы вошедшего без
+// арендатора. Уход человека — отдельная работа.
+//
+// Всё одной транзакцией: полуудалённый арендатор — это проекты без владельца
+// при NOT NULL на owner_team_id, то есть состояние, которого схема не
+// допускает. Подтверждения метод не спрашивает: оно живёт на краю — диалог в
+// интерфейсе, — как и у удаления проекта.
+func (a *Auth) DeleteTeam(ctx context.Context, id Identity, key string) (domain.Team, postgres.TeamRemovalCounters, error) {
+	var team domain.Team
+	var counters postgres.TeamRemovalCounters
+	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		team, err = a.store.GetTeamByKey(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if err := a.store.LockTeamForRemoval(ctx, tx, team.ID); err != nil {
+			return err
+		}
+		// Право проверяется раньше вида команды: постороннему незачем узнавать
+		// из кода ошибки, личная у человека команда или организация.
+		if _, err := a.teamRole(ctx, tx, id, team.ID, true); err != nil {
+			return err
+		}
+		if team.Kind == domain.TeamPersonal {
+			return apperr.Conflict(
+				"личная команда %q уходит вместе с человеком, отдельно она не удаляется", team.Key)
+		}
+		counters, err = a.store.CountTeamContents(ctx, tx, team.ID)
+		if err != nil {
+			return err
+		}
+		projects, err := a.store.ProjectsOfTeam(ctx, tx, team.ID)
+		if err != nil {
+			return err
+		}
+		for _, p := range projects {
+			if _, err := deleteProjectTx(ctx, tx, a.store, p, id.Principal.ID, false); err != nil {
+				return err
+			}
+			counters.ProjectKeys = append(counters.ProjectKeys, p.Key)
+		}
+		counters.Projects = len(projects)
+		return a.store.DeleteTeam(ctx, tx, team.ID)
+	})
 	if err != nil {
-		return err
+		return domain.Team{}, postgres.TeamRemovalCounters{}, err
 	}
-	return a.store.ArchiveTeam(ctx, q, team.ID)
+	// Единственный оставшийся след: team_events уходят каскадом вместе с
+	// командой (migrations/000021_team_events.up.sql:11), а аудита уровня
+	// инстанса у системы пока нет.
+	a.log.Info("арендатор удалён",
+		"team", team.Key, "kind", team.Kind, "actor", id.Principal.Handle,
+		"projects", counters.Projects, "project_keys", counters.ProjectKeys,
+		"members", counters.Members, "project_grants", counters.ProjectGrants,
+		"invites", counters.Invites, "installations", counters.Installations)
+	return team, counters, nil
 }
 
 // SetTeamMember добавляет принципала в команду или меняет его роль. Человек
