@@ -145,13 +145,13 @@ func TestTeamLevelAddsToDirectMembership(t *testing.T) {
 		t.Fatalf("проект команды не виден её участнику: %+v", projects)
 	}
 
-	// Команда в архиве прав не даёт: доступ уходит вместе с ней, а строки
-	// участия остаются ради истории.
-	if err := auth.ArchiveTeam(ctx, admin, "platform"); err != nil {
+	// Удалённая команда прав не даёт: вместе с ней уходит и строка её участия
+	// в проекте (CLAB-13). Архива у команд больше нет.
+	if _, _, err := auth.DeleteTeam(ctx, admin, "platform"); err != nil {
 		t.Fatal(err)
 	}
 	if err := auth.Require(ctx, alice, pid, domain.MemberViewer); apperr.As(err).Code != apperr.CodeForbidden {
-		t.Fatalf("архивная команда продолжает давать доступ: %v", err)
+		t.Fatalf("удалённая команда продолжает давать доступ: %v", err)
 	}
 }
 

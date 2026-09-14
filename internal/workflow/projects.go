@@ -179,26 +179,40 @@ func (e *Engine) DeleteProject(ctx context.Context, projectKey string, actor uui
 		if err != nil {
 			return err
 		}
-		if err := e.store.LockProjectForRemoval(ctx, tx, project.ID); err != nil {
-			return err
-		}
-		counters, err = e.store.CountProjectContents(ctx, tx, project.ID)
-		if err != nil {
-			return err
-		}
-		// Событие пишется до удаления: команда-владелец нужна, пока строка
-		// проекта жива, а лента задачи уходит вместе с задачей — следа не
-		// осталось бы нигде. Владелец у проекта есть всегда (решение 0033,
-		// NOT NULL с миграции 000018); проверка — от разыменования nil.
-		if project.OwnerTeamID != nil {
-			if err := e.store.AppendTeamEvent(ctx, tx, *project.OwnerTeamID, domain.EventProjectDeleted, actor,
-				map[string]any{"project_key": project.Key, "project_name": project.Name, "removed": counters}); err != nil {
-				return err
-			}
-		}
-		return e.store.DeleteProject(ctx, tx, project.ID)
+		counters, err = deleteProjectTx(ctx, tx, e.store, project, actor, true)
+		return err
 	})
 	return project, counters, err
+}
+
+// deleteProjectTx — удаление проекта в готовой транзакции: блокировка,
+// счётчики, событие аудита, каскад. Вынесено из DeleteProject, потому что
+// удаление команды-владельца (CLAB-13) обязано удалять её проекты этим же
+// кодом: своя копия каскада разошлась бы с этой на первой же новой таблице, а
+// вызов DeleteProject открыл бы транзакцию внутри транзакции.
+//
+// audit — писать ли событие на команде-владельце. При удалении самой команды
+// писать его некуда: team_events уходят каскадом вместе с ней в этой же
+// транзакции, и запись была бы удалена тем же коммитом.
+func deleteProjectTx(ctx context.Context, tx pgx.Tx, store *postgres.Store, project domain.Project, actor uuid.UUID, audit bool) (postgres.ProjectRemovalCounters, error) {
+	if err := store.LockProjectForRemoval(ctx, tx, project.ID); err != nil {
+		return postgres.ProjectRemovalCounters{}, err
+	}
+	counters, err := store.CountProjectContents(ctx, tx, project.ID)
+	if err != nil {
+		return counters, err
+	}
+	// Событие пишется до удаления: команда-владелец нужна, пока строка
+	// проекта жива, а лента задачи уходит вместе с задачей — следа не
+	// осталось бы нигде. Владелец у проекта есть всегда (решение 0033,
+	// NOT NULL с миграции 000018); проверка — от разыменования nil.
+	if audit && project.OwnerTeamID != nil {
+		if err := store.AppendTeamEvent(ctx, tx, *project.OwnerTeamID, domain.EventProjectDeleted, actor,
+			map[string]any{"project_key": project.Key, "project_name": project.Name, "removed": counters}); err != nil {
+			return counters, err
+		}
+	}
+	return counters, store.DeleteProject(ctx, tx, project.ID)
 }
 
 // PutDocumentInput — проектный документ. Ровно один из Content, URL и
