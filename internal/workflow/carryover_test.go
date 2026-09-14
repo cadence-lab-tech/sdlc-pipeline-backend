@@ -2,7 +2,11 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
@@ -191,5 +195,89 @@ func TestActivationMovesTasksLeftOnOlderVersions(t *testing.T) {
 	}
 	if first == third.ID {
 		t.Fatal("третья версия — новый цикл")
+	}
+}
+
+// Отчёт активации перечисляет не весь бэклог, а первые ключи и счётчик:
+// в проекте может быть тысячи задач.
+func TestActivationReportIsCapped(t *testing.T) {
+	ctx := context.Background()
+	_, engine, authoring, _, system := setupPhase4(t, AuthHeader)
+	for i := 0; i < activationReportLimit+10; i++ {
+		if _, err := engine.CreateTask(ctx, "SDLC", system.ID, CreateTaskInput{
+			CreateTaskInput: postgres.CreateTaskInput{Title: fmt.Sprintf("бэклог %d", i)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	draft, err := authoring.CreateDraft(ctx, "SDLC", system.ID, DraftInput{Name: "Default SDLC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := authoring.Activate(ctx, draft.ID, system.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Moved) != activationReportLimit || res.MovedTotal < activationReportLimit+10 {
+		t.Fatalf("список обрезается до %d, счётчик полный: %d в списке, всего %d",
+			activationReportLimit, len(res.Moved), res.MovedTotal)
+	}
+	if res.OnPreviousVersionTotal != len(res.OnPreviousVersion) {
+		t.Fatalf("счётчик прежней версии: %d при списке %d", res.OnPreviousVersionTotal, len(res.OnPreviousVersion))
+	}
+}
+
+// Задача, которую заводят в момент активации, не должна остаться на снятой
+// версии: активация ждёт коммита создания и переносит её вместе с бэклогом.
+func TestActivationWaitsForTaskBeingCreated(t *testing.T) {
+	ctx := context.Background()
+	store, _, authoring, _, system := setupPhase4(t, AuthHeader)
+	project, err := store.GetProjectByKey(ctx, store.DB(), "SDLC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := authoring.CreateDraft(ctx, "SDLC", system.ID, DraftInput{Name: "Default SDLC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := make(chan domain.Task, 1)
+	started := make(chan struct{})
+	go func() {
+		_ = store.InTx(ctx, func(tx pgx.Tx) error {
+			task, err := store.CreateTask(ctx, tx, postgres.CreateTaskInput{
+				ProjectID: project.ID, Title: "заводится во время активации", CreatedBy: system.ID,
+			})
+			if err != nil {
+				return err
+			}
+			close(started)
+			time.Sleep(400 * time.Millisecond) // создание ещё не закоммичено
+			created <- task
+			return nil
+		})
+	}()
+	<-started
+
+	res, err := authoring.Activate(ctx, draft.ID, system.ID)
+	if err != nil {
+		t.Fatalf("активация: %v", err)
+	}
+	task := <-created
+	moved := false
+	for _, m := range res.Moved {
+		if m.Key == task.Key {
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatalf("задача, заведённая во время активации, переезжает вместе с бэклогом: %+v", res.Moved)
+	}
+	got, err := store.GetTaskByKey(ctx, store.DB(), task.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WorkflowID != draft.ID {
+		t.Fatalf("задача должна стоять на новой версии %s, а стоит на %s", draft.ID, got.WorkflowID)
 	}
 }

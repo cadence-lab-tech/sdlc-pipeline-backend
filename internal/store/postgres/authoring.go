@@ -193,6 +193,22 @@ func (s *Store) RetireActiveWorkflows(ctx context.Context, q Querier, projectID 
 	return out, translate(rows.Err())
 }
 
+// LockProject берёт строку проекта под FOR UPDATE до конца транзакции.
+//
+// Активация цикла и создание задачи спорят за то, какая версия действующая:
+// создание берёт ключ из projects.task_counter под тем же замком, поэтому
+// начатое до активации создание дождётся коммит активации и получит уже новую
+// версию, а активация дождётся коммита начатого создания и перенесёт его
+// задачу вместе с остальным бэклогом. Без замка задача, заведённая в момент
+// активации, ложилась бы на только что снятую версию.
+func (s *Store) LockProject(ctx context.Context, tx pgx.Tx, projectID uuid.UUID) error {
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id = $1 FOR UPDATE`, projectID).Scan(&id); err != nil {
+		return notFound(err, "проект не найден")
+	}
+	return nil
+}
+
 // RetiredWorkflows — снятые версии циклов проекта, которые вели те же типы
 // задач, что и переданные. Нужны при активации: задача из бэклога могла
 // остаться не на только что снятой версии, а на более ранней — если её
