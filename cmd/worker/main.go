@@ -238,7 +238,8 @@ func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, 
 	log.Info("сборка мусора в блобах",
 		"blobs", stats.Deleted, "bytes", stats.Bytes(),
 		"inline_bytes", stats.InlineBytes, "external_bytes", stats.ExternalBytes,
-		"skipped", stats.Skipped, "failed", stats.Failed, "dry_run", cfg.BlobGCDryRun)
+		"skipped", stats.Skipped, "busy", stats.Busy,
+		"failed", stats.Failed, "dry_run", cfg.BlobGCDryRun)
 }
 
 // evictEmbeddings вытесняет из кэша эмбеддингов то, чем давно не
