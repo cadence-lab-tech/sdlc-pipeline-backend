@@ -92,11 +92,12 @@ func run() error {
 	ix := indexer.New(store,
 		indexer.NewGitHubSource(provider),
 		embedder, log, indexer.Options{
-			MaxFileBytes: cfg.IndexMaxFileBytes,
-			MaxFiles:     cfg.IndexMaxFiles,
-			ChunkChars:   cfg.ChunkMaxChars,
-			EmbedBatch:   cfg.EmbeddingBatch,
-			StuckAfter:   cfg.IndexStuckAfter,
+			MaxFileBytes:    cfg.IndexMaxFileBytes,
+			MaxFiles:        cfg.IndexMaxFiles,
+			ChunkChars:      cfg.ChunkMaxChars,
+			EmbedBatch:      cfg.EmbeddingBatch,
+			CacheTouchAfter: cfg.EmbeddingCacheTouchAfter,
+			StuckAfter:      cfg.IndexStuckAfter,
 		})
 
 	log.Info("воркер запущен",
@@ -104,7 +105,10 @@ func run() error {
 		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
 		"embeddings", cfg.EmbeddingProvider,
 		"blob_gc_enabled", cfg.BlobGCEnabled, "blob_gc_interval", cfg.BlobGCInterval,
-		"blob_gc_dry_run", cfg.BlobGCDryRun)
+		"blob_gc_dry_run", cfg.BlobGCDryRun,
+		"embedding_cache_gc_enabled", cfg.EmbeddingCacheGCEnabled,
+		"embedding_cache_gc_interval", cfg.EmbeddingCacheGCInterval,
+		"embedding_cache_gc_dry_run", cfg.EmbeddingCacheGCDryRun)
 
 	leaseTicker := time.NewTicker(cfg.LeaseSweepInterval)
 	defer leaseTicker.Stop()
@@ -123,6 +127,16 @@ func run() error {
 		blobGCTicker := time.NewTicker(cfg.BlobGCInterval)
 		defer blobGCTicker.Stop()
 		blobGC = blobGCTicker.C
+	}
+	// Вытеснение кэша эмбеддингов идёт своим периодом, а не вместе с блобами:
+	// это чистый SQL по одной таблице, а сборщик блобов ходит во внешнее
+	// хранилище на каждый блоб — общий период был бы компромиссом без причины.
+	// Выключенное тикера не заводит: nil-канал в select молчит всегда.
+	var embedGC <-chan time.Time
+	if cfg.EmbeddingCacheGCEnabled {
+		embedGCTicker := time.NewTicker(cfg.EmbeddingCacheGCInterval)
+		defer embedGCTicker.Stop()
+		embedGC = embedGCTicker.C
 	}
 
 	sweepLeases(ctx, engine, log, system.ID)
@@ -147,6 +161,8 @@ func run() error {
 			}
 		case <-blobGC:
 			collectBlobs(ctx, store, log, cfg)
+		case <-embedGC:
+			evictEmbeddings(ctx, store, log, cfg)
 		}
 	}
 }
@@ -223,6 +239,33 @@ func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, 
 		"blobs", stats.Deleted, "bytes", stats.Bytes(),
 		"inline_bytes", stats.InlineBytes, "external_bytes", stats.ExternalBytes,
 		"skipped", stats.Skipped, "failed", stats.Failed, "dry_run", cfg.BlobGCDryRun)
+}
+
+// evictEmbeddings вытесняет из кэша эмбеддингов то, чем давно не
+// пользовались, и то, что не помещается в границу размера.
+//
+// Кэш ключуется содержимым и владельца не имеет намеренно: ни удаление
+// проекта, ни отвязка репозитория его не уменьшают, и без этого прохода он
+// растёт монотонно. Первого прохода на старте нет — тот же довод, что у
+// блобов: место освобождается не срочно. Ошибка прохода воркер не роняет.
+func evictEmbeddings(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config) {
+	stats, err := store.EvictEmbeddingCache(ctx, postgres.EmbeddingCacheGCOptions{
+		TTL:     cfg.EmbeddingCacheTTL,
+		MaxRows: cfg.EmbeddingCacheMaxRows,
+		Limit:   cfg.EmbeddingCacheGCLimit,
+		DryRun:  cfg.EmbeddingCacheGCDryRun,
+	})
+	if err != nil {
+		logJobError(ctx, log, "вытеснение кэша эмбеддингов", err)
+		return
+	}
+	if stats.Empty() {
+		return
+	}
+	log.Info("вытеснение кэша эмбеддингов",
+		"rows_before", stats.RowsBefore, "bytes_before", stats.BytesBefore,
+		"stale", stats.DeletedStale, "overflow", stats.DeletedOverflow,
+		"dry_run", cfg.EmbeddingCacheGCDryRun)
 }
 
 // newEmbedder выбирает, кто считает векторы. Провайдера может не быть вовсе:

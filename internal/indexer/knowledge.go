@@ -67,12 +67,12 @@ func (ix *Indexer) textChunks(ctx context.Context, t postgres.PendingChunkTarget
 	for _, c := range chunks {
 		texts[c.TextSHA] = c.Text
 	}
-	vectors, model, _, err := embedTexts(ctx, ix, texts)
+	res, err := embedTexts(ctx, ix, texts)
 	if err != nil {
 		ix.log.Warn("эмбеддинги для текста не посчитаны, кладём без векторов",
 			"kind", t.Kind, "title", t.Title, "error", err)
-		vectors, model = nil, ""
 	}
+	vectors, model := res.vectors, res.model
 
 	out := make([]postgres.TextChunkInput, 0, len(chunks))
 	for _, c := range chunks {
@@ -114,10 +114,11 @@ func (ix *Indexer) BackfillEmbeddings(ctx context.Context, limit int) (int, erro
 		texts[sha] = m.Text
 	}
 
-	vectors, model, _, err := embedTexts(ctx, ix, texts)
+	res, err := embedTexts(ctx, ix, texts)
 	if err != nil {
 		return 0, err
 	}
+	vectors, model := res.vectors, res.model
 
 	done := 0
 	for i, m := range missing {

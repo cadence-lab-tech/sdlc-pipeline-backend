@@ -143,6 +143,26 @@ type Config struct {
 	// как включить сборку на засиженной базе.
 	BlobGCDryRun bool
 
+	// Вытеснение кэша эмбеддингов: таблица ключуется содержимым и владельца
+	// не имеет намеренно, поэтому ни удаление проекта, ни отвязка
+	// репозитория её не уменьшают — растёт она монотонно. Свой период и свои
+	// пределы, а не общие со сборкой блобов: этот проход — чистый SQL, а
+	// сборщик блобов ходит во внешнее хранилище на каждый блоб.
+	EmbeddingCacheGCEnabled  bool
+	EmbeddingCacheGCInterval time.Duration
+	// Сколько строка живёт без использования; 0 — не вытеснять по сроку.
+	EmbeddingCacheTTL time.Duration
+	// Верхняя граница размера кэша в строках; 0 — без границы. В строках, а
+	// не в байтах: размер строки задан размерностью вектора, а место на диске
+	// после удаления возвращает автовакуум, и не сразу.
+	EmbeddingCacheMaxRows  int
+	EmbeddingCacheGCLimit  int
+	EmbeddingCacheGCDryRun bool
+	// Порог отметки попадания: чаще этого last_used_at не переписывается.
+	// Иначе каждая пачка каждого прогона переписывала бы четырёхкилобайтные
+	// строки ради времени, которое по существу не изменилось.
+	EmbeddingCacheTouchAfter time.Duration
+
 	// Вебхуки GitHub: без секрета ручка выключена — принимать неподписанные
 	// события значит позволить кому угодно ставить прогоны в очередь.
 	GitHubWebhookSecret string
@@ -219,13 +239,25 @@ func Load() (Config, error) {
 		BlobGCInterval:     time.Hour,
 		// Пятьсот за проход: тик не затягивается, а следующий всё равно
 		// наступит — хвост разбирается за несколько проходов.
-		BlobGCLimit:         500,
-		BlobGCMinAge:        24 * time.Hour,
-		GitHubWebhookSecret: env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
-		IndexPollInterval:   15 * time.Second,
-		IndexRetainRuns:     5,
-		LogLevel:            env("SDLC_LOG_LEVEL", "info"),
-		Env:                 env("SDLC_ENV", "development"),
+		BlobGCLimit:              500,
+		BlobGCMinAge:             24 * time.Hour,
+		EmbeddingCacheGCEnabled:  true,
+		EmbeddingCacheGCInterval: 6 * time.Hour,
+		// Месяц без использования: кусок кода, не встретившийся за месяц ни в
+		// одном прогоне, скорее всего уже не встретится, а промах стоит
+		// одного вызова модели.
+		EmbeddingCacheTTL: 720 * time.Hour,
+		// Миллион строк — это около четырёх гигабайт при vector(1024).
+		EmbeddingCacheMaxRows: 1_000_000,
+		// Десять тысяч за проход: тик не затягивается, а хвост разбирается за
+		// несколько проходов.
+		EmbeddingCacheGCLimit:    10_000,
+		EmbeddingCacheTouchAfter: time.Hour,
+		GitHubWebhookSecret:      env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
+		IndexPollInterval:        15 * time.Second,
+		IndexRetainRuns:          5,
+		LogLevel:                 env("SDLC_LOG_LEVEL", "info"),
+		Env:                      env("SDLC_ENV", "development"),
 	}
 
 	if c.DatabaseURL == "" {
@@ -277,6 +309,36 @@ func Load() (Config, error) {
 	// сборка включена по умолчанию: ошибку лучше назвать здесь.
 	if c.BlobGCEnabled && c.BlobGCInterval <= 0 {
 		return c, fmt.Errorf("SDLC_BLOB_GC_INTERVAL (%s) не больше нуля", c.BlobGCInterval)
+	}
+	if c.EmbeddingCacheGCEnabled, err = envBool("SDLC_EMBEDDING_CACHE_GC_ENABLED", c.EmbeddingCacheGCEnabled); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheGCInterval, err = envDuration("SDLC_EMBEDDING_CACHE_GC_INTERVAL", c.EmbeddingCacheGCInterval); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheTTL, err = envDuration("SDLC_EMBEDDING_CACHE_TTL", c.EmbeddingCacheTTL); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheMaxRows, err = envInt("SDLC_EMBEDDING_CACHE_MAX_ROWS", c.EmbeddingCacheMaxRows); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheGCLimit, err = envInt("SDLC_EMBEDDING_CACHE_GC_LIMIT", c.EmbeddingCacheGCLimit); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheGCDryRun, err = envBool("SDLC_EMBEDDING_CACHE_GC_DRY_RUN", c.EmbeddingCacheGCDryRun); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheTouchAfter, err = envDuration("SDLC_EMBEDDING_CACHE_TOUCH_AFTER", c.EmbeddingCacheTouchAfter); err != nil {
+		return c, err
+	}
+	if c.EmbeddingCacheGCEnabled && c.EmbeddingCacheGCInterval <= 0 {
+		return c, fmt.Errorf("SDLC_EMBEDDING_CACHE_GC_INTERVAL (%s) не больше нуля", c.EmbeddingCacheGCInterval)
+	}
+	// Тикер, которому нечего удалять, лучше поймать на старте, чем искать
+	// потом в логах, почему кэш не уменьшается.
+	if c.EmbeddingCacheGCEnabled && c.EmbeddingCacheTTL <= 0 && c.EmbeddingCacheMaxRows <= 0 {
+		return c, fmt.Errorf("вытеснение кэша эмбеддингов включено, но и SDLC_EMBEDDING_CACHE_TTL, " +
+			"и SDLC_EMBEDDING_CACHE_MAX_ROWS выключены: проходу нечего удалять")
 	}
 	if c.IndexEnabled, err = envBool("SDLC_INDEX_ENABLED", c.IndexEnabled); err != nil {
 		return c, err
