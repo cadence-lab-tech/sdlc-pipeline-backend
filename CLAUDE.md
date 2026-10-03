@@ -468,9 +468,9 @@ MCP и CLI, вебхуки GitHub, вынос крупного содержим�
 `POST /v1/auth/cli`, страница `/login/cli`), конфиг `~/.config/clab` по
 хостам, проект по `origin` через `GET /v1/projects?repo=`, `clab mcp
 install`, таблицы для команд чтения и `--json`, релизы `release.yml`;
-раздача — тап `cadence-lab-tech/homebrew-tap`: `release.yml` после публикации
-шлёт туда `repository_dispatch` с тегом и суммами, формулу, стратегию для
-приватного релиза и `install.sh` держит сам тап.
+раздача — публичный тап `cadence-lab-tech/homebrew-tap` ([решение 0038](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0038-public-cli-distribution.md)):
+`release.yml` выкладывает архивы релизом туда и шлёт `repository_dispatch` с
+тегом и суммами, формулу и `install.sh` держит сам тап, качают без токена.
 
 Фаза 8, арендатор ([решение 0033](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0033-tenant-is-team.md)):
 `teams.kind`, личная команда при входе, обязательный `owner_team_id`,

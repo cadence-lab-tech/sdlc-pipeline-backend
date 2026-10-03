@@ -1,10 +1,11 @@
 # Релиз clab: бинарники под три платформы по тегу v*, формула в тап Homebrew.
 #
 # CLI ставят на машины разработчиков, где нет ни Go, ни доступа к GHCR, —
-# поэтому не образ, а готовые архивы в GitHub Releases. Репозиторий
-# приватный: скачивает участник организации — brew с его токеном GitHub,
-# install.sh из тапа или gh release download. Формулу Homebrew держит и
-# обновляет тап cadence-lab-tech/homebrew-tap; отсюда ему уходит событие.
+# поэтому не образ, а готовые архивы в GitHub Releases. Раздача публичная
+# (решение 0038): архивы уходят релизом в публичный тап
+# cadence-lab-tech/homebrew-tap, откуда их качают brew, install.sh и просто
+# curl — без токена и без участия в организации. Код сервиса остаётся
+# закрытым: здесь у релиза только заметки о том, что изменилось.
 name: release
 
 on:
@@ -67,8 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Секреты в условии шага недоступны, поэтому флаг считается здесь.
-      # Без токена релиз всё равно выходит — только тап о нём не узнает.
+      # Без токена заметки всё равно выходят — только архивы до тапа не
+      # доедут и формула не обновится.
       HAS_TAP_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN != '' }}
+      TAP: cadence-lab-tech/homebrew-tap
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -81,23 +84,44 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
+      # Здесь — только заметки: архивы лежат в публичном релизе тапа, а
+      # этот репозиторий приватный, и качать из него никто не должен.
       # Черновик не нужен: тег ставится, когда релиз уже решён.
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
           generate_release_notes: true
 
       # Тап — отдельный репозиторий; токен прогона до него не дотягивается,
-      # событие шлётся fine-grained PAT с правом Contents на homebrew-tap
-      # (секрет TAP_DISPATCH_TOKEN). В payload — тег и checksums.txt целиком:
-      # тапу тогда не нужен доступ к этому приватному репозиторию, формулу
-      # он рендерит из события (update.yml там).
-      - name: сообщить тапу
+      # релиз и событие идут fine-grained PAT с правом Contents на
+      # homebrew-tap (секрет TAP_DISPATCH_TOKEN). Повторный прогон того же
+      # тега не падает: ассеты перезаписываются.
+      - name: выложить архивы в тап
         if: env.HAS_TAP_TOKEN == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
         run: |
-          gh api repos/cadence-lab-tech/homebrew-tap/dispatches \
+          cat > notes.md <<'MD'
+          Бинарники `clab` и `clab-runner` под macOS, Linux и Windows.
+
+          ```bash
+          brew trust cadence-lab-tech/tap && brew install cadence-lab-tech/tap/clab
+          # без Homebrew
+          curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | sh
+          ```
+
+          Суммы — в `checksums.txt`: `shasum -a 256 -c checksums.txt`.
+          MD
+          if gh release view "$GITHUB_REF_NAME" --repo "$TAP" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$TAP" --clobber dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$TAP" \
+              --title "clab ${GITHUB_REF_NAME}" --notes-file notes.md dist/*
+          fi
+
+          # В payload — тег и checksums.txt целиком: тапу тогда не нужен
+          # доступ к этому приватному репозиторию, формулу он рендерит из
+          # события (update.yml там).
+          gh api "repos/$TAP/dispatches" \
             -f event_type=clab-release \
             -f "client_payload[tag]=${GITHUB_REF_NAME}" \
             -f "client_payload[checksums]=$(cat dist/checksums.txt)"
@@ -105,5 +129,7 @@ jobs:
       - name: без токена тапа
         if: env.HAS_TAP_TOKEN != 'true'
         run: |
-          echo "секрета TAP_DISPATCH_TOKEN нет — формула в homebrew-tap не обновится;"
-          echo "руками: gh workflow run update.yml --repo cadence-lab-tech/homebrew-tap"
+          echo "секрета TAP_DISPATCH_TOKEN нет — архивы не уехали в homebrew-tap"
+          echo "и формула не обновилась; руками:"
+          echo "  gh release create ${GITHUB_REF_NAME} --repo ${TAP} dist/*"
+          echo "  gh workflow run update.yml --repo ${TAP}"
