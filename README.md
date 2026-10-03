@@ -149,6 +149,11 @@ clab show SDLC-1
 clab mcp install                                  # claude mcp add с тем же токеном
 ```
 
+Подключение своего проекта с нуля — установка, вход, проект, репозитории,
+стартовые роли и цикл, агент, первая задача — расписано в
+[QUICKSTART.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/QUICKSTART.md);
+подробности каждого шага — в [INTRODUCTION.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/INTRODUCTION.md).
+
 Скрипты и CI обходятся без конфига — переменные окружения перекрывают его:
 
 ```bash
