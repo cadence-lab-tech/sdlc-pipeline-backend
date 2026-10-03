@@ -77,6 +77,9 @@ section "память и нагрузка"
 section "сертификаты"
 "$read_sh" certs || true
 
+section "часы"
+"$read_sh" clock || true
+
 section "бэкапы"
 "$read_sh" backups || true
 

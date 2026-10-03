@@ -27,6 +27,7 @@ usage() {
   disk                место на диске и сколько занял докер
   resources           память, нагрузка, потребление по контейнерам
   certs               сроки сертификатов Caddy
+  clock               часы машины и расхождение с GitHub
   backups             список дампов базы
   compose             итоговый docker-compose config
   raw <cmd...>        произвольная команда ТОЛЬКО из белого списка
@@ -113,6 +114,15 @@ case "$cmd" in
 
   backups)
     remote "ls -lh backups 2>/dev/null | tail -20 || echo 'каталога backups нет'"
+    ;;
+
+  # Часы — не экзотика в этом списке: уехавшие часы ломают чтение
+  # репозиториев целиком. GitHub отбивает утверждение GitHub App, выписанное
+  # «в будущем», как Bad credentials, и это читается как отозванный ключ.
+  # Расхождение берётся с заголовка Date у самого GitHub: сверять машину
+  # с её же часами бессмысленно.
+  clock)
+    remote "timedatectl status | head -5; echo; timedatectl timesync-status 2>/dev/null | head -4 || true; echo; echo \"машина: \$(date -u '+%F %T') UTC\"; echo \"GitHub: \$(curl -sI --max-time 10 https://api.github.com | sed -n 's/^[Dd]ate: //p')\""
     ;;
 
   compose)

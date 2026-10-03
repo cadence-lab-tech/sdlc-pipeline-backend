@@ -125,6 +125,29 @@ resource "twc_firewall_rule" "egress" {
   description = "Исходящие: GHCR, Let's Encrypt, GitHub API, Voyage, S3"
 }
 
+# Исходящий UDP: только время и имена. Без NTP часы машины уезжают — за
+# первые три недели набежало три минуты, — а GitHub отбивает утверждение
+# GitHub App, выписанное «в будущем», с 401 Bad credentials: ломается чтение
+# репозиториев установкой, то есть индексация и привязка.
+
+resource "twc_firewall_rule" "egress_ntp" {
+  firewall_id = twc_firewall.main.id
+  direction   = "egress"
+  protocol    = "udp"
+  port        = "123"
+  cidr        = "0.0.0.0/0"
+  description = "NTP: часы машины (systemd-timesyncd)"
+}
+
+resource "twc_firewall_rule" "egress_dns" {
+  firewall_id = twc_firewall.main.id
+  direction   = "egress"
+  protocol    = "udp"
+  port        = "53"
+  cidr        = "0.0.0.0/0"
+  description = "DNS"
+}
+
 # --- DNS --------------------------------------------------------------------
 
 data "twc_dns_zone" "main" {
