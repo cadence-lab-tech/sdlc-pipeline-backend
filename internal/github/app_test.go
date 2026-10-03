@@ -207,3 +207,108 @@ func TestSecretValueStaysOutOfErrors(t *testing.T) {
 		t.Fatalf("значение секрета в тексте ошибки: %v", err)
 	}
 }
+
+// Часы машины уехали вперёд: GitHub отбивает утверждение, выписанное «в
+// будущем», с 401 Bad credentials — на это однажды встала индексация, и
+// отличить такой отказ от отозванного ключа было нельзя. Поправка снимается
+// с заголовка Date ответа, и утверждение перевыписывается один раз.
+func TestInstallationTokenSurvivesClockDrift(t *testing.T) {
+	// Провайдер «отстаёт» на три минуты — столько набежало на машине без NTP.
+	const drift = 3 * time.Minute
+	var attempts int
+	var issuedAt []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		now := time.Now().Add(-drift)
+		iat := jwtIssuedAt(t, r)
+		issuedAt = append(issuedAt, iat)
+		w.Header().Set("Date", now.UTC().Format(http.TimeFormat))
+		if iat > now.Unix() {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": "ghs_installation", "expires_at": now.Add(time.Hour),
+		})
+	}))
+	defer srv.Close()
+
+	app, err := NewApp(srv.URL, "12345", testAppKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := app.InstallationToken(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("токен не выписан: %v", err)
+	}
+	if token != "ghs_installation" {
+		t.Fatalf("токен %q", token)
+	}
+	if attempts != 2 {
+		t.Fatalf("походов %d вместо двух: первый отбивается по времени, второй идёт с поправкой", attempts)
+	}
+	// Первое утверждение выписано «в будущем» по часам провайдера, второе —
+	// в прошлом: поправка измерена, а не угадана.
+	if issuedAt[0] <= time.Now().Add(-drift).Unix() {
+		t.Fatal("первое утверждение не попало в будущее — проверка ничего не проверяет")
+	}
+	if issuedAt[1] > time.Now().Add(-drift).Unix() {
+		t.Fatal("второе утверждение всё ещё в будущем по часам провайдера")
+	}
+
+	// Поправка запомнена: следующая выписка идёт сразу верной.
+	app.mu.Lock()
+	app.tokens = map[int64]installationToken{}
+	app.mu.Unlock()
+	if _, err := app.InstallationToken(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("походов %d вместо трёх: поправка не запомнена", attempts)
+	}
+}
+
+// Ключ не принят, а часы при этом разошлись — в отказе должно быть сказано
+// про часы, иначе поломку ищут в правах установки.
+func TestInstallationTokenErrorNamesClockDrift(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Date", time.Now().Add(-3*time.Minute).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer srv.Close()
+
+	app, err := NewApp(srv.URL, "12345", testAppKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.InstallationToken(context.Background(), 42)
+	if err == nil {
+		t.Fatal("отказ не вернулся")
+	}
+	if !strings.Contains(err.Error(), "часы машины") {
+		t.Fatalf("в отказе нет приписки про часы: %v", err)
+	}
+}
+
+// jwtIssuedAt — iat утверждения из заголовка запроса.
+func jwtIssuedAt(t *testing.T, r *http.Request) int64 {
+	t.Helper()
+	parts := strings.Split(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), ".")
+	if len(parts) != 3 {
+		t.Fatalf("утверждение приложения не JWT: %q", r.Header.Get("Authorization"))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims struct {
+		Issued int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims.Issued
+}

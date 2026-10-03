@@ -37,6 +37,8 @@ type App struct {
 
 	mu     sync.Mutex
 	tokens map[int64]installationToken
+	// offset — поправка к местным часам, снятая с ответа провайдера.
+	offset time.Duration
 }
 
 type installationToken struct {
@@ -48,6 +50,20 @@ type installationToken struct {
 // индексации длится минуты, и токен, годный ещё десять секунд, протухнет
 // посреди него.
 const tokenSkew = 5 * time.Minute
+
+// clockBackdate — насколько iat утверждения отодвигается в прошлое, и
+// clockTolerance — расхождение часов, которое это закрывает само.
+//
+// Часы машины уезжают: на VPS без NTP набежало три минуты за три недели, и
+// GitHub стал отбивать утверждение, выписанное «в будущем», с 401 Bad
+// credentials — неотличимо от отозванного ключа. Расхождение больше
+// допуска поэтому измеряется по заголовку Date ответа, а не угадывается
+// запасом в iat: запас пришлось бы брать на любой мыслимый дрейф, а срок
+// жизни утверждения ограничен десятью минутами.
+const (
+	clockBackdate  = time.Minute
+	clockTolerance = 30 * time.Second
+)
 
 // NewApp читает приватный ключ приложения в формате PEM (PKCS#1 или PKCS#8).
 func NewApp(baseURL, appID string, keyPEM []byte) (*App, error) {
@@ -89,19 +105,59 @@ func NewApp(baseURL, appID string, keyPEM []byte) (*App, error) {
 func (a *App) InstallationToken(ctx context.Context, installationID int64) (string, error) {
 	a.mu.Lock()
 	cached, ok := a.tokens[installationID]
+	offset := a.offset
 	a.mu.Unlock()
-	if ok && time.Now().Before(cached.expires.Add(-tokenSkew)) {
+	// Срок приходит от провайдера, значит и сравнивать его надо с временем
+	// провайдера: по уехавшим часам токен либо выбрасывается живым, либо
+	// переживает свой срок.
+	if ok && time.Now().Add(offset).Before(cached.expires.Add(-tokenSkew)) {
 		return cached.value, nil
 	}
 
+	// Вторая попытка бывает ровно одна и только после измеренной поправки
+	// часов: отбитое по времени утверждение перевыписывается, а неверный
+	// ключ не крутится по кругу.
+	for attempt := 0; ; attempt++ {
+		resp, body, err := a.postAccessToken(ctx, installationID)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			return "", fmt.Errorf("%w: установка %d", ErrNotFound, installationID)
+		case resp.StatusCode == http.StatusUnauthorized && attempt == 0 &&
+			a.observeClock(resp.Header.Get("Date")):
+			continue
+		case resp.StatusCode != http.StatusCreated:
+			return "", fmt.Errorf("github %d на токен установки %d: %s%s",
+				resp.StatusCode, installationID, snippet(body), a.clockNote())
+		}
+		var out struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			return "", fmt.Errorf("github: ответ на токен установки не разбирается: %w", err)
+		}
+
+		a.mu.Lock()
+		a.tokens[installationID] = installationToken{value: out.Token, expires: out.ExpiresAt}
+		a.mu.Unlock()
+		return out.Token, nil
+	}
+}
+
+// postAccessToken — один поход за токеном установки. Тело прочитано целиком,
+// у ответа остаются статус и заголовки: по Date снимается поправка часов.
+func (a *App) postAccessToken(ctx context.Context, installationID int64) (*http.Response, []byte, error) {
 	appJWT, err := a.jwt()
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	url := a.baseURL + "/app/installations/" + strconv.FormatInt(installationID, 10) + "/access_tokens"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", apiVersion)
@@ -109,43 +165,71 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64) (stri
 
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("github: токен установки %d: %w", installationID, err)
+		return nil, nil, fmt.Errorf("github: токен установки %d: %w", installationID, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("%w: установка %d", ErrNotFound, installationID)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("github %d на токен установки %d: %s",
-			resp.StatusCode, installationID, snippet(body))
-	}
-	var out struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("github: ответ на токен установки не разбирается: %w", err)
-	}
+	return resp, body, nil
+}
 
+// observeClock снимает поправку часов с заголовка Date. true — расхождение
+// за допуском и поправка изменилась, то есть утверждение стоит перевыписать.
+func (a *App) observeClock(date string) bool {
+	at, err := http.ParseTime(date)
+	if err != nil {
+		return false
+	}
+	offset := time.Until(at)
+	if offset.Abs() < clockTolerance {
+		return false
+	}
 	a.mu.Lock()
-	a.tokens[installationID] = installationToken{value: out.Token, expires: out.ExpiresAt}
+	defer a.mu.Unlock()
+	if a.offset == offset {
+		return false
+	}
+	a.offset = offset
+	return true
+}
+
+// providerNow — время провайдера: местные часы с измеренной поправкой.
+func (a *App) providerNow() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return time.Now().Add(a.offset)
+}
+
+// clockNote — приписка к отказу, когда часы разошлись с провайдером. Без неё
+// 401 на утверждение приложения читают как отозванный ключ и ищут поломку
+// не там: на этом однажды потеряли восемнадцать дней индексации.
+func (a *App) clockNote() string {
+	a.mu.Lock()
+	offset := a.offset
 	a.mu.Unlock()
-	return out.Token, nil
+	if offset.Abs() < clockTolerance {
+		return ""
+	}
+	direction := "впереди"
+	if offset > 0 {
+		direction = "позади"
+	}
+	return fmt.Sprintf(" (часы машины %s времени провайдера на %s — проверьте синхронизацию времени)",
+		direction, offset.Abs().Round(time.Second))
 }
 
 // jwt подписывает утверждение приложения его ключом. Живёт минуты: им только
 // обменивают на токен установки.
 func (a *App) jwt() (string, error) {
-	now := time.Now()
+	now := a.providerNow()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	claims, err := json.Marshal(map[string]any{
 		// iat в прошлое: GitHub отбивает токен, выписанный «в будущем», а
-		// часы сервиса и провайдера расходятся.
-		"iat": now.Add(-time.Minute).Unix(),
+		// часы сервиса и провайдера расходятся. Мелкое расхождение закрывает
+		// этот запас, крупное — поправка в providerNow.
+		"iat": now.Add(-clockBackdate).Unix(),
 		"exp": now.Add(9 * time.Minute).Unix(),
 		"iss": a.appID,
 	})
