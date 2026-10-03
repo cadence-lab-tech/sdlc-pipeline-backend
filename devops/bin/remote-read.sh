@@ -119,10 +119,14 @@ case "$cmd" in
   # Часы — не экзотика в этом списке: уехавшие часы ломают чтение
   # репозиториев целиком. GitHub отбивает утверждение GitHub App, выписанное
   # «в будущем», как Bad credentials, и это читается как отозванный ключ.
-  # Расхождение берётся с заголовка Date у самого GitHub: сверять машину
-  # с её же часами бессмысленно.
+  #
+  # Главный ответ даёт timedatectl: `synchronized: yes` и Offset от NTP.
+  # Заголовок Date у GitHub — вторая опора, на случай когда синхронизации
+  # нет вовсе: он с точностью до секунды и на длинном маршруте отстаёт
+  # ещё на несколько, поэтому значат минуты, а не секунды. Местное время
+  # снимается ПОСЛЕ ответа, иначе в разницу попадает время запроса.
   clock)
-    remote "timedatectl status | head -5; echo; timedatectl timesync-status 2>/dev/null | head -4 || true; echo; echo \"машина: \$(date -u '+%F %T') UTC\"; echo \"GitHub: \$(curl -sI --max-time 10 https://api.github.com | sed -n 's/^[Dd]ate: //p')\""
+    remote "timedatectl status | head -5; echo; timedatectl timesync-status 2>/dev/null | head -12 || true; echo; d=\$(curl -sI --max-time 10 https://api.github.com | sed -n 's/^[Dd]ate: //p'); echo \"машина: \$(date -u '+%a, %d %b %Y %T') GMT\"; echo \"GitHub: \$d\""
     ;;
 
   compose)
