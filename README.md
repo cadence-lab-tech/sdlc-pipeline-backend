@@ -167,21 +167,27 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 ./bin/clab index
 ```
 
-Поставить `clab` на свою машину можно тремя способами. Репозиторий
-приватный, поэтому всем трём нужен доступ к GitHub от участника организации
-(`gh auth login`):
+Поставить `clab` на свою машину можно тремя способами. Раздача публичная
+([решение 0038](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0038-public-cli-distribution.md)):
+ни токена, ни участия в организации не нужно.
 
 ```bash
-brew trust cadence-lab-tech/tap && brew install cadence-lab-tech/tap/clab   # macOS и Linux с Homebrew
-gh api repos/cadence-lab-tech/homebrew-tap/contents/install.sh \
-    -H "Accept: application/vnd.github.raw" | sh                             # без Homebrew
-gh release download --repo cadence-lab-tech/sdlc-pipeline-backend \
-    --pattern 'clab_*_windows_amd64.zip'                                     # Windows и всё остальное
+# macOS и Linux с Homebrew
+brew trust cadence-lab-tech/tap && brew install cadence-lab-tech/tap/clab
+
+# без Homebrew
+curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | sh
+
+# Windows и всё остальное — архив из релиза
+gh release download --repo cadence-lab-tech/homebrew-tap \
+    --pattern 'clab_*_windows_amd64.zip'
 ```
 
-Релизы собирает `.github/workflows/release.yml` по тегу `v*` и сообщает о
-них тапу [homebrew-tap](https://github.com/cadence-lab-tech/homebrew-tap),
-где живут формула, стратегия скачивания из приватного релиза и `install.sh`.
+Релизы собирает `.github/workflows/release.yml` по тегу `v*`: архивы уходят
+релизом в публичный тап
+[homebrew-tap](https://github.com/cadence-lab-tech/homebrew-tap), где живут
+формула и `install.sh`, а здесь у релиза остаются только заметки. Код
+сервиса закрыт, наружу выходят только бинарники CLI.
 
 ## Структура
 
