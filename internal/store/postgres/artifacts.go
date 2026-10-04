@@ -46,6 +46,21 @@ func (s *Store) inlineLimit() int {
 	return s.inlineMax
 }
 
+// BlobLimit — сколько байт содержимого PutBlob примет: общий предел, а без
+// внешнего хранилища — не больше потолка blobstore.InlineMaxBytes. Ноль —
+// общего предела нет, но потолок без хранилища действует и тогда. Правило
+// живёт здесь, рядом с PutBlob, чтобы тот, кто отсеивает содержимое заранее
+// (индексатор), не повторял его у себя.
+func (s *Store) BlobLimit() int {
+	if s.blobs != nil {
+		return s.blobMax
+	}
+	if s.blobMax > 0 && s.blobMax < blobstore.InlineMaxBytes {
+		return s.blobMax
+	}
+	return blobstore.InlineMaxBytes
+}
+
 // PutBlob кладёт содержимое в контент-адресуемое хранилище и возвращает sha256.
 //
 // Дедупликация бесплатна: одинаковое содержимое даёт одинаковый sha, и второй

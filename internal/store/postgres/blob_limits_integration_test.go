@@ -137,3 +137,40 @@ func TestPutBlobMaxWithoutStore(t *testing.T) {
 		t.Fatalf("содержимое больше 4 МиБ без хранилища легло в blobs (%s)", s)
 	}
 }
+
+// BlobLimit говорит ровно то, что делает PutBlob (CLAB-82): содержимое в
+// BlobLimit байт принимается, на байт больше — нет. На это опирается охрана
+// индексатора, отсеивающего файлы до скачивания.
+func TestBlobLimitMatchesPutBlob(t *testing.T) {
+	store, _ := testdb.Store(t)
+	for _, tc := range []struct {
+		name      string
+		external  bool
+		inline    int
+		max       int
+		wantLimit int
+	}{
+		{"без хранилища, предел ниже потолка", false, 256 << 10, 1000, 1000},
+		{"без хранилища, предел выше потолка", false, 256 << 10, 64 << 20, blobstore.InlineMaxBytes},
+		{"с хранилищем", true, 1000, 5 << 20, 5 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bs postgres.BlobStore
+			if tc.external {
+				bs = newFakeBlobs()
+			}
+			store.UseBlobStore(bs, tc.inline, tc.max)
+			limit := store.BlobLimit()
+			if limit != tc.wantLimit {
+				t.Fatalf("BlobLimit %d, ждали %d", limit, tc.wantLimit)
+			}
+			at := bytes.Repeat([]byte("h"), limit)
+			at[0] = byte(len(tc.name)) // своё содержимое на каждый случай
+			if _, err := putBlob(t, store, at); err != nil {
+				t.Fatalf("содержимое ровно в BlobLimit не принято: %v", err)
+			}
+			_, err := putBlob(t, store, append(at, 'x'))
+			wantTooLarge(t, err)
+		})
+	}
+}

@@ -541,3 +541,153 @@ func TestBlobLimitBoundariesPass(t *testing.T) {
 		})
 	}
 }
+
+// Предел индексатора выше 4 МиБ без внешнего хранилища (CLAB-82): файл крупнее
+// потолка в базу не ляжет, и прогон упал бы на нём. Ошибка называет оба выхода:
+// уменьшить предел или включить хранилище.
+func TestIndexMaxAboveInlineCeilingWithoutStorageRejected(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+	t.Setenv("SDLC_BLOB_DIR", "")
+	t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+	t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", "8388608")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("SDLC_INDEX_MAX_FILE_BYTES=8388608 без хранилища принят")
+	}
+	for _, want := range []string{"SDLC_INDEX_MAX_FILE_BYTES", "8388608", "4194304", "SDLC_BLOB_DIR", "SDLC_BLOB_S3_BUCKET"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("в ошибке нет %q: %v", want, err)
+		}
+	}
+}
+
+// Предел индексатора выше общего предела блоба — ошибка с обеими переменными
+// при любом режиме хранения: это правило проверяется раньше потолка.
+func TestIndexMaxAboveBlobMaxRejected(t *testing.T) {
+	for _, tc := range []struct{ name, dir string }{
+		{"с каталогом", "/tmp/clab-blobs"},
+		{"без внешнего хранилища", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_DIR", tc.dir)
+			t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+			t.Setenv("SDLC_BLOB_MAX_BYTES", "1000000")
+			t.Setenv("SDLC_BLOB_INLINE_MAX_BYTES", "262144")
+			t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", "2000000")
+			_, err := Load()
+			if err == nil {
+				t.Fatal("INDEX > MAX принят")
+			}
+			for _, want := range []string{"SDLC_INDEX_MAX_FILE_BYTES", "SDLC_BLOB_MAX_BYTES", "2000000", "1000000"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("в ошибке нет %q: %v", want, err)
+				}
+			}
+		})
+	}
+	// Сценарий 2 требований: общий предел опущен ниже предела индексатора по
+	// умолчанию.
+	t.Run("предел индексатора по умолчанию", func(t *testing.T) {
+		t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+		t.Setenv("SDLC_BLOB_MAX_BYTES", "262144")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("SDLC_BLOB_MAX_BYTES=262144 при пределе индексатора 524288 принят")
+		}
+		for _, want := range []string{"SDLC_INDEX_MAX_FILE_BYTES (524288)", "SDLC_BLOB_MAX_BYTES (262144)"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("в ошибке нет %q: %v", want, err)
+			}
+		}
+	})
+}
+
+// С внешним хранилищем потолка 4 МиБ для индексатора нет: крупный файл
+// законно уходит наружу. Бакет годится так же, как каталог.
+func TestIndexMaxAboveInlineCeilingWithStoragePasses(t *testing.T) {
+	for _, tc := range []struct{ name, dir, bucket string }{
+		{"каталог", "/tmp/clab-blobs", ""},
+		{"бакет", "", "b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_DIR", tc.dir)
+			t.Setenv("SDLC_BLOB_S3_BUCKET", tc.bucket)
+			t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", "8388608")
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.IndexMaxFileBytes != 8388608 {
+				t.Fatalf("предел индексатора %d, ждали 8388608", c.IndexMaxFileBytes)
+			}
+		})
+	}
+}
+
+// Границы правила включены: предел, равный потолку без хранилища, и предел,
+// равный общему пределу блоба с хранилищем, проходят.
+func TestIndexBlobLimitBoundariesPass(t *testing.T) {
+	for _, tc := range []struct{ name, dir, index, max string }{
+		{"потолок без хранилища", "", "4194304", "67108864"},
+		{"общий предел с каталогом", "/tmp/clab-blobs", "8388608", "8388608"},
+		{"общий предел без хранилища", "", "1000000", "1000000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_DIR", tc.dir)
+			t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+			t.Setenv("SDLC_BLOB_MAX_BYTES", tc.max)
+			t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", tc.index)
+			if _, err := Load(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Проверка безусловна по SDLC_INDEX_ENABLED: противоречие не должно лежать
+// незамеченным до дня, когда включат индексацию.
+func TestIndexBlobLimitIsUnconditional(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+	t.Setenv("SDLC_INDEX_ENABLED", "false")
+	t.Setenv("SDLC_BLOB_DIR", "")
+	t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+	t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", "8388608")
+	if _, err := Load(); err == nil {
+		t.Fatal("противоречивый предел индексатора при выключенной индексации принят")
+	}
+}
+
+// Пара блобов сверяется раньше предела индексатора: при обоих нарушениях
+// ошибка называет пару блобов (CLAB-81).
+func TestBlobPairCheckedBeforeIndexLimit(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+	t.Setenv("SDLC_BLOB_DIR", "")
+	t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+	t.Setenv("SDLC_BLOB_INLINE_MAX_BYTES", "2000000")
+	t.Setenv("SDLC_BLOB_MAX_BYTES", "1000000")
+	t.Setenv("SDLC_INDEX_MAX_FILE_BYTES", "8388608")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("двойное нарушение принято")
+	}
+	if !strings.Contains(err.Error(), "SDLC_BLOB_INLINE_MAX_BYTES") || strings.Contains(err.Error(), "SDLC_INDEX_MAX_FILE_BYTES") {
+		t.Fatalf("ошибка обязана называть пару блобов: %v", err)
+	}
+}
+
+// Конфигурация по умолчанию проходит и с хранилищем, и без него.
+func TestIndexBlobLimitDefaultsPass(t *testing.T) {
+	for _, dir := range []string{"", "/tmp/clab-blobs"} {
+		t.Run("dir="+dir, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_DIR", dir)
+			t.Setenv("SDLC_BLOB_S3_BUCKET", "")
+			if _, err := Load(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
