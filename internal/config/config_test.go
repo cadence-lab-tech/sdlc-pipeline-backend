@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -408,7 +409,7 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		"SDLC_INDEX_CHUNK_CHARS":           "3",
 		"SDLC_EMBEDDINGS_BATCH":            "4",
 		"SDLC_BLOB_INLINE_MAX_BYTES":       "5",
-		"SDLC_BLOB_MAX_BYTES":              "1",
+		"SDLC_BLOB_MAX_BYTES":              "6",
 		"SDLC_INDEX_RETAIN_RUNS":           "1",
 		"SDLC_SESSION_TTL":                 "1s",
 		"SDLC_LEASE_TTL":                   "3s",
@@ -440,7 +441,7 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		{"SDLC_INDEX_CHUNK_CHARS", c.ChunkMaxChars, 3},
 		{"SDLC_EMBEDDINGS_BATCH", c.EmbeddingBatch, 4},
 		{"SDLC_BLOB_INLINE_MAX_BYTES", c.BlobInlineMaxBytes, 5},
-		{"SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes, 1},
+		{"SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes, 6},
 		{"SDLC_INDEX_RETAIN_RUNS", c.IndexRetainRuns, 1},
 	}
 	for _, f := range ints {
@@ -470,5 +471,73 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		if f.got != f.want {
 			t.Errorf("%s: %s, ждали %s", f.name, f.got, f.want)
 		}
+	}
+}
+
+// Порог inline больше общего предела — противоречие (CLAB-81): содержимое
+// между ними легло бы в базу мимо предела. Проверяется и без внешнего
+// хранилища — как непозитивные значения.
+func TestBlobInlineAboveMaxRejected(t *testing.T) {
+	for _, tc := range []struct{ name, dir, bucket string }{
+		{"с каталогом", "/tmp/clab-blobs", ""},
+		{"без внешнего хранилища", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_DIR", tc.dir)
+			t.Setenv("SDLC_BLOB_S3_BUCKET", tc.bucket)
+			t.Setenv("SDLC_BLOB_INLINE_MAX_BYTES", "2000000")
+			t.Setenv("SDLC_BLOB_MAX_BYTES", "1000000")
+			_, err := Load()
+			if err == nil {
+				t.Fatal("INLINE > MAX принят")
+			}
+			for _, want := range []string{"SDLC_BLOB_INLINE_MAX_BYTES", "SDLC_BLOB_MAX_BYTES", "2000000", "1000000"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("в ошибке нет %q: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// Порог inline выше 4 МиБ — сколь угодно крупные строки blobs при внешнем
+// хранилище. Ошибка называет переменную и потолок.
+func TestBlobInlineAboveCeilingRejected(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+	t.Setenv("SDLC_BLOB_DIR", "/tmp/clab-blobs")
+	t.Setenv("SDLC_BLOB_INLINE_MAX_BYTES", "4194305")
+	t.Setenv("SDLC_BLOB_MAX_BYTES", "67108864")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("SDLC_BLOB_INLINE_MAX_BYTES=4194305 принят")
+	}
+	for _, want := range []string{"SDLC_BLOB_INLINE_MAX_BYTES", "4194305", "4194304"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("в ошибке нет %q: %v", want, err)
+		}
+	}
+}
+
+// Границы правила включены: порог, равный пределу, и порог, равный потолку,
+// проходят как есть.
+func TestBlobLimitBoundariesPass(t *testing.T) {
+	for _, tc := range []struct{ inline, max string }{
+		{"1000000", "1000000"},
+		{"4194304", "67108864"},
+		{"4194304", "4194304"},
+	} {
+		t.Run(tc.inline+"/"+tc.max, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_BLOB_INLINE_MAX_BYTES", tc.inline)
+			t.Setenv("SDLC_BLOB_MAX_BYTES", tc.max)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strconv.Itoa(c.BlobInlineMaxBytes) + "/" + strconv.Itoa(c.BlobMaxBytes); got != tc.inline+"/"+tc.max {
+				t.Fatalf("пределы %s, ждали %s/%s", got, tc.inline, tc.max)
+			}
+		})
 	}
 }

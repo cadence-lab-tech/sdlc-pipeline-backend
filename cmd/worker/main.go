@@ -63,8 +63,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Пределы передаются и без хранилища: SDLC_BLOB_MAX_BYTES действует на
+	// любом пути, в том числе когда всё лежит inline.
 	if blobs != nil {
 		store.UseBlobStore(blobs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
+	} else {
+		store.UseBlobStore(nil, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
 	}
 	// Миграции катит api: два процесса, накатывающие схему, разошлись бы в
 	// порядке старта. Воркер работает по уже готовой схеме.
