@@ -10,17 +10,13 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
-// InlineMaxBytes — предел содержимого, которое лежит прямо в blobs.content,
-// когда внешнее хранилище не настроено. С хранилищем порог задаётся
-// настройкой (SDLC_BLOB_INLINE_MAX_BYTES), а этот — верхняя граница того,
-// что вообще принимается без выноса.
-const InlineMaxBytes = 4 << 20
-
 // BlobStore — внешнее хранилище крупного содержимого. Объявлен здесь, а не
-// импортирован из blobstore, чтобы store не зависел от реализации.
+// взят из blobstore, чтобы store не зависел от реализации; из blobstore взят
+// только потолок inline — одно число на конфигурацию и хранилище.
 type BlobStore interface {
 	Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error)
 	Get(ctx context.Context, uri string) ([]byte, error)
@@ -28,8 +24,15 @@ type BlobStore interface {
 	Delete(ctx context.Context, uri string) error
 }
 
-// UseBlobStore включает вынос: содержимое больше inlineMax уходит во внешнее
-// хранилище, в базе остаётся адрес. maxBytes — предел принимаемого вовсе.
+// UseBlobStore задаёт пределы содержимого и, если bs не nil, включает вынос:
+// содержимое больше inlineMax уходит во внешнее хранилище, в базе остаётся
+// адрес. maxBytes — предел принимаемого вовсе, на любом пути, inline тоже.
+//
+// Без хранилища (bs == nil) всё лежит inline, и принимается не больше
+// min(blobstore.InlineMaxBytes, maxBytes); inlineMax тогда не действует.
+// Порог inline выше потолка blobstore.InlineMaxBytes срезается до него:
+// config.Load такую пару не пропускает, а здесь — охрана для вызовов в обход
+// конфигурации.
 func (s *Store) UseBlobStore(bs BlobStore, inlineMax, maxBytes int) {
 	s.blobs = bs
 	s.inlineMax = inlineMax
@@ -37,8 +40,8 @@ func (s *Store) UseBlobStore(bs BlobStore, inlineMax, maxBytes int) {
 }
 
 func (s *Store) inlineLimit() int {
-	if s.blobs == nil || s.inlineMax <= 0 {
-		return InlineMaxBytes
+	if s.blobs == nil || s.inlineMax <= 0 || s.inlineMax > blobstore.InlineMaxBytes {
+		return blobstore.InlineMaxBytes
 	}
 	return s.inlineMax
 }
@@ -72,6 +75,13 @@ func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaTyp
 		mediaType = "text/markdown"
 	}
 
+	// Общий предел — до выбора пути: inline-содержимое ему подчиняется так же,
+	// как вынесенное.
+	if s.blobMax > 0 && len(content) > s.blobMax {
+		return "", apperr.InvalidInput("содержимое %d байт больше предела %d (SDLC_BLOB_MAX_BYTES)",
+			len(content), s.blobMax)
+	}
+
 	sum := sha256.Sum256(content)
 	sha := hex.EncodeToString(sum[:])
 
@@ -92,11 +102,8 @@ func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaTyp
 
 	if s.blobs == nil {
 		return "", apperr.InvalidInput(
-			"содержимое %d байт больше предела %d, а внешнее хранилище не настроено (SDLC_BLOB_DIR)",
-			len(content), InlineMaxBytes)
-	}
-	if s.blobMax > 0 && len(content) > s.blobMax {
-		return "", apperr.InvalidInput("содержимое %d байт больше предела %d", len(content), s.blobMax)
+			"содержимое %d байт больше предела %d, а внешнее хранилище не настроено (SDLC_BLOB_DIR или SDLC_BLOB_S3_BUCKET)",
+			len(content), blobstore.InlineMaxBytes)
 	}
 	uri, err := s.blobs.Put(ctx, sha, content, mediaType)
 	if err != nil {

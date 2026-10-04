@@ -180,12 +180,19 @@ func run() error {
 	return nil
 }
 
-// useBlobStore включает вынос крупного содержимого, если задан каталог или
-// бакет. Без них всё лежит inline, а содержимое больше предела отбивается.
+// useBlobStore передаёт хранилищу пределы содержимого и включает вынос
+// крупного, если задан каталог или бакет. Без них всё лежит inline, а
+// содержимое больше min(4 МиБ, SDLC_BLOB_MAX_BYTES) отбивается.
 func useBlobStore(cfg config.Config, store *postgres.Store, log *slog.Logger) error {
 	blobs, err := blobstore.Open(cfg.BlobS3, cfg.BlobDir)
-	if err != nil || blobs == nil {
+	if err != nil {
 		return err
+	}
+	if blobs == nil {
+		store.UseBlobStore(nil, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
+		log.Info("внешнее хранилище содержимого не настроено, всё лежит в базе",
+			"max_bytes", min(blobstore.InlineMaxBytes, cfg.BlobMaxBytes))
+		return nil
 	}
 	store.UseBlobStore(blobs, cfg.BlobInlineMaxBytes, cfg.BlobMaxBytes)
 	log.Info("внешнее хранилище содержимого", "store", blobs,

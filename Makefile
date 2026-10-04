@@ -19,13 +19,23 @@ test:
 # Интеграционные проверки идут по настоящей схеме: инкрементальность прогона
 # индексации и гибридный поиск живут в связке с базой и на моках не ловятся.
 # База выделенная — тест сносит в ней схему целиком.
+#
+# Какую базу брать, решает dev/stack.sh test-db: стек задачи KEY, иначе стек,
+# поднятый из этой рабочей копии, иначе (пустой ответ) — общий стек make up.
+# Стек есть, но стоит, — ошибка, а не тихий уход в общий: там чужие тесты.
+#
+# -p 1: база одна на все пакеты, а каждый начинает с чистой схемы —
+# параллельные пакеты снесли бы её друг у друга посреди прогона.
 test-integration:
-	docker compose -f dev/docker-compose.yml exec -T postgres \
-		psql -U sdlc -d postgres -c 'CREATE DATABASE sdlc_test' 2>/dev/null || true
-	# -p 1: база одна на все пакеты, а каждый начинает с чистой схемы —
-	# параллельные пакеты снесли бы её друг у друга посреди прогона.
-	SDLC_TEST_DATABASE_URL='postgres://sdlc:sdlc@localhost:55432/sdlc_test?sslmode=disable' \
-		go test ./... -count=1 -p 1
+	@url=$$(dev/stack.sh test-db $(KEY)) || exit 1; \
+	if [ -z "$$url" ]; then \
+		docker compose -f dev/docker-compose.yml exec -T postgres \
+			psql -U sdlc -d postgres -c 'CREATE DATABASE sdlc_test' >/dev/null 2>&1 || true; \
+		url='postgres://sdlc:sdlc@localhost:55432/sdlc_test?sslmode=disable'; \
+		echo 'общий стек (make up)'; \
+	fi; \
+	echo "интеграционные тесты идут в $$url"; \
+	SDLC_TEST_DATABASE_URL="$$url" go test ./... -count=1 -p 1
 
 lint:
 	go vet ./...

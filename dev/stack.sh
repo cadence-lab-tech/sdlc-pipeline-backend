@@ -6,6 +6,9 @@
 #   dev/stack.sh ls              — какие стеки заняты
 #   dev/stack.sh logs CLAB-59    — логи api
 #   dev/stack.sh psql CLAB-59    — psql в базу стека
+#   dev/stack.sh test-db [KEY]   — завести sdlc_test в базе стека и напечатать
+#                                  её адрес (для make test-integration); без
+#                                  KEY — стек, поднятый из этой рабочей копии
 #   dev/stack.sh down CLAB-59    — снести вместе с данными
 #
 # Зачем. Параллельно идут несколько задач, и у каждой свой агент. Общий стек
@@ -127,6 +130,31 @@ wait_ready() {
     die "стек поднялся, но /readyz не ответил за три минуты: dev/stack.sh logs $KEY"
 }
 
+# Выделенная база интеграционных тестов в Postgres стека: тест сносит в ней
+# схему целиком, поэтому рядом с базой приложения, а не вместо неё.
+test_db_url() { printf 'postgres://sdlc:sdlc@localhost:%s/sdlc_test?sslmode=disable' "$POSTGRES_PORT"; }
+
+# Стек, поднятый из этой рабочей копии: SOURCE в реестре совпадает с её корнем.
+# Сравнение по физическому пути — worktree может лежать за символической
+# ссылкой, а SOURCE записан тем путём, каким стек поднимали. Печатает ключ;
+# стека нет — пусто; стеков несколько — ошибка, выбирать за человека нельзя.
+stack_for_copy() {
+    local here f src found=
+    here=$(cd "$dev/.." && pwd -P)
+    for f in "$registry"/*.env; do
+        [ -e "$f" ] || continue
+        src=$(sed -n 's/^SOURCE=//p' "$f")
+        src=$(cd "$src" 2>/dev/null && pwd -P) || continue
+        if [ "$src" = "$here" ]; then
+            found="$found${found:+ }$(sed -n 's/^KEY=//p' "$f")"
+        fi
+    done
+    case "$found" in
+    *" "*) die "из этой копии подняты стеки нескольких задач ($found): укажите ключ — make test-integration KEY=<ключ>" ;;
+    esac
+    printf '%s' "$found"
+}
+
 print_env() {
     # SDLC_API_URL намеренно не экспортируется: его читает и clab, и агент,
     # экспортировав его, увёл бы CLI из рабочего инстанса в локальный стек.
@@ -136,13 +164,14 @@ print_env() {
 export CLAB_STACK_API=http://localhost:$API_PORT
 export CLAB_STACK_MCP=http://localhost:$API_PORT/mcp/projects/SDLC
 export CLAB_STACK_DB=postgres://sdlc:sdlc@localhost:$POSTGRES_PORT/sdlc?sslmode=disable
+export CLAB_STACK_TEST_DB=$(test_db_url)
 export SDLC_UI_PORT=$UI_PORT
 # интерфейс: SDLC_API_URL=\$CLAB_STACK_API npm run dev
 EOF
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || die "что делать? up|down|stop|env|ls|logs|psql|e2e"
+[ -n "$cmd" ] || die "что делать? up|down|stop|env|ls|logs|psql|e2e|test-db"
 shift || true
 
 case "$cmd" in
@@ -200,6 +229,29 @@ e2e)
     load_or_create "${1:?какой задаче}"
     SDLC_API_URL="http://localhost:$API_PORT/v1" "$dev/e2e.sh"
     ;;
+test-db)
+    # Выбор базы для make test-integration: вся логика реестра здесь, Makefile
+    # его формат не читает. Стек не найден по копии — пустой вывод и код 0:
+    # тогда тесты идут в общий стек, как до стеков на задачу. Стек найден, но
+    # стоит, — ошибка: тихий уход в общий стек снёс бы схему соседям.
+    key=${1:-}
+    if [ -z "$key" ]; then
+        key=$(stack_for_copy)
+        [ -n "$key" ] || exit 0
+    fi
+    load_or_create "$key"
+    stack_env
+    if ! dc exec -T postgres pg_isready -U sdlc -d postgres >/dev/null 2>&1; then
+        die "Postgres стека $KEY не отвечает (стек остановлен?): dev/stack.sh up $KEY"
+    fi
+    if [ "$(dc exec -T postgres psql -U sdlc -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'sdlc_test'")" != 1 ]; then
+        dc exec -T postgres psql -U sdlc -d postgres -qc 'CREATE DATABASE sdlc_test' >/dev/null \
+            || die "не удалось завести sdlc_test в стеке $KEY"
+    fi
+    printf 'стек задачи %s (compose-проект %s)\n' "$KEY" "$PROJECT" >&2
+    test_db_url
+    echo
+    ;;
 stop)
     load_or_create "${1:?какой задаче}"
     stack_env
@@ -213,6 +265,6 @@ down)
     echo "стек задачи $KEY снесён вместе с данными"
     ;;
 *)
-    die "неизвестная команда $cmd: up|down|stop|env|ls|logs|psql|e2e"
+    die "неизвестная команда $cmd: up|down|stop|env|ls|logs|psql|e2e|test-db"
     ;;
 esac

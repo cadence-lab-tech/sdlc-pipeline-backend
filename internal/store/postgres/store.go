@@ -28,7 +28,9 @@ type Querier interface {
 type Store struct {
 	pool *pgxpool.Pool
 	// Внешнее хранилище крупного содержимого; nil — всё лежит inline.
-	blobs     BlobStore
+	blobs BlobStore
+	// Пределы содержимого, задаёт UseBlobStore. Ноль — не задан: порог inline
+	// тогда blobstore.InlineMaxBytes, общего предела нет.
 	inlineMax int
 	blobMax   int
 }

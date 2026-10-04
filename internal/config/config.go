@@ -119,7 +119,8 @@ type Config struct {
 	DefaultActor string
 
 	// Вынос крупного содержимого из базы. Пустой BlobDir — всё лежит inline,
-	// а содержимое больше InlineMaxBytes отбивается.
+	// а содержимое больше min(blobstore.InlineMaxBytes, BlobMaxBytes)
+	// отбивается. Соотношение пределов — checkBlobLimits.
 	BlobDir            string
 	BlobInlineMaxBytes int
 	BlobMaxBytes       int
@@ -433,6 +434,9 @@ func Load() (Config, error) {
 	if c.BlobMaxBytes, err = envPositiveInt("SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes, ""); err != nil {
 		return c, err
 	}
+	if err := checkBlobLimits(c.BlobInlineMaxBytes, c.BlobMaxBytes); err != nil {
+		return c, err
+	}
 	// MinIO и совместимые умеют только path-style, у AWS работает и он же.
 	if c.BlobS3.PathStyle, err = envBool("SDLC_BLOB_S3_PATH_STYLE", true); err != nil {
 		return c, err
@@ -472,6 +476,24 @@ func Load() (Config, error) {
 	}
 
 	return c, nil
+}
+
+// checkBlobLimits сверяет пределы содержимого между собой. Порог inline —
+// где содержимое лежит, общий предел — сколько принимается вовсе, поэтому
+// порог не больше предела. И не больше потолка blobstore.InlineMaxBytes:
+// мегабайты в строке таблицы — ровно то, от чего спасает вынос. Проверка
+// безусловна, как и проверка на непозитивные значения: противоречивая пара не
+// должна лежать незамеченной до дня, когда включат внешнее хранилище.
+func checkBlobLimits(inline, maxBytes int) error {
+	if inline > maxBytes {
+		return fmt.Errorf("SDLC_BLOB_INLINE_MAX_BYTES (%d) больше SDLC_BLOB_MAX_BYTES (%d): "+
+			"порог хранения в базе не может превышать предел принимаемого содержимого", inline, maxBytes)
+	}
+	if inline > blobstore.InlineMaxBytes {
+		return fmt.Errorf("SDLC_BLOB_INLINE_MAX_BYTES (%d) больше потолка %d (4 МиБ): "+
+			"крупнее в базе не хранится, такое содержимое уходит во внешнее хранилище", inline, blobstore.InlineMaxBytes)
+	}
+	return nil
 }
 
 func env(key, def string) string {
