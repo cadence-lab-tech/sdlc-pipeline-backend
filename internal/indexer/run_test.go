@@ -1,9 +1,13 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -565,5 +569,119 @@ func TestRunOfDeletedProjectWritesNothing(t *testing.T) {
 	}
 	if files != 0 {
 		t.Fatalf("прогон записал %d файлов по удалённому проекту", files)
+	}
+}
+
+// Индексатор собран с пределом файла выше того, что примет хранилище
+// содержимого (CLAB-82; config.Load такую пару не пропускает). Файл крупнее
+// предела блоба пропускается, как файл крупнее предела индексатора: без
+// скачивания, без ошибки прогона, со строкой warn в логе.
+func TestFileAboveBlobLimitSkipped(t *testing.T) {
+	store, pool := testStore(t)
+	ctx := context.Background()
+	const blobMax = 4096
+	store.UseBlobStore(nil, 1024, blobMax)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	big := "// " + strings.Repeat("x", blobMax) + "\n"
+	src := &fakeSource{
+		repo: "sdlc-pipeline-backend",
+		head: "c1",
+		commits: map[string]map[string]string{
+			"c1": {
+				"internal/workflow/engine.go": engineV1,
+				"internal/generated/big.go":   big,
+			},
+		},
+	}
+	// Предел индексатора по умолчанию — 512 КиБ, выше предела блоба.
+	ix := New(store, src, embed.Hash{}, log, Options{ChunkChars: 400, EmbedBatch: 8})
+	if _, err := ix.Enqueue(ctx); err != nil {
+		t.Fatalf("постановка в очередь: %v", err)
+	}
+	run, err := ix.RunNext(ctx)
+	if err != nil || run == nil {
+		t.Fatalf("прогон упал на файле крупнее предела блоба: %v (лог: %s)", err, logBuf.String())
+	}
+	if run.State != "completed" {
+		t.Fatalf("прогон в состоянии %q, ждали completed", run.State)
+	}
+	if run.FilesIndexed != 1 {
+		t.Fatalf("проиндексировано %d файлов, ждали один обычный", run.FilesIndexed)
+	}
+
+	paths := map[string]bool{}
+	rows, err := pool.Query(ctx, `SELECT path FROM code_files WHERE index_run_id = $1`, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		paths[p] = true
+	}
+	if !paths["internal/workflow/engine.go"] || paths["internal/generated/big.go"] {
+		t.Fatalf("в code_files ждали только обычный файл: %v", paths)
+	}
+	var bigBlobs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM blobs WHERE size_bytes = $1`, len(big)).Scan(&bigBlobs); err != nil {
+		t.Fatal(err)
+	}
+	if bigBlobs != 0 {
+		t.Fatal("содержимое крупного файла легло в blobs")
+	}
+
+	out := logBuf.String()
+	var warn string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "internal/generated/big.go") {
+			warn = line
+		}
+	}
+	if warn == "" {
+		t.Fatalf("в логе нет warn о пропущенном файле: %s", out)
+	}
+	for _, want := range []string{"blob_limit=" + strconv.Itoa(blobMax), "size=" + strconv.Itoa(len(big))} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("в строке warn нет %q: %s", want, warn)
+		}
+	}
+}
+
+// Предел индексатора ниже предела блоба — отсев по-прежнему по нему, молча:
+// охрана хранилища не срабатывает и в лог не пишет.
+func TestIndexLimitBelowBlobLimitSkipsSilently(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	store.UseBlobStore(nil, 1024, 64<<20)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	src := &fakeSource{
+		repo: "sdlc-pipeline-backend",
+		head: "c1",
+		commits: map[string]map[string]string{
+			"c1": {
+				"internal/workflow/lease.go": "package workflow\n\nfunc Lease() {}\n",
+				"internal/generated/big.go":  "// " + strings.Repeat("y", 2000) + "\n",
+			},
+		},
+	}
+	ix := New(store, src, embed.Hash{}, log, Options{MaxFileBytes: 1000, ChunkChars: 400, EmbedBatch: 8})
+	if _, err := ix.Enqueue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := ix.RunNext(ctx)
+	if err != nil || run == nil || run.FilesIndexed != 1 {
+		t.Fatalf("прогон: %v (run=%+v)", err, run)
+	}
+	if strings.Contains(logBuf.String(), "internal/generated/big.go") {
+		t.Fatalf("отсев пределом индексатора не должен писать в лог: %s", logBuf.String())
 	}
 }

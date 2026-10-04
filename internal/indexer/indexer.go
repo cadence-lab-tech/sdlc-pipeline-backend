@@ -285,9 +285,20 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		return counters, cache, permanent("листинг дерева %s обрезан провайдером: репозиторий слишком велик для индексации целиком", repo)
 	}
 
+	// Предел хранилища — охрана для индексатора, собранного в обход
+	// config.Load (CLAB-82): там предел индексатора не выше предела блоба, и
+	// здесь она не срабатывает. Файл, который хранилище не примет, иначе ронял
+	// бы прогон на записи, а не пропускался.
+	blobLimit := ix.store.BlobLimit()
 	files := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		if skip, _ := SkipPath(e.Path, e.Size, ix.opts.MaxFileBytes, run.ExcludeGlobs); skip {
+			continue
+		}
+		if blobLimit > 0 && e.Size > int64(blobLimit) {
+			ix.log.Warn("файл больше предела хранилища содержимого пропущен",
+				"repository", repo.String(), "commit", short(run.CommitSHA), "path", e.Path,
+				"size", e.Size, "blob_limit", blobLimit, "max_file_bytes", ix.opts.MaxFileBytes)
 			continue
 		}
 		files = append(files, e)
