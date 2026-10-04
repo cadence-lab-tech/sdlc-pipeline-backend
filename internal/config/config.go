@@ -274,16 +274,16 @@ func Load() (Config, error) {
 	if c.MCPEnabled, err = envBool("SDLC_MCP_ENABLED", c.MCPEnabled); err != nil {
 		return c, err
 	}
-	if c.SessionTTL, err = envDuration("SDLC_SESSION_TTL", c.SessionTTL); err != nil {
+	if c.SessionTTL, err = envPositiveDuration("SDLC_SESSION_TTL", c.SessionTTL); err != nil {
 		return c, err
 	}
-	if c.LeaseTTL, err = envDuration("SDLC_LEASE_TTL", c.LeaseTTL); err != nil {
+	if c.LeaseTTL, err = envPositiveDuration("SDLC_LEASE_TTL", c.LeaseTTL); err != nil {
 		return c, err
 	}
-	if c.HeartbeatInterval, err = envDuration("SDLC_HEARTBEAT_INTERVAL", c.HeartbeatInterval); err != nil {
+	if c.HeartbeatInterval, err = envPositiveDuration("SDLC_HEARTBEAT_INTERVAL", c.HeartbeatInterval); err != nil {
 		return c, err
 	}
-	if c.LeaseSweepInterval, err = envDuration("SDLC_LEASE_SWEEP_INTERVAL", c.LeaseSweepInterval); err != nil {
+	if c.LeaseSweepInterval, err = envPositiveDuration("SDLC_LEASE_SWEEP_INTERVAL", c.LeaseSweepInterval); err != nil {
 		return c, err
 	}
 	if c.HeartbeatInterval >= c.LeaseTTL {
@@ -299,7 +299,7 @@ func Load() (Config, error) {
 	if c.BlobGCLimit, err = envInt("SDLC_BLOB_GC_LIMIT", c.BlobGCLimit); err != nil {
 		return c, err
 	}
-	if c.BlobGCMinAge, err = envDuration("SDLC_BLOB_GC_MIN_AGE", c.BlobGCMinAge); err != nil {
+	if c.BlobGCMinAge, err = envNonNegativeDuration("SDLC_BLOB_GC_MIN_AGE", c.BlobGCMinAge, "без выдержки, кандидат удаляется сразу"); err != nil {
 		return c, err
 	}
 	if c.BlobGCDryRun, err = envBool("SDLC_BLOB_GC_DRY_RUN", c.BlobGCDryRun); err != nil {
@@ -323,7 +323,7 @@ func Load() (Config, error) {
 	if c.EmbeddingCacheGCInterval, err = envDuration("SDLC_EMBEDDING_CACHE_GC_INTERVAL", c.EmbeddingCacheGCInterval); err != nil {
 		return c, err
 	}
-	if c.EmbeddingCacheTTL, err = envDuration("SDLC_EMBEDDING_CACHE_TTL", c.EmbeddingCacheTTL); err != nil {
+	if c.EmbeddingCacheTTL, err = envNonNegativeDuration("SDLC_EMBEDDING_CACHE_TTL", c.EmbeddingCacheTTL, "не вытеснять по сроку"); err != nil {
 		return c, err
 	}
 	if c.EmbeddingCacheMaxRows, err = envInt("SDLC_EMBEDDING_CACHE_MAX_ROWS", c.EmbeddingCacheMaxRows); err != nil {
@@ -335,7 +335,7 @@ func Load() (Config, error) {
 	if c.EmbeddingCacheGCDryRun, err = envBool("SDLC_EMBEDDING_CACHE_GC_DRY_RUN", c.EmbeddingCacheGCDryRun); err != nil {
 		return c, err
 	}
-	if c.EmbeddingCacheTouchAfter, err = envDuration("SDLC_EMBEDDING_CACHE_TOUCH_AFTER", c.EmbeddingCacheTouchAfter); err != nil {
+	if c.EmbeddingCacheTouchAfter, err = envNonNegativeDuration("SDLC_EMBEDDING_CACHE_TOUCH_AFTER", c.EmbeddingCacheTouchAfter, "отмечать каждое попадание"); err != nil {
 		return c, err
 	}
 	if c.EmbeddingCacheGCEnabled && c.EmbeddingCacheGCInterval <= 0 {
@@ -357,22 +357,22 @@ func Load() (Config, error) {
 	if c.IndexEnabled, err = envBool("SDLC_INDEX_ENABLED", c.IndexEnabled); err != nil {
 		return c, err
 	}
-	if c.IndexInterval, err = envDuration("SDLC_INDEX_INTERVAL", c.IndexInterval); err != nil {
+	if c.IndexInterval, err = envPositiveDuration("SDLC_INDEX_INTERVAL", c.IndexInterval); err != nil {
 		return c, err
 	}
-	if c.IndexStuckAfter, err = envDuration("SDLC_INDEX_STUCK_AFTER", c.IndexStuckAfter); err != nil {
+	if c.IndexStuckAfter, err = envPositiveDuration("SDLC_INDEX_STUCK_AFTER", c.IndexStuckAfter); err != nil {
 		return c, err
 	}
-	if c.IndexMaxFileBytes, err = envInt("SDLC_INDEX_MAX_FILE_BYTES", c.IndexMaxFileBytes); err != nil {
+	if c.IndexMaxFileBytes, err = envPositiveInt("SDLC_INDEX_MAX_FILE_BYTES", c.IndexMaxFileBytes, indexSizeHint); err != nil {
 		return c, err
 	}
-	if c.IndexMaxFiles, err = envInt("SDLC_INDEX_MAX_FILES", c.IndexMaxFiles); err != nil {
+	if c.IndexMaxFiles, err = envPositiveInt("SDLC_INDEX_MAX_FILES", c.IndexMaxFiles, indexSizeHint); err != nil {
 		return c, err
 	}
-	if c.ChunkMaxChars, err = envInt("SDLC_INDEX_CHUNK_CHARS", c.ChunkMaxChars); err != nil {
+	if c.ChunkMaxChars, err = envPositiveInt("SDLC_INDEX_CHUNK_CHARS", c.ChunkMaxChars, indexSizeHint); err != nil {
 		return c, err
 	}
-	if c.EmbeddingBatch, err = envInt("SDLC_EMBEDDINGS_BATCH", c.EmbeddingBatch); err != nil {
+	if c.EmbeddingBatch, err = envPositiveInt("SDLC_EMBEDDINGS_BATCH", c.EmbeddingBatch, indexSizeHint); err != nil {
 		return c, err
 	}
 	// Провайдер по умолчанию выводится из наличия ключа: забыть переменную
@@ -427,10 +427,10 @@ func Load() (Config, error) {
 			fmt.Fprintln(os.Stderr, "SDLC_AUTH_MODE=token без SDLC_ADMIN_TOKEN: первого администратора завести некому")
 		}
 	}
-	if c.BlobInlineMaxBytes, err = envInt("SDLC_BLOB_INLINE_MAX_BYTES", c.BlobInlineMaxBytes); err != nil {
+	if c.BlobInlineMaxBytes, err = envPositiveInt("SDLC_BLOB_INLINE_MAX_BYTES", c.BlobInlineMaxBytes, ""); err != nil {
 		return c, err
 	}
-	if c.BlobMaxBytes, err = envInt("SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes); err != nil {
+	if c.BlobMaxBytes, err = envPositiveInt("SDLC_BLOB_MAX_BYTES", c.BlobMaxBytes, ""); err != nil {
 		return c, err
 	}
 	// MinIO и совместимые умеют только path-style, у AWS работает и он же.
@@ -440,23 +440,23 @@ func Load() (Config, error) {
 	if c.BlobS3.Bucket != "" && c.BlobS3.Endpoint == "" && c.BlobS3.Region != "" {
 		c.BlobS3.Endpoint = "https://s3." + c.BlobS3.Region + ".amazonaws.com"
 	}
-	if c.IndexPollInterval, err = envDuration("SDLC_INDEX_POLL_INTERVAL", c.IndexPollInterval); err != nil {
+	if c.IndexPollInterval, err = envPositiveDuration("SDLC_INDEX_POLL_INTERVAL", c.IndexPollInterval); err != nil {
 		return c, err
 	}
-	if c.IndexRetainRuns, err = envInt("SDLC_INDEX_RETAIN_RUNS", c.IndexRetainRuns); err != nil {
+	if c.IndexRetainRuns, err = envPositiveInt("SDLC_INDEX_RETAIN_RUNS", c.IndexRetainRuns, retainRunsHint); err != nil {
 		return c, err
 	}
 
 	if c.LogJSON, err = envBool("SDLC_LOG_JSON", c.Env != "development"); err != nil {
 		return c, err
 	}
-	if c.ShutdownTimeout, err = envDuration("SDLC_SHUTDOWN_TIMEOUT", c.ShutdownTimeout); err != nil {
+	if c.ShutdownTimeout, err = envPositiveDuration("SDLC_SHUTDOWN_TIMEOUT", c.ShutdownTimeout); err != nil {
 		return c, err
 	}
-	if c.RequestTimeout, err = envDuration("SDLC_REQUEST_TIMEOUT", c.RequestTimeout); err != nil {
+	if c.RequestTimeout, err = envNonNegativeDuration("SDLC_REQUEST_TIMEOUT", c.RequestTimeout, "без таймаута"); err != nil {
 		return c, err
 	}
-	if c.ConnectTimeout, err = envDuration("SDLC_DB_CONNECT_TIMEOUT", c.ConnectTimeout); err != nil {
+	if c.ConnectTimeout, err = envNonNegativeDuration("SDLC_DB_CONNECT_TIMEOUT", c.ConnectTimeout, "не ждать базу, одна попытка"); err != nil {
 		return c, err
 	}
 	if n, err := envInt("SDLC_DB_MAX_CONNS", int(c.MaxConns)); err != nil {
@@ -513,6 +513,66 @@ func envDuration(key string, def time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(v)
 	if err != nil {
 		return def, fmt.Errorf("%s: %q не длительность (нужно 15s, 2m)", key, v)
+	}
+	return d, nil
+}
+
+// Подсказки к ошибкам непозитивных размеров: оператор, поставивший ноль, обычно
+// хотел что-то выключить, и текст говорит, как это делается на самом деле.
+const (
+	indexSizeHint  = "индексация так не выключается, выключается она через SDLC_INDEX_ENABLED"
+	retainRunsHint = "чистка старых прогонов индексации так не выключается; " +
+		"чтобы хранить больше, задайте большое число"
+)
+
+// envPositiveInt читает размер или предохранитель, у которого нет осмысленного
+// нуля. Слой ниже такие значения не отвергает, а молча меняет: индексатор и
+// клиент эмбеддингов подставляют умолчание (indexer.New, Chunks, NewVoyage),
+// хранилище артефактов поднимает порог inline до 4 МиБ вместо 256 КиБ или
+// снимает предел размера (inlineLimit, PutBlob), чистка прогонов выключается
+// (Prune). Оператор узнавал бы об этом по поведению — ошибка на старте дешевле.
+// Охраны у потребителей остаются: их зовут и в обход конфигурации.
+func envPositiveInt(key string, def int, hint string) (int, error) {
+	n, err := envInt(key, def)
+	if err != nil {
+		return n, err
+	}
+	if n <= 0 {
+		if hint != "" {
+			return n, fmt.Errorf("%s (%d) не больше нуля: %s", key, n, hint)
+		}
+		return n, fmt.Errorf("%s (%d) не больше нуля", key, n)
+	}
+	return n, nil
+}
+
+// envPositiveDuration читает период или срок, у которого нет осмысленного
+// нуля. Периоды тикеров воркера (SDLC_LEASE_SWEEP_INTERVAL,
+// SDLC_INDEX_INTERVAL, SDLC_INDEX_POLL_INTERVAL) иначе роняют его паникой
+// time.NewTicker — даже при выключенной индексации, сроки аренды, сессии и
+// застрявшего прогона молча подменяются умолчанием слоем ниже, а нулевой
+// SDLC_SHUTDOWN_TIMEOUT рвёт незавершённые запросы при остановке.
+func envPositiveDuration(key string, def time.Duration) (time.Duration, error) {
+	d, err := envDuration(key, def)
+	if err != nil {
+		return d, err
+	}
+	if d <= 0 {
+		return d, fmt.Errorf("%s (%s) не больше нуля", key, d)
+	}
+	return d, nil
+}
+
+// envNonNegativeDuration читает длительность, у которой ноль задуман и описан в
+// таблице переменных (zero — что он означает), а отрицательное значение —
+// промах знаком, который иначе молча работал бы как ноль.
+func envNonNegativeDuration(key string, def time.Duration, zero string) (time.Duration, error) {
+	d, err := envDuration(key, def)
+	if err != nil {
+		return d, err
+	}
+	if d < 0 {
+		return d, fmt.Errorf("%s (%s) меньше нуля; 0 — %s", key, d, zero)
 	}
 	return d, nil
 }
