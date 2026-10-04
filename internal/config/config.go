@@ -65,6 +65,10 @@ type Config struct {
 	// Индексация репозиториев. Кодовая база под задачами двигается непрерывно,
 	// поэтому прогон наследует у предыдущего всё, что не изменилось, и
 	// выкачивает только изменившееся.
+	//
+	// IndexMaxFileBytes — файлы крупнее не индексируются. Он не больше
+	// действующего предела блоба: содержимое файла ложится в blobs
+	// (checkIndexBlobLimit).
 	IndexEnabled      bool
 	IndexInterval     time.Duration
 	IndexStuckAfter   time.Duration
@@ -437,6 +441,10 @@ func Load() (Config, error) {
 	if err := checkBlobLimits(c.BlobInlineMaxBytes, c.BlobMaxBytes); err != nil {
 		return c, err
 	}
+	if err := checkIndexBlobLimit(c.IndexMaxFileBytes, c.BlobMaxBytes,
+		c.BlobS3.Bucket != "" || c.BlobDir != ""); err != nil {
+		return c, err
+	}
 	// MinIO и совместимые умеют только path-style, у AWS работает и он же.
 	if c.BlobS3.PathStyle, err = envBool("SDLC_BLOB_S3_PATH_STYLE", true); err != nil {
 		return c, err
@@ -492,6 +500,26 @@ func checkBlobLimits(inline, maxBytes int) error {
 	if inline > blobstore.InlineMaxBytes {
 		return fmt.Errorf("SDLC_BLOB_INLINE_MAX_BYTES (%d) больше потолка %d (4 МиБ): "+
 			"крупнее в базе не хранится, такое содержимое уходит во внешнее хранилище", inline, blobstore.InlineMaxBytes)
+	}
+	return nil
+}
+
+// checkIndexBlobLimit сверяет предел индексатора с пределом блоба (CLAB-82):
+// содержимое проиндексированного файла пишется в blobs, и файл, который
+// хранилище не примет, ронял бы прогон, а не пропускался. Действующий предел
+// блоба — SDLC_BLOB_MAX_BYTES, а без внешнего хранилища — ещё и потолок
+// blobstore.InlineMaxBytes; external — то же условие, по которому
+// blobstore.Open выбирает хранилище. Проверка безусловна по
+// SDLC_INDEX_ENABLED, как и проверка пары блобов: противоречие не должно
+// лежать незамеченным до дня, когда включат индексацию.
+func checkIndexBlobLimit(indexMax, blobMax int, external bool) error {
+	if indexMax > blobMax {
+		return fmt.Errorf("SDLC_INDEX_MAX_FILE_BYTES (%d) больше SDLC_BLOB_MAX_BYTES (%d): "+
+			"содержимое файла не примет хранилище, и прогон индексации упадёт на нём", indexMax, blobMax)
+	}
+	if !external && indexMax > blobstore.InlineMaxBytes {
+		return fmt.Errorf("SDLC_INDEX_MAX_FILE_BYTES (%d) больше потолка %d (4 МиБ) без внешнего хранилища: "+
+			"уменьшите предел или задайте SDLC_BLOB_DIR или SDLC_BLOB_S3_BUCKET", indexMax, blobstore.InlineMaxBytes)
 	}
 	return nil
 }
