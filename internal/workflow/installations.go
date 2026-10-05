@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -305,14 +306,17 @@ func (e *Engine) probeInstallation(ctx context.Context, installationID int64, ow
 	return nil
 }
 
-// ProjectGitHub — что показать в настройках проекта без похода в сеть:
-// установки команды-владельца и учётные данные проекта.
+// ProjectGitHub — что показать в настройках проекта при открытии: установки
+// команды-владельца, учётные данные проекта и состояние приложения из кэша.
+// К провайдеру ходит не чаще раза за срок кэша и не ждёт его дольше пяти
+// секунд; свежая проверка — CheckGitHubAccess по кнопке.
 type ProjectGitHub struct {
 	OwnerTeamKey   string                      `json:"owner_team_key"`
 	Installations  []domain.GitHubInstallation `json:"installations"`
 	InstallationID *int64                      `json:"installation_id,omitempty"`
 	CredentialRef  *string                     `json:"credential_ref,omitempty"`
 	AppConfigured  bool                        `json:"app_configured"`
+	App            github.AppStatus            `json:"app"`
 }
 
 func (e *Engine) ProjectGitHub(ctx context.Context, projectKey string) (ProjectGitHub, error) {
@@ -332,7 +336,43 @@ func (e *Engine) ProjectGitHub(ctx context.Context, projectKey string) (ProjectG
 			return ProjectGitHub{}, err
 		}
 	}
+	// После базы: отказ в проекте не должен стоить похода к провайдеру.
+	out.App = e.appStatus(ctx, false)
 	return out, nil
+}
+
+// ProjectHealth — сводка состояния проекта для оболочки интерфейса
+// (CLAB-79): отметки в меню на каждой странице проекта.
+//
+// Зовут её все участники на каждом переходе, поэтому она только читает: кэш
+// состояния приложения и базу. Вешать на неё новую проверку у провайдера
+// нельзя. Текста провайдера и расхождения часов здесь нет намеренно: сводку
+// видит любой участник, а подробности — те же, кто видел их в настройках.
+type ProjectHealth struct {
+	App                    ProjectHealthApp `json:"app"`
+	UnreadableRepositories int              `json:"unreadable_repositories"`
+}
+
+type ProjectHealthApp struct {
+	State     github.AppState `json:"state"`
+	CheckedAt *time.Time      `json:"checked_at,omitempty"`
+}
+
+func (e *Engine) ProjectHealth(ctx context.Context, projectKey string) (ProjectHealth, error) {
+	q := e.store.DB()
+	project, err := e.store.GetProjectByKey(ctx, q, projectKey)
+	if err != nil {
+		return ProjectHealth{}, err
+	}
+	unreadable, err := e.store.CountUnreadableRepositories(ctx, q, project.ID)
+	if err != nil {
+		return ProjectHealth{}, err
+	}
+	app := e.appStatus(ctx, false)
+	return ProjectHealth{
+		App:                    ProjectHealthApp{State: app.State, CheckedAt: app.CheckedAt},
+		UnreadableRepositories: unreadable,
+	}, nil
 }
 
 // pickInstallation подбирает репозиторию, привязываемому по координатам,

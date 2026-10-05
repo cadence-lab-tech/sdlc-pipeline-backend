@@ -635,6 +635,15 @@ func parseVector(s string) ([]float32, error) {
 	return out, nil
 }
 
+// IndexFailure — репозиторий перестал читаться (CLAB-79). Source: run —
+// провалился прогон индексации, head — не читается голова отслеживаемой
+// ветки, и прогон поэтому даже не заводится.
+type IndexFailure struct {
+	Since  time.Time `json:"since"`
+	Error  string    `json:"error"`
+	Source string    `json:"source"`
+}
+
 // IndexStatusRow — состояние индекса одного репозитория для UI и проверки.
 type IndexStatusRow struct {
 	Repository     string     `json:"repository"`
@@ -653,7 +662,67 @@ type IndexStatusRow struct {
 	Attempt        *int       `json:"attempt,omitempty"`
 	Error          *string    `json:"error,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	// Failure — репозиторий не читается повторно; nil — читается либо
+	// провал пока единичный.
+	Failure *IndexFailure `json:"failure,omitempty"`
 }
+
+// indexHealthFrom — репозитории проекта ($1) с последним прогоном (ir) и
+// серией провалов чтения головы (hf). Общая FROM-часть строки состояния
+// индекса и счётчика сводки: правило «репозиторий не читается» обязано быть
+// одним на оба ответа, иначе отметка в меню и таблица разойдутся.
+//
+// hf — серия от двух проходов подряд по ветке, которая всё ещё отслеживается;
+// из нескольких веток берётся та, что не читается дольше.
+const indexHealthFrom = `
+	FROM repositories r
+	LEFT JOIN github_installations gi ON gi.installation_id = r.installation_id
+	LEFT JOIN LATERAL (
+	    SELECT * FROM repo_index_runs
+	    WHERE repository_id = r.id
+	    ORDER BY created_at DESC LIMIT 1) ir ON true
+	LEFT JOIN LATERAL (
+	    SELECT first_failed_at, error FROM repository_head_failures
+	    WHERE repository_id = r.id AND failures >= 2
+	      AND branch = ANY (r.watch_branches)
+	    ORDER BY first_failed_at LIMIT 1) hf ON true
+	WHERE r.project_id = $1`
+
+// indexFailureSource — правило «репозиторий не читается» (CLAB-79), NULL —
+// читается. Повторный провал — это прогон в failed, прогон в очереди после
+// второй неудачной попытки либо голова, не прочитанная на двух проходах
+// воркера подряд. Одна неудача, за которой идёт успех, сигнала не даёт.
+// Репозиторий вне целей индексации (выключен, убран из установки, установка
+// снята) сигнала не несёт: его не читают намеренно.
+//
+// Класс ошибки не фильтруется: 404 на репозитории оставляет знание таким же
+// устаревшим, как непринятое приложение.
+const indexFailureSource = `CASE
+	    WHEN NOT (r.index_enabled AND ` + indexTargetLive + `) THEN NULL
+	    WHEN ir.state = 'failed'
+	      OR (ir.state = 'queued' AND ir.error IS NOT NULL AND ir.attempt >= 2) THEN 'run'
+	    WHEN hf.first_failed_at IS NOT NULL THEN 'head'
+	END`
+
+// indexFailureSince — с какого времени не читается. У прогона это начало
+// серии: первый неудавшийся прогон после последнего завершённого. Коммиты
+// приходят каждый день, и «с» по последнему прогону показывало бы вчера при
+// индексе, который стоит третью неделю.
+const indexFailureSince = `CASE ` + indexFailureSource + `
+	    WHEN 'run' THEN coalesce((
+	        SELECT min(x.created_at) FROM repo_index_runs x
+	        WHERE x.repository_id = r.id AND x.error IS NOT NULL
+	          AND x.created_at > coalesce((
+	              SELECT max(c.created_at) FROM repo_index_runs c
+	              WHERE c.repository_id = r.id AND c.state = 'completed'), '-infinity')),
+	        ir.created_at)
+	    WHEN 'head' THEN hf.first_failed_at
+	END`
+
+const indexFailureError = `CASE ` + indexFailureSource + `
+	    WHEN 'run' THEN ir.error
+	    WHEN 'head' THEN hf.error
+	END`
 
 // IndexStatus — по последнему прогону на репозиторий. Отношение reused к
 // indexed показывает, во что обошлась инкрементальность: на репозитории, где
@@ -663,13 +732,9 @@ func (s *Store) IndexStatus(ctx context.Context, q Querier, projectID uuid.UUID)
 		SELECT r.owner || '/' || r.name, r.index_enabled, r.watch_branches, r.last_indexed_at,
 		       ir.branch, ir.commit_sha, ir.state, ir.kind,
 		       ir.files_indexed, ir.files_reused, ir.chunks_indexed,
-		       ir.chunks_reused, ir.chunks_embedded, ir.attempt, ir.error, ir.finished_at
-		FROM repositories r
-		LEFT JOIN LATERAL (
-		    SELECT * FROM repo_index_runs
-		    WHERE repository_id = r.id
-		    ORDER BY created_at DESC LIMIT 1) ir ON true
-		WHERE r.project_id = $1
+		       ir.chunks_reused, ir.chunks_embedded, ir.attempt, ir.error, ir.finished_at,
+		       `+indexFailureSource+`, `+indexFailureSince+`, `+indexFailureError+
+		indexHealthFrom+`
 		ORDER BY r.owner, r.name`, projectID)
 	if err != nil {
 		return nil, translate(err)
@@ -679,13 +744,54 @@ func (s *Store) IndexStatus(ctx context.Context, q Querier, projectID uuid.UUID)
 	out := []IndexStatusRow{}
 	for rows.Next() {
 		var r IndexStatusRow
+		var source, cause *string
+		var since *time.Time
 		if err := rows.Scan(&r.Repository, &r.Enabled, &r.Branches, &r.LastIndexedAt,
 			&r.Branch, &r.Commit, &r.State, &r.Kind,
 			&r.FilesIndexed, &r.FilesReused, &r.ChunksIndexed,
-			&r.ChunksReused, &r.ChunksEmbedded, &r.Attempt, &r.Error, &r.FinishedAt); err != nil {
+			&r.ChunksReused, &r.ChunksEmbedded, &r.Attempt, &r.Error, &r.FinishedAt,
+			&source, &since, &cause); err != nil {
 			return nil, translate(err)
+		}
+		if source != nil && since != nil {
+			r.Failure = &IndexFailure{Since: *since, Source: *source}
+			if cause != nil {
+				r.Failure.Error = *cause
+			}
 		}
 		out = append(out, r)
 	}
 	return out, translate(rows.Err())
+}
+
+// CountUnreadableRepositories — сколько репозиториев проекта не читается:
+// число строк IndexStatus с failure, по тому же правилу.
+func (s *Store) CountUnreadableRepositories(ctx context.Context, q Querier, projectID uuid.UUID) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE `+indexFailureSource+` IS NOT NULL)`+
+		indexHealthFrom, projectID).Scan(&n)
+	return n, translate(err)
+}
+
+// RecordHeadFailure отмечает, что голова ветки не прочиталась на этом
+// проходе воркера. Начало серии повторный провал не двигает.
+func (s *Store) RecordHeadFailure(ctx context.Context, q Querier, repoID uuid.UUID, branch, cause string) error {
+	_, err := q.Exec(ctx, `
+		INSERT INTO repository_head_failures (repository_id, branch, error)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (repository_id, branch) DO UPDATE
+		SET failures = repository_head_failures.failures + 1,
+		    last_failed_at = now(),
+		    error = excluded.error`, repoID, branch, cause)
+	return translate(err)
+}
+
+// ClearHeadFailure снимает серию: голова прочиталась. Зовётся на каждом
+// удачном чтении, в том числе когда новый прогон не заводится — коммит уже
+// проиндексирован.
+func (s *Store) ClearHeadFailure(ctx context.Context, q Querier, repoID uuid.UUID, branch string) error {
+	_, err := q.Exec(ctx, `
+		DELETE FROM repository_head_failures WHERE repository_id = $1 AND branch = $2`, repoID, branch)
+	return translate(err)
 }

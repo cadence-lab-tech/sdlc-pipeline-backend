@@ -211,6 +211,10 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/projects/:projectKey/search", viewer, s.search)
 		v1.POST("/projects/:projectKey/search", viewer, s.search)
 		v1.GET("/projects/:projectKey/index", viewer, s.indexStatus)
+		// Сводка для оболочки интерфейса (CLAB-79): отметки в меню на каждой
+		// странице проекта. Уровень viewer — её зовут все участники; только
+		// кэш состояния приложения и счётчик из базы.
+		v1.GET("/projects/:projectKey/health", viewer, s.projectHealth)
 		v1.GET("/tasks/:taskKey/state", viewer, s.getTaskState)
 		v1.POST("/tasks/:taskKey/claim", agent, s.claimTask)
 		v1.POST("/tasks/:taskKey/heartbeat", agent, s.heartbeat)

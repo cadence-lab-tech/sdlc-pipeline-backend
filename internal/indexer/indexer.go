@@ -158,6 +158,13 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 			// останавливать обход остальных.
 			ix.log.Warn("учётные данные репозитория не разрешились",
 				"repository", t.Repository(), "error", err)
+			// Без учётных данных не читается ни одна ветка: до головы дело
+			// не дошло, но для знания проекта это тот же провал чтения.
+			for _, branch := range t.Branches {
+				if err := ix.store.RecordHeadFailure(ctx, ix.store.DB(), t.RepositoryID, branch, err.Error()); err != nil {
+					return queued, err
+				}
+			}
 			continue
 		}
 		for _, branch := range t.Branches {
@@ -166,10 +173,25 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 				// Недоступный репозиторий не должен останавливать остальные:
 				// у одного проекта их несколько, и токен мог протухнуть на
 				// одном из них.
-				ix.logHeadError(t.Repository(), branch, err)
+				hint := ix.logHeadError(t.Repository(), branch, err)
+				// Лог воркера никто не читает: провал пишется в базу, откуда
+				// его достают состояние индекса и сводка проекта (CLAB-79).
+				// Прогон при этом не заводится — индексировать нечего.
+				cause := err.Error()
+				if hint != "" {
+					cause += " — " + hint
+				}
+				if err := ix.store.RecordHeadFailure(ctx, ix.store.DB(), t.RepositoryID, branch, cause); err != nil {
+					return queued, err
+				}
 				continue
 			}
 			delete(ix.headErrors, t.Repository()+"@"+branch)
+			// Голова прочиталась — серия провалов снята, даже если прогон
+			// ниже не заведётся: коммит уже проиндексирован.
+			if err := ix.store.ClearHeadFailure(ctx, ix.store.DB(), t.RepositoryID, branch); err != nil {
+				return queued, err
+			}
 			run, created, err := ix.store.EnqueueIndexRun(ctx, ix.store.DB(), postgres.EnqueueIndexRunInput{
 				RepositoryID: t.RepositoryID,
 				Branch:       branch,
@@ -192,8 +214,9 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 
 // logHeadError не повторяет одну и ту же жалобу каждый тик: приватный
 // репозиторий без токена — это состояние настройки, а не событие, и в логе
-// оно должно появиться один раз, а не раз в минуту навсегда.
-func (ix *Indexer) logHeadError(repository, branch string, err error) {
+// оно должно появиться один раз, а не раз в минуту навсегда. Возвращает
+// подсказку к ошибке, если она есть: она же уходит в сигнал для человека.
+func (ix *Indexer) logHeadError(repository, branch string, err error) string {
 	key := repository + "@" + branch
 	message := err.Error()
 	hint := ""
@@ -206,11 +229,12 @@ func (ix *Indexer) logHeadError(repository, branch string, err error) {
 	if ix.headErrors[key] == message {
 		ix.log.Debug("голова ветки по-прежнему не читается",
 			"repository", repository, "branch", branch, "error", err)
-		return
+		return hint
 	}
 	ix.headErrors[key] = message
 	ix.log.Warn("голова ветки не прочитана",
 		"repository", repository, "branch", branch, "error", err, "hint", hint)
+	return hint
 }
 
 // RunNext забирает из очереди один прогон и исполняет его.

@@ -184,8 +184,8 @@ func (s *Server) setProjectGitHub(c *gin.Context) {
 	c.JSON(http.StatusOK, project)
 }
 
-// projectGitHub — установки команды-владельца и учётные данные проекта, без
-// похода в сеть: это открывается вместе с настройками.
+// projectGitHub — установки команды-владельца, учётные данные проекта и
+// состояние приложения из кэша: это открывается вместе с настройками.
 func (s *Server) projectGitHub(c *gin.Context) {
 	out, err := s.engine.ProjectGitHub(c.Request.Context(), c.Param("projectKey"))
 	if err != nil {
@@ -225,7 +225,12 @@ func (s *Server) teamInstallations(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"installations": list})
+	// Состояние приложения — из кэша движка и только после проверки прав:
+	// установки собирает Auth, а до провайдера достаёт один движок.
+	c.JSON(http.StatusOK, gin.H{
+		"installations": list,
+		"app":           s.engine.GitHubAppStatus(c.Request.Context()),
+	})
 }
 
 type connectGitHubRequest struct {
@@ -268,6 +273,17 @@ func (s *Server) checkProjectGitHub(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, status)
+}
+
+// projectHealth — сводка состояния проекта для оболочки интерфейса: читает
+// кэш и базу, в провайдера на каждый запрос не ходит.
+func (s *Server) projectHealth(c *gin.Context) {
+	out, err := s.engine.ProjectHealth(c.Request.Context(), c.Param("projectKey"))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // ── участники ───────────────────────────────────────────────────────────────
