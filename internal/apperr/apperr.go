@@ -34,6 +34,12 @@ const (
 	// либо предъявлен, но прав на действие нет.
 	CodeUnauthenticated Code = "unauthenticated"
 	CodeForbidden       Code = "forbidden"
+
+	// Провайдер не принял учётные данные самого инстанса (CLAB-78): например,
+	// ключ GitHub App или часы машины. Не invalid_input — вызывающий это не
+	// починит, и не internal — текст и есть польза: в нём сказано, что
+	// проверить администратору инстанса.
+	CodeProviderMisconfigured Code = "provider_misconfigured"
 )
 
 type Error struct {

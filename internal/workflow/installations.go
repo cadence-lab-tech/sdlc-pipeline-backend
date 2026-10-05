@@ -297,6 +297,9 @@ func (e *Engine) probeInstallation(ctx context.Context, installationID int64, ow
 		return nil
 	}
 	if err := e.github.CheckRepo(ctx, &installationID, "", owner, name); err != nil {
+		if refusal := appRefusal(err); refusal != nil {
+			return refusal
+		}
 		return apperr.InvalidInput("репозиторий %s/%s недоступен установке %d: %v", owner, name, installationID, err)
 	}
 	return nil
@@ -336,6 +339,9 @@ func (e *Engine) ProjectGitHub(ctx context.Context, projectKey string) (ProjectG
 // живую установку команды-владельца, которой он доступен. Так `clab repo
 // add` и агент получают ту же маршрутизацию вебхуков, что и выбор из списка.
 // Ни одна не подошла — репозиторий остаётся на учётных данных проекта.
+// Отказ в учётных данных приложения — не «не подошла»: он одинаков для всех
+// установок, и перебор на нём останавливается с ошибкой, а не уводит
+// репозиторий на учётные данные проекта мимо маршрутизации вебхуков.
 func (e *Engine) pickInstallation(ctx context.Context, project domain.Project, owner, name string) (*int64, error) {
 	if project.OwnerTeamID == nil || e.github == nil || !e.github.AppConfigured() {
 		return nil, nil
@@ -348,9 +354,13 @@ func (e *Engine) pickInstallation(ctx context.Context, project domain.Project, o
 		if !inst.Active() {
 			continue
 		}
-		if e.github.CheckRepo(ctx, &inst.InstallationID, "", owner, name) == nil {
+		err := e.github.CheckRepo(ctx, &inst.InstallationID, "", owner, name)
+		if err == nil {
 			id := inst.InstallationID
 			return &id, nil
+		}
+		if refusal := appRefusal(err); refusal != nil {
+			return nil, refusal
 		}
 	}
 	return nil, nil

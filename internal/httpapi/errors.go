@@ -35,6 +35,10 @@ func statusFor(code apperr.Code) int {
 		return http.StatusUnauthorized
 	case apperr.CodeForbidden:
 		return http.StatusForbidden
+	case apperr.CodeProviderMisconfigured:
+		// Отказ пришёл от провайдера за сервисом, а не от запроса: тот же
+		// смысл, что у шлюза, получившего негодный ответ от вышестоящего.
+		return http.StatusBadGateway
 	case apperr.CodeConflict, apperr.CodeGatesNotSatisfied,
 		apperr.CodeTransitionNotAllowed, apperr.CodeOutOfTaskScope,
 		apperr.CodeTaskNotClaimable, apperr.CodeLeaseHeldByOther,
