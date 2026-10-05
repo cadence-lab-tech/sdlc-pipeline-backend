@@ -128,6 +128,12 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64) (stri
 		case resp.StatusCode == http.StatusUnauthorized && attempt == 0 &&
 			a.observeClock(resp.Header.Get("Date")):
 			continue
+		case resp.StatusCode == http.StatusUnauthorized:
+			// Утверждение приложения не принято — после поправки часов,
+			// если она была. 403 сюда не относится: он остаётся прежним
+			// путём, как и любой другой отказ.
+			return "", fmt.Errorf("%w: github %d на токен установки %d: %s%s", ErrAppRejected,
+				resp.StatusCode, installationID, snippet(body), a.clockNote())
 		case resp.StatusCode != http.StatusCreated:
 			return "", fmt.Errorf("github %d на токен установки %d: %s%s",
 				resp.StatusCode, installationID, snippet(body), a.clockNote())

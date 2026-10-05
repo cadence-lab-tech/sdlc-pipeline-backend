@@ -10,6 +10,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -187,8 +188,28 @@ func (e *Engine) probeRepoAccess(ctx context.Context, source github.CredentialSo
 	if err == nil {
 		return nil
 	}
+	if refusal := appRefusal(err); refusal != nil {
+		return refusal
+	}
 	return apperr.InvalidInput("репозиторий %s/%s недоступен (%s): %v",
 		owner, name, describeSource(source, creds), err)
+}
+
+// appRefusal переводит в ошибку домена отказ провайдера в учётных данных
+// самого приложения (github.ErrAppRejected) и возвращает nil для любого
+// другого отказа: тот остаётся недоступностью репозитория у вызывающего.
+// Репозиторий в тексте не назван — отказ не про него, а про инстанс, и
+// человеку, привязывающему репозиторий, незачем идти в права установки.
+func appRefusal(err error) error {
+	if !errors.Is(err, github.ErrAppRejected) {
+		return nil
+	}
+	// Ответ провайдера уже в тексте, поэтому причина не оборачивается: иначе
+	// Error() повторил бы её дважды.
+	return apperr.New(apperr.CodeProviderMisconfigured,
+		"%v — это настройка инстанса, а не доступ к репозиторию: администратору инстанса "+
+			"проверить ключ приложения (SDLC_GITHUB_APP_KEY_FILE), его идентификатор "+
+			"(SDLC_GITHUB_APP_ID) и часы машины", err)
 }
 
 // describeSource — источник учётных данных словами, теми же, что в колонке
