@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -290,6 +291,105 @@ func TestInstallationTokenErrorNamesClockDrift(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "часы машины") {
 		t.Fatalf("в отказе нет приписки про часы: %v", err)
+	}
+}
+
+// Отказ в учётных данных приложения (CLAB-78) — класс ошибки, а не текст:
+// движок отличает его от недоступности репозитория по метке ErrAppRejected.
+// Метка ставится и после попытки с поправкой часов, и без неё; текст
+// начинается с описания отказа и хранит статус, ответ провайдера и приписку
+// про часы.
+func TestInstallationTokenMarksAppRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		drift time.Duration
+		note  bool
+	}{
+		{name: "часы в порядке", drift: 0},
+		{name: "часы разошлись", drift: 3 * time.Minute, note: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts++
+				w.Header().Set("Date", time.Now().Add(-tc.drift).UTC().Format(http.TimeFormat))
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+			}))
+			defer srv.Close()
+
+			app, err := NewApp(srv.URL, "12345", testAppKey(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = app.InstallationToken(context.Background(), 42)
+			if !errors.Is(err, ErrAppRejected) {
+				t.Fatalf("401 на токен установки без метки отказа приложения: %v", err)
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Fatalf("отказ приложения помечен как «не найдено»: %v", err)
+			}
+			text := err.Error()
+			if !strings.HasPrefix(text, ErrAppRejected.Error()) {
+				t.Fatalf("текст начинается не с описания отказа приложения: %q", text)
+			}
+			for _, want := range []string{"401", "токен установки 42", "Bad credentials"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("в отказе нет %q: %q", want, text)
+				}
+			}
+			if got := strings.Contains(text, "часы машины"); got != tc.note {
+				t.Fatalf("приписка про часы: %v, ожидали %v: %q", got, tc.note, text)
+			}
+			if want := 1 + map[bool]int{true: 1}[tc.note]; attempts != want {
+				t.Fatalf("походов %d вместо %d", attempts, want)
+			}
+		})
+	}
+}
+
+// Прочие отказы на токен установки метку отказа приложения не получают:
+// 404 — установки нет у провайдера, 403 и прочее — прежним путём.
+func TestInstallationTokenOtherRefusalsAreNotAppRejection(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusForbidden,
+		http.StatusUnprocessableEntity, http.StatusInternalServerError} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"message":"nope"}`))
+		}))
+		app, err := NewApp(srv.URL, "12345", testAppKey(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = app.InstallationToken(context.Background(), 42)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%d: отказ не вернулся", status)
+		}
+		if errors.Is(err, ErrAppRejected) {
+			t.Fatalf("%d помечен как отказ приложения: %v", status, err)
+		}
+		if got := errors.Is(err, ErrNotFound); got != (status == http.StatusNotFound) {
+			t.Fatalf("%d: ErrNotFound = %v: %v", status, got, err)
+		}
+	}
+}
+
+// Отказ на сам репозиторий — не отказ приложения, каким бы ни был статус.
+func TestRepoRefusalIsNotAppRejection(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"message":"nope"}`))
+		}))
+		_, err := New(srv.URL, "ghs_token").Repo(context.Background(), Repo{"acme", "api"})
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%d: отказ не вернулся", status)
+		}
+		if errors.Is(err, ErrAppRejected) {
+			t.Fatalf("%d на репозиторий помечен как отказ приложения: %v", status, err)
+		}
 	}
 }
 

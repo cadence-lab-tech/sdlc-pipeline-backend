@@ -76,3 +76,19 @@ func TestRepoRemoveIsPrintedInHelp(t *testing.T) {
 		t.Fatalf("подсказка сходила на сервер %d раз", rec.calls)
 	}
 }
+
+// Отказ приложения инстанса (CLAB-78) печатается `<код>: <текст>` — тем же
+// путём, что любая ошибка домена; код приходит из ответа как есть.
+func TestRepoAddPrintsProviderMisconfigured(t *testing.T) {
+	const reply = `{"error":{"code":"provider_misconfigured","message":"приложение GitHub инстанса не принято провайдером: github 401"}}`
+	c, rec := newInviteClient(t, 502, reply)
+	t.Setenv("SDLC_PROJECT", "CLAB")
+
+	err := cmdRepo(context.Background(), c, []string{"add", "acme/api", "--installation", "42"})
+	if rec.method != "POST" || rec.path != "/v1/projects/CLAB/repositories" {
+		t.Fatalf("запрос: %s %s", rec.method, rec.path)
+	}
+	if err == nil || err.Error() != "provider_misconfigured: приложение GitHub инстанса не принято провайдером: github 401" {
+		t.Fatalf("ошибка: %v", err)
+	}
+}

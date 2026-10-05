@@ -474,6 +474,12 @@ type fakeGitHub struct {
 	// mixed — в провайдера пришли разом установка и секрет: Provider.Client
 	// взял бы секрет, и проверка соврала бы о том, чем читают.
 	mixed bool
+	// appRejected — провайдер не принимает учётные данные приложения: любой
+	// поход через установку кончается отказом с меткой github.ErrAppRejected,
+	// как у App.InstallationToken на 401 (CLAB-78). Секреты не затронуты.
+	appRejected bool
+	// calls — сколько раз спрашивали провайдера.
+	calls int
 }
 
 func (f *fakeGitHub) AppConfigured() bool { return true }
@@ -495,6 +501,11 @@ func (f *fakeGitHub) CheckRepo(_ context.Context, installationID *int64, secretR
 		f.checked = map[string]string{}
 	}
 	f.checked[repo] = creds
+	f.calls++
+	if f.appRejected && installationID != nil && secretRef == "" {
+		return fmt.Errorf("%w: github 401 на токен установки %d: {\"message\":\"Bad credentials\"}",
+			github.ErrAppRejected, *installationID)
+	}
 	if f.allowed[repo] || f.grants[creds+" "+repo] {
 		return nil
 	}
