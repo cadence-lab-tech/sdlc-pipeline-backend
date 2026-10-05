@@ -389,6 +389,13 @@ func renderIndex(raw json.RawMessage) error {
 			ChunksIndexed *int       `json:"chunks_indexed"`
 			Error         *string    `json:"error"`
 			LastIndexedAt *time.Time `json:"last_indexed_at"`
+			// Failure — репозиторий не читается повторно (CLAB-79). Сервер
+			// старше CLI поля не отдаёт, и вывод остаётся прежним.
+			Failure *struct {
+				Since  *time.Time `json:"since"`
+				Error  string     `json:"error"`
+				Source string     `json:"source"`
+			} `json:"failure"`
 		} `json:"repositories"`
 	}
 	if err := decode(raw, &out); err != nil {
@@ -415,6 +422,21 @@ func renderIndex(raw json.RawMessage) error {
 		t.add(r.Repository, enabled, dash(ptr(r.Branch)), short(ptr(r.Commit)), state, files, chunks, ago(r.LastIndexedAt))
 	}
 	t.print()
+	// Колонка прогона режет ошибку, чтобы таблица не разъезжалась; по ней
+	// однажды не заметили восемнадцать дней стоявшей индексации. Репозиторий,
+	// который не читается, назван отдельно — с полным текстом и временем.
+	for _, r := range out.Repositories {
+		if r.Failure == nil {
+			continue
+		}
+		what := "прогон индексации не проходит"
+		if r.Failure.Source == "head" {
+			what = "голова ветки не читается"
+		}
+		fmt.Printf("\n%s не читается с %s (%s): %s\n  %s\n",
+			r.Repository, when(r.Failure.Since), ago(r.Failure.Since), what,
+			strings.TrimSpace(r.Failure.Error))
+	}
 	return nil
 }
 
@@ -429,7 +451,8 @@ func deref(n *int) int {
 // чем проверяли (решение 0034).
 func renderGitHubCheck(raw json.RawMessage) error {
 	var out struct {
-		AppConfigured bool `json:"app_configured"`
+		AppConfigured bool           `json:"app_configured"`
+		App           *appStatusView `json:"app"`
 		Repositories  []struct {
 			Repository     string `json:"repository"`
 			OK             bool   `json:"ok"`
@@ -442,9 +465,7 @@ func renderGitHubCheck(raw json.RawMessage) error {
 	if err := decode(raw, &out); err != nil {
 		return err
 	}
-	if !out.AppConfigured {
-		fmt.Println("Приложение у инстанса не настроено: установки не выписывают токенов.")
-	}
+	printAppStatus(out.App, out.AppConfigured)
 	t := newTable("РЕПОЗИТОРИЙ", "ДОСТУП", "ЧЕМ ПРОВЕРЯЛИ", "ЧТО НЕ ТАК")
 	for _, r := range out.Repositories {
 		access := "есть"
@@ -452,6 +473,106 @@ func renderGitHubCheck(raw json.RawMessage) error {
 			access = "нет"
 		}
 		t.add(r.Repository, access, credentialSource(r.Source, r.InstallationID, r.CredentialRef), dash(r.Error))
+	}
+	t.print()
+	return nil
+}
+
+// appStatusView — состояние приложения GitHub у провайдера, каким его отдают
+// ручки настроек (CLAB-79).
+type appStatusView struct {
+	State              string     `json:"state"`
+	Error              string     `json:"error"`
+	CheckedAt          *time.Time `json:"checked_at"`
+	ClockOffsetSeconds *int       `json:"clock_offset_seconds"`
+}
+
+const appNotConfiguredLine = "Приложение у инстанса не настроено: установки не выписывают токенов."
+
+// appStatusLines — состояние приложения словами. «Не удалось проверить» не
+// называет ключ непринятым: недоступный GitHub — не отозванный ключ.
+// Сервер старше CLI поля app не отдаёт — тогда остаётся прежняя строка про
+// app_configured и ничего сверх.
+func appStatusLines(app *appStatusView, configured bool) []string {
+	if app == nil {
+		if !configured {
+			return []string{appNotConfiguredLine}
+		}
+		return nil
+	}
+	var lines []string
+	switch app.State {
+	case "ok":
+		lines = append(lines, "Приложение GitHub: ключ принят"+checkedSuffix(app.CheckedAt)+".")
+	case "rejected":
+		lines = append(lines,
+			"Приложение GitHub: ключ не принят провайдером"+checkedSuffix(app.CheckedAt)+": "+dash(app.Error),
+			"Это настройка инстанса, чинит её администратор инстанса. Что проверить: ключ приложения "+
+				"(SDLC_GITHUB_APP_KEY_FILE), идентификатор приложения (SDLC_GITHUB_APP_ID), часы машины.")
+	case "unknown":
+		lines = append(lines, "Приложение GitHub: не удалось проверить"+checkedSuffix(app.CheckedAt)+": "+dash(app.Error))
+	case "not_configured":
+		lines = append(lines, appNotConfiguredLine)
+	default:
+		// Состояние от сервера новее CLI показывается как есть.
+		lines = append(lines, "Приложение GitHub: "+dash(app.State))
+	}
+	if app.ClockOffsetSeconds != nil {
+		offset := time.Duration(*app.ClockOffsetSeconds) * time.Second
+		direction := "отстают от времени провайдера"
+		if offset < 0 {
+			direction = "спешат относительно времени провайдера"
+		}
+		lines = append(lines, fmt.Sprintf("Часы машины %s на %s — проверьте синхронизацию времени.",
+			direction, offset.Abs()))
+	}
+	return lines
+}
+
+func checkedSuffix(at *time.Time) string {
+	if at == nil {
+		return ""
+	}
+	return " (проверено " + when(at) + ")"
+}
+
+func printAppStatus(app *appStatusView, configured bool) {
+	for _, line := range appStatusLines(app, configured) {
+		fmt.Println(line)
+	}
+}
+
+// renderTeamGitHub — установки приложения на команде и состояние самого
+// приложения: живая установка при непринятом ключе ничего не читает.
+func renderTeamGitHub(raw json.RawMessage) error {
+	var out struct {
+		App           *appStatusView `json:"app"`
+		Installations []struct {
+			InstallationID int64      `json:"installation_id"`
+			AccountLogin   string     `json:"account_login"`
+			AccountType    string     `json:"account_type"`
+			CreatedAt      *time.Time `json:"created_at"`
+			SuspendedAt    *time.Time `json:"suspended_at"`
+			RemovedAt      *time.Time `json:"removed_at"`
+		} `json:"installations"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	// Без поля app сервер старше CLI: о приложении сказать нечего.
+	printAppStatus(out.App, true)
+	t := newTable("УСТАНОВКА", "АККАУНТ", "ТИП", "СОСТОЯНИЕ", "ПОДКЛЮЧЕНА")
+	for _, i := range out.Installations {
+		state := "работает"
+		switch {
+		case i.RemovedAt != nil:
+			state = "снята"
+		case i.SuspendedAt != nil:
+			state = "приостановлена"
+		case out.App != nil && out.App.State == "rejected":
+			state = "ключ приложения не принят"
+		}
+		t.add(fmt.Sprint(i.InstallationID), i.AccountLogin, dash(i.AccountType), state, when(i.CreatedAt))
 	}
 	t.print()
 	return nil

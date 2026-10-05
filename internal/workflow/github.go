@@ -26,8 +26,13 @@ import (
 type GitHubAccess interface {
 	CheckRepo(ctx context.Context, installationID *int64, secretRef, owner, name string) error
 	// AppConfigured — есть ли у инстанса приложение. Без него установку
-	// проекту прописывать бессмысленно, и настройки это показывают.
+	// проекту прописывать бессмысленно, и настройки это показывают. Это
+	// «настроено», а не «работает»: работает ли — отвечает AppStatus.
 	AppConfigured() bool
+	// AppStatus — принимает ли провайдер ключ приложения (CLAB-79). fresh —
+	// свежая проверка у провайдера; без неё ответ берётся из кэша процесса и
+	// в сеть ходит не чаще раза за срок кэша.
+	AppStatus(ctx context.Context, fresh bool) github.AppStatus
 }
 
 // SetGitHubInput — привязка проекта к установке приложения или к секрету.
@@ -64,10 +69,27 @@ type RepoAccessResult struct {
 // GitHubStatus — что показывать в настройках проекта: чем система ходит в
 // провайдера и достаёт ли она до каждого репозитория области.
 type GitHubStatus struct {
-	InstallationID *int64             `json:"installation_id,omitempty"`
-	CredentialRef  *string            `json:"credential_ref,omitempty"`
-	AppConfigured  bool               `json:"app_configured"`
-	Repositories   []RepoAccessResult `json:"repositories"`
+	InstallationID *int64  `json:"installation_id,omitempty"`
+	CredentialRef  *string `json:"credential_ref,omitempty"`
+	AppConfigured  bool    `json:"app_configured"`
+	// App — состояние приложения у провайдера, проверенное этим же вызовом.
+	App          github.AppStatus   `json:"app"`
+	Repositories []RepoAccessResult `json:"repositories"`
+}
+
+// appStatus — состояние приложения инстанса. Движок без доступа к
+// провайдеру отвечает «не настроено»: проверять нечем и нечего.
+func (e *Engine) appStatus(ctx context.Context, fresh bool) github.AppStatus {
+	if e.github == nil {
+		return github.AppStatus{State: github.AppNotConfigured}
+	}
+	return e.github.AppStatus(ctx, fresh)
+}
+
+// GitHubAppStatus — состояние приложения из кэша: для ответов, которые
+// собирают не здесь (установки команды отдаёт Auth).
+func (e *Engine) GitHubAppStatus(ctx context.Context) github.AppStatus {
+	return e.appStatus(ctx, false)
 }
 
 // CheckGitHubAccess опрашивает провайдера по каждому репозиторию проекта теми
@@ -76,6 +98,10 @@ type GitHubStatus struct {
 // Ходит в сеть, поэтому вызывается только из настроек проекта — по кнопке.
 // Ни гейт, ни прогон индексации этим не пользуются: гейты в сеть не ходят
 // (решение 0020), а прогон и так упрётся в ошибку доступа сам.
+//
+// Приложение проверяется у провайдера на каждый вызов — и когда
+// репозиториев нет, и когда все они на токене инстанса: проверка, которая
+// отвечает «всё хорошо», не коснувшись сети, ничего не проверяет.
 func (e *Engine) CheckGitHubAccess(ctx context.Context, projectKey string) (GitHubStatus, error) {
 	q := e.store.DB()
 	project, err := e.store.GetProjectByKey(ctx, q, projectKey)
@@ -90,6 +116,7 @@ func (e *Engine) CheckGitHubAccess(ctx context.Context, projectKey string) (GitH
 		InstallationID: project.GitHubInstallationID,
 		CredentialRef:  project.GitHubCredentialRef,
 		AppConfigured:  e.github != nil && e.github.AppConfigured(),
+		App:            e.appStatus(ctx, true),
 		Repositories:   []RepoAccessResult{},
 	}
 	if e.github == nil {

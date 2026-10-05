@@ -480,9 +480,26 @@ type fakeGitHub struct {
 	appRejected bool
 	// calls — сколько раз спрашивали провайдера.
 	calls int
+	// appChecks — сколько раз спрашивали состояние приложения свежей
+	// проверкой и сколько — из кэша (CLAB-79).
+	appChecks, appCached int
 }
 
 func (f *fakeGitHub) AppConfigured() bool { return true }
+
+func (f *fakeGitHub) AppStatus(_ context.Context, fresh bool) github.AppStatus {
+	if fresh {
+		f.appChecks++
+	} else {
+		f.appCached++
+	}
+	now := time.Now().UTC()
+	if f.appRejected {
+		return github.AppStatus{State: github.AppRejected, CheckedAt: &now,
+			Error: `github 401 на утверждение приложения: {"message":"Bad credentials"}`}
+	}
+	return github.AppStatus{State: github.AppOK, CheckedAt: &now}
+}
 
 func (f *fakeGitHub) CheckRepo(_ context.Context, installationID *int64, secretRef, owner, name string) error {
 	f.installationID = installationID
