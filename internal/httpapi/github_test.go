@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
@@ -25,6 +26,12 @@ import (
 type rejectedApp struct{}
 
 func (rejectedApp) AppConfigured() bool { return true }
+
+func (rejectedApp) AppStatus(context.Context, bool) github.AppStatus {
+	now := time.Now().UTC()
+	return github.AppStatus{State: github.AppRejected, CheckedAt: &now,
+		Error: `github 401 на утверждение приложения: {"message":"Bad credentials"}`}
+}
 
 func (rejectedApp) CheckRepo(_ context.Context, installationID *int64, _, _, _ string) error {
 	if installationID == nil {

@@ -268,6 +268,10 @@ type githubAccess struct{ provider *github.Provider }
 
 func (g githubAccess) AppConfigured() bool { return g.provider.HasApp() }
 
+func (g githubAccess) AppStatus(ctx context.Context, fresh bool) github.AppStatus {
+	return g.provider.AppStatus(ctx, fresh)
+}
+
 func (g githubAccess) CheckRepo(ctx context.Context, installationID *int64, secretRef, owner, name string) error {
 	client, err := g.provider.Client(ctx, github.Credentials{
 		InstallationID: installationID, SecretRef: secretRef,

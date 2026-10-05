@@ -39,6 +39,17 @@ type App struct {
 	tokens map[int64]installationToken
 	// offset — поправка к местным часам, снятая с ответа провайдера.
 	offset time.Duration
+
+	// Кэш состояния приложения (app_status.go). Свой мьютекс: проверка под
+	// ним не идёт, но ждать исхода чужой проверки под mu значило бы держать
+	// выписку токенов установок.
+	statusMu      sync.Mutex
+	status        AppStatus
+	statusCached  bool
+	statusExpires time.Time
+	statusFlight  *appStatusFlight
+	// statusTimeout — предел ожидания провайдера на пути «из кэша».
+	statusTimeout time.Duration
 }
 
 type installationToken struct {
@@ -96,6 +107,8 @@ func NewApp(baseURL, appID string, keyPEM []byte) (*App, error) {
 		appID: appID, key: key, baseURL: baseURL,
 		http:   &http.Client{Timeout: 30 * time.Second},
 		tokens: map[int64]installationToken{},
+
+		statusTimeout: appStatusCachedTimeout,
 	}, nil
 }
 

@@ -107,11 +107,11 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		if key == "" {
 			return fmt.Errorf("clab team github <ключ команды>")
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/teams/"+url.PathEscape(key)+"/github/installations", nil, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderTeamGitHub, out))
 
 	case "plan":
 		// Тариф команды: без --set показывает действующий, с --set переводит
