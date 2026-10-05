@@ -23,7 +23,8 @@ type AppState string
 const (
 	// AppOK — провайдер принял утверждение приложения.
 	AppOK AppState = "ok"
-	// AppRejected — провайдер отбил утверждение (401) и после поправки часов.
+	// AppRejected — провайдер отбил утверждение: 401 и после поправки часов
+	// либо 404 — приложения с таким идентификатором у него нет.
 	AppRejected AppState = "rejected"
 	// AppUnknown — проверить не удалось: сеть, таймаут, 5xx, лимит. Это не
 	// отказ ключа, и показывать его как отказ значило бы повторить подмену
@@ -133,8 +134,12 @@ func (a *App) remember(status AppStatus) {
 // probe — один вопрос провайдеру: принимает ли он утверждение приложения.
 //
 // Правило то же, что у InstallationToken: 401 один раз перевыписывается
-// после измеренной поправки часов, 401 после неё — отказ. Всё, что не 200 и
-// не 401, — «не удалось проверить»: по такому ответу о ключе судить нельзя.
+// после измеренной поправки часов, 401 после неё — отказ. 404 — тоже отказ:
+// так провайдер отвечает на утверждение с идентификатором приложения,
+// которого у него нет («Integration not found»), и чинится это там же, где
+// ключ, — в настройке инстанса; часы тут ни при чём, перевыписывать нечего.
+// Всё остальное — «не удалось проверить»: по такому ответу о ключе судить
+// нельзя.
 func (a *App) probe(ctx context.Context) AppStatus {
 	for attempt := 0; ; attempt++ {
 		resp, body, err := a.getApp(ctx)
@@ -147,7 +152,7 @@ func (a *App) probe(ctx context.Context) AppStatus {
 		case resp.StatusCode == http.StatusUnauthorized && attempt == 0 &&
 			a.observeClock(resp.Header.Get("Date")):
 			continue
-		case resp.StatusCode == http.StatusUnauthorized:
+		case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusNotFound:
 			return a.stamp(AppStatus{State: AppRejected,
 				Error: fmt.Sprintf("github %d на утверждение приложения: %s", resp.StatusCode, snippet(body))})
 		default:

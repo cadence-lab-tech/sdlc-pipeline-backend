@@ -166,12 +166,45 @@ func TestAppStatusIgnoresSmallClockDrift(t *testing.T) {
 // A6: 5xx и лимит — «не удалось проверить», а не отказ ключа.
 func TestAppStatusUnknownOnProviderFailure(t *testing.T) {
 	for _, code := range []int{http.StatusInternalServerError, http.StatusBadGateway,
-		http.StatusTooManyRequests, http.StatusForbidden, http.StatusNotFound} {
+		http.StatusTooManyRequests, http.StatusForbidden} {
 		stub := newAppStub(t, respond(code, `{"message":"провайдеру плохо"}`))
 		status := stub.app(t).Status(context.Background())
 		if status.State != AppUnknown || status.Error == "" || status.CheckedAt == nil {
 			t.Fatalf("%d: состояние %+v", code, status)
 		}
+	}
+}
+
+// 404 на утверждение — отказ, а не «не удалось проверить»: так провайдер
+// отвечает на идентификатор приложения, которого у него нет. Перевыписывать
+// утверждение незачем — запрос один, даже если часы разошлись, — и исход
+// живёт в кэше полный срок, как любой отказ.
+func TestAppStatusRejectedOnUnknownApp(t *testing.T) {
+	const notFound = `{"message":"Integration not found","status":"404"}`
+	stub := newAppStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Date", time.Now().Add(3*time.Minute).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(notFound))
+	})
+	app := stub.app(t)
+	status := app.Status(context.Background())
+	if status.State != AppRejected || status.CheckedAt == nil {
+		t.Fatalf("состояние %+v", status)
+	}
+	if !strings.Contains(status.Error, "404") || !strings.Contains(status.Error, "Integration not found") {
+		t.Fatalf("текст отказа без ответа провайдера: %q", status.Error)
+	}
+	if got := stub.calls.Load(); got != 1 {
+		t.Fatalf("запросов /app %d вместо одного", got)
+	}
+	app.statusMu.Lock()
+	left := time.Until(app.statusExpires)
+	app.statusMu.Unlock()
+	if left <= appStatusUnknownTTL {
+		t.Fatalf("отказ закэширован на %s — как unknown", left)
+	}
+	if fresh := app.Check(context.Background()); fresh.State != AppRejected {
+		t.Fatalf("свежая проверка: %+v", fresh)
 	}
 }
 
