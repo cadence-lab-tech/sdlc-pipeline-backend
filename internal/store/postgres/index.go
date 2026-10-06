@@ -23,10 +23,12 @@ type IndexTarget struct {
 	Branches      []string
 	ExcludeGlobs  []string
 	CredentialRef *string
-	// Установка, которой читается репозиторий: своя, а без неё — проекта
-	// (решение 0034); и имя секрета проекта.
-	InstallationID       *int64
-	ProjectCredentialRef *string
+	// Установки репозитория и проекта и имя секрета проекта — по отдельности,
+	// как объявлены: между ними выбирает github.CredentialRefs.Resolve
+	// (решение 0034), а не запрос.
+	InstallationID        *int64
+	ProjectInstallationID *int64
+	ProjectCredentialRef  *string
 }
 
 func (t IndexTarget) Repository() string { return t.Owner + "/" + t.Name }
@@ -34,7 +36,7 @@ func (t IndexTarget) Repository() string { return t.Owner + "/" + t.Name }
 // indexTargetCols — столбцы цели с алиасами r (repositories) и p (projects).
 const indexTargetCols = `r.id, r.project_id, p.key, r.owner, r.name,
 	       r.watch_branches, r.exclude_globs, r.credential_ref,
-	       coalesce(r.installation_id, p.github_installation_id), p.github_credential_ref`
+	       r.installation_id, p.github_installation_id, p.github_credential_ref`
 
 // indexTargetLive — репозиторий читаем: не убран из установки, а его
 // установка (алиас gi, LEFT JOIN github_installations) не снята и не
@@ -47,7 +49,7 @@ func scanIndexTarget(row interface{ Scan(...any) error }) (IndexTarget, error) {
 	var t IndexTarget
 	err := row.Scan(&t.RepositoryID, &t.ProjectID, &t.ProjectKey,
 		&t.Owner, &t.Name, &t.Branches, &t.ExcludeGlobs, &t.CredentialRef,
-		&t.InstallationID, &t.ProjectCredentialRef)
+		&t.InstallationID, &t.ProjectInstallationID, &t.ProjectCredentialRef)
 	return t, err
 }
 
@@ -77,10 +79,12 @@ type IndexRun struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	ExcludeGlobs   []string   `json:"-"`
 	CredentialRef  *string    `json:"-"`
-	// Учётные данные проекта: установка приложения и имя секрета (решение
-	// 0028). Секрет репозитория, если он задан, частнее и побеждает.
-	InstallationID       *int64  `json:"-"`
-	ProjectCredentialRef *string `json:"-"`
+	// Установки репозитория и проекта и имя секрета проекта — по
+	// отдельности; порядок между ними и секретом репозитория выбирает
+	// github.CredentialRefs.Resolve (решение 0034).
+	InstallationID        *int64  `json:"-"`
+	ProjectInstallationID *int64  `json:"-"`
+	ProjectCredentialRef  *string `json:"-"`
 }
 
 const indexRunSelect = `
@@ -91,7 +95,7 @@ const indexRunSelect = `
 	       ir.chunks_reused, ir.chunks_embedded,
 	       ir.started_at, ir.finished_at, ir.error, ir.created_at,
 	       r.exclude_globs, r.credential_ref,
-	       coalesce(r.installation_id, p.github_installation_id), p.github_credential_ref
+	       r.installation_id, p.github_installation_id, p.github_credential_ref
 	FROM repo_index_runs ir
 	JOIN repositories r ON r.id = ir.repository_id
 	JOIN projects p ON p.id = r.project_id`
@@ -104,7 +108,8 @@ func scanIndexRun(row interface{ Scan(...any) error }) (IndexRun, error) {
 		&r.FilesIndexed, &r.FilesReused, &r.ChunksIndexed,
 		&r.ChunksReused, &r.ChunksEmbedded,
 		&r.StartedAt, &r.FinishedAt, &r.Error, &r.CreatedAt,
-		&r.ExcludeGlobs, &r.CredentialRef, &r.InstallationID, &r.ProjectCredentialRef)
+		&r.ExcludeGlobs, &r.CredentialRef, &r.InstallationID, &r.ProjectInstallationID,
+		&r.ProjectCredentialRef)
 	return r, err
 }
 
