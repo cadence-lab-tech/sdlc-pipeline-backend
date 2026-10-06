@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,12 +29,23 @@ import (
 
 const missingInstallation = 404
 
+// missingPullRequest и выше — номера PR, которых у провайдера нет: такая
+// ссылка не читается никакими учётными данными (CLAB-84).
+const missingPullRequest = 900
+
 type credentialProbe struct {
 	srv *httptest.Server
 
 	mu       sync.Mutex
-	issued   []int64  // установки, на которые выписывался токен
-	branches []string // Authorization запросов за головой ветки
+	issued   []int64        // установки, на которые выписывался токен
+	branches []string       // Authorization запросов за головой ветки
+	pulls    []probeRequest // запросы за PR
+	checks   []probeRequest // запросы за проверками коммита
+}
+
+// probeRequest — путь запроса к API провайдера и токен, с которым он ушёл.
+type probeRequest struct {
+	Path, Authorization string
 }
 
 func (p *credentialProbe) requests() (issued []int64, branches []string) {
@@ -42,7 +54,23 @@ func (p *credentialProbe) requests() (issued []int64, branches []string) {
 	return append([]int64(nil), p.issued...), append([]string(nil), p.branches...)
 }
 
+func (p *credentialProbe) pullRequests() (pulls, checks []probeRequest) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]probeRequest(nil), p.pulls...), append([]probeRequest(nil), p.checks...)
+}
+
 func newCredentialProbe(t *testing.T) (*credentialProbe, Source) {
+	t.Helper()
+	p, provider := newCredentialProvider(t, "token-instance")
+	return p, NewGitHubSource(provider)
+}
+
+// newCredentialProvider — провайдер на httptest с приложением, секретами
+// repo-secret и project-secret и заданным токеном инстанса (пустой — токена
+// у инстанса нет). Без токена PR не читается: так провайдер отвечает на
+// приватный репозиторий.
+func newCredentialProvider(t *testing.T, instanceToken string) (*credentialProbe, *github.Provider) {
 	t.Helper()
 	p := &credentialProbe{}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +97,36 @@ func newCredentialProbe(t *testing.T) (*credentialProbe, Source) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"commit": map[string]any{"sha": "c0ffee"}})
 			return
 		}
+		parts := strings.Split(r.URL.Path, "/")
+		// /repos/{owner}/{name}/pulls/{number}
+		if len(parts) == 6 && parts[1] == "repos" && parts[4] == "pulls" {
+			auth := r.Header.Get("Authorization")
+			p.mu.Lock()
+			p.pulls = append(p.pulls, probeRequest{r.URL.Path, auth})
+			p.mu.Unlock()
+			number, _ := strconv.Atoi(parts[5])
+			if auth == "" || number >= missingPullRequest {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": number, "state": "open",
+				"html_url": fmt.Sprintf("https://github.com/%s/%s/pull/%d", parts[2], parts[3], number),
+				"head":     map[string]any{"sha": "head-" + parts[5]},
+			})
+			return
+		}
+		// /repos/{owner}/{name}/commits/{sha}/check-runs
+		if len(parts) == 7 && parts[1] == "repos" && parts[4] == "commits" && parts[6] == "check-runs" {
+			p.mu.Lock()
+			p.checks = append(p.checks, probeRequest{r.URL.Path, r.Header.Get("Authorization")})
+			p.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "check_runs": []map[string]any{
+				{"name": "build", "status": "completed", "conclusion": "success"},
+			}})
+			return
+		}
 		t.Errorf("неожиданный запрос %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusTeapot)
 	}))
@@ -85,9 +143,9 @@ func newCredentialProbe(t *testing.T) (*credentialProbe, Source) {
 		t.Fatal(err)
 	}
 	secrets := map[string]string{"repo-secret": "token-repo", "project-secret": "token-project"}
-	provider := github.NewProvider(github.New(p.srv.URL, "token-instance"), app,
+	provider := github.NewProvider(github.New(p.srv.URL, instanceToken), app,
 		func(ref string) string { return secrets[ref] })
-	return p, NewGitHubSource(provider)
+	return p, provider
 }
 
 func TestSourceChoosesCredentialsInDecision0034Order(t *testing.T) {

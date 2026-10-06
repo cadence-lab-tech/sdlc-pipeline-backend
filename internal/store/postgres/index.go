@@ -41,7 +41,8 @@ const indexTargetCols = `r.id, r.project_id, p.key, r.owner, r.name,
 // indexTargetLive — репозиторий читаем: не убран из установки, а его
 // установка (алиас gi, LEFT JOIN github_installations) не снята и не
 // приостановлена. Снятая установка индексацию останавливает, но собранный
-// индекс не трогает.
+// индекс не трогает. Тем же условием синхронизация PR (RepoRefsToSync)
+// пропускает ссылки недоступных репозиториев.
 const indexTargetLive = `r.unavailable_at IS NULL
 	  AND (gi.id IS NULL OR (gi.suspended_at IS NULL AND gi.removed_at IS NULL))`
 
