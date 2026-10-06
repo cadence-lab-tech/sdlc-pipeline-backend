@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 )
 
@@ -24,7 +25,9 @@ type CheckRun struct {
 
 // ChecksSource — вторая половина провайдера: состояние PR и его проверок.
 // Отдельным интерфейсом, потому что индексации она не нужна, а гейту
-// external_check не нужна индексация.
+// external_check не нужна индексация. Зовётся только у источника, который
+// отдал ForRepository: PR читается учётными данными своего репозитория, а
+// не общим токеном инстанса (CLAB-84).
 type ChecksSource interface {
 	PullRequest(ctx context.Context, repo Repo, number int) (PullRequestState, error)
 	CheckRuns(ctx context.Context, repo Repo, sha string) ([]CheckRun, error)
@@ -35,9 +38,16 @@ type ChecksSource interface {
 // Это то, чем питается гейт external_check: он исполняется внутри транзакции
 // перехода и в сеть не ходит, поэтому состояние проверок обязано приезжать
 // заранее и лежать в базе.
+//
+// Каждый PR читается тем же, чем индексируется его репозиторий:
+// ForRepository выбирает учётные данные github.CredentialRefs.Resolve
+// (решение 0034), своего порядка здесь нет. Отказ выбранного источника —
+// предупреждение по этой ссылке без ухода на следующий источник; остальные
+// ссылки прохода синхронизируются. Неудачная попытка отмечается и уводит
+// ссылку в конец очереди, чтобы нечитаемые не занимали лимит прохода.
 func (ix *Indexer) SyncRepoRefs(ctx context.Context, limit int) (int, error) {
-	source, ok := ix.source.(ChecksSource)
-	if !ok {
+	if _, ok := ix.source.(ChecksSource); !ok {
+		// Источник без второй половины — синхронизировать нечем.
 		return 0, nil
 	}
 
@@ -48,17 +58,40 @@ func (ix *Indexer) SyncRepoRefs(ctx context.Context, limit int) (int, error) {
 
 	synced := 0
 	for _, ref := range refs {
+		failed := func() error { return ix.store.MarkRepoRefSyncFailed(ctx, ix.store.DB(), ref.ID) }
+
 		number, err := strconv.Atoi(ref.Ref)
 		if err != nil {
-			// Ссылка не номером PR — синхронизировать нечего.
+			// Ссылка не номером PR — синхронизировать нечего, но и место в
+			// очереди она занимать не должна.
+			if err := failed(); err != nil {
+				return synced, err
+			}
 			continue
 		}
 		repo := Repo{ref.Owner, ref.Name}
+
+		chosen, err := ix.source.ForRepository(ctx, credentialsOf(ref.CredentialRef, ref.InstallationID, ref.ProjectInstallationID, ref.ProjectCredentialRef))
+		if err != nil {
+			ix.log.Warn("состояние PR не прочитано: учётные данные репозитория не разрешились",
+				"task", ref.TaskKey, "repository", repo.String(), "pr", number, "error", err)
+			if err := failed(); err != nil {
+				return synced, err
+			}
+			continue
+		}
+		source, ok := chosen.(ChecksSource)
+		if !ok {
+			return synced, fmt.Errorf("источник репозитория %s не читает PR", repo)
+		}
 
 		pr, err := source.PullRequest(ctx, repo, number)
 		if err != nil {
 			ix.log.Warn("состояние PR не прочитано",
 				"task", ref.TaskKey, "repository", repo.String(), "pr", number, "error", err)
+			if err := failed(); err != nil {
+				return synced, err
+			}
 			continue
 		}
 
