@@ -25,6 +25,10 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
+// version подставляется при сборке: -ldflags "-X main.version=…" (Makefile,
+// Dockerfile). Та же строка уходит в /v1/instance, MCP initialize и лог.
+var version = "dev"
+
 func main() {
 	// Образ собирается из distroless: ни shell, ни curl внутри нет, и
 	// healthcheck в compose дёргает сам бинарник.
@@ -140,13 +144,13 @@ func run() error {
 
 	var mcpServer *mcp.Server
 	if cfg.MCPEnabled {
-		mcpServer = mcp.NewServer(log, store, engine, authoring, auth)
+		mcpServer = mcp.NewServer(log, store, engine, authoring, auth, version)
 		log.Info("MCP-сервер поднят", "path", "/mcp/projects/{PROJECT}")
 	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).Handler(),
+		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).WithVersion(version).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,
@@ -155,7 +159,7 @@ func run() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("сервис слушает", "addr", cfg.HTTPAddr, "env", cfg.Env)
+		log.Info("сервис слушает", "addr", cfg.HTTPAddr, "env", cfg.Env, "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 		}
