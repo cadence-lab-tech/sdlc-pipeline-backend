@@ -1,8 +1,10 @@
 package main
 
 // Команды и проекты команды (решения 0027, 0033). Те же операции, что в
-// интерфейсе: любой вошедший заводит организацию, лид ведёт состав и заводит
-// проекты, администратор инстанса выдаёт право на проекты и тариф.
+// интерфейсе: организацию заводит вошедший человек (на выделенном инстансе,
+// SDLC_TENANCY=single, — только администратор), лид ведёт состав и заводит
+// проекты, администратор инстанса выдаёт право на проекты и тариф там, где
+// тарифы есть.
 //
 // Удаления команды здесь нет намеренно (CLAB-13): оно уносит проекты команды
 // со всем содержимым и необратимо, а подтверждается диалогом в интерфейсе, а
@@ -13,12 +15,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 )
+
+// errNoPlans — ответ `clab team plan` на выделенном инстансе: тот же текст,
+// что сервер отдаёт на перевод тарифа.
+var errNoPlans = errors.New("тарифов на этом инстансе нет")
 
 func cmdTeam(ctx context.Context, c *Client, args []string) error {
 	sub, rest := popTask(args)
@@ -115,7 +122,9 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 
 	case "plan":
 		// Тариф команды: без --set показывает действующий, с --set переводит
-		// (администратор инстанса).
+		// (администратор инстанса). На выделенном инстансе тарифов нет: это
+		// видно по ответу — ключа plan в команде нет, перевод отвечает 404 с
+		// тем же текстом, — без отдельного вопроса серверу о профиле.
 		key, tail := popTask(rest)
 		var set string
 		fs, err := flags("team", tail, func(fs *flag.FlagSet) {
@@ -134,13 +143,19 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 				return err
 			}
 			if detail, ok := out.(map[string]any); ok {
-				return print(detail["plan"])
+				plan, ok := detail["plan"]
+				if !ok {
+					return errNoPlans
+				}
+				return print(plan)
 			}
 			return print(out)
 		}
 		var out any
 		if err := c.do(ctx, "PUT", "/teams/"+url.PathEscape(key)+"/plan",
 			map[string]any{"plan": set}, &out); err != nil {
+			// 404 бывает и про команду, и про тариф: текст сервера различает,
+			// «тарифов на этом инстансе нет» приходит от него как есть.
 			return err
 		}
 		return print(out)

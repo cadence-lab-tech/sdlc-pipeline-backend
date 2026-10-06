@@ -411,6 +411,17 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   при `SDLC_PROJECT_CREATION=open` ей не нужно право на проекты, при
   `teams` его выдаёт администратор. `teams.kind`: личная команда участников
   не принимает, организацию заводит любой человек.
+- **`SDLC_TENANCY=single` — профиль, а не другая модель** (CLAB-88). Все
+  ветвления читают `Auth.single()` в `workflow/tenants.go`. Личная команда
+  не заводится ни при входе и бутстрапе (`personalTeamAtLogin`), ни лениво
+  (`ensurePersonalTeam` отвечает «не найдена»); `OwnerTeamFor` без команды —
+  400 для всех, оставшаяся с `shared` личная команда не подставляется;
+  `Me.can_create_projects` не учитывает `SDLC_PROJECT_CREATION=open` для
+  человека без команды. Команды заводит и превращает в организации только
+  администратор инстанса; `SDLC_PROJECT_CREATION` решает лишь, получает ли
+  его команда право на проекты сразу. Тарифов нет: `ListPlans`,
+  `SetTeamPlan`, `TeamPlan` — 404, `TeamDetail.plan` в ответе нет. Схема
+  `plans`/`subscriptions` та же.
 - **Квота — слой рядом с правами, не условие в домене.** `memberQuota` в
   `SetTeamMember` читает `PlanOf` (активная подписка, иначе `free`) и
   считает состав; при `SDLC_TENANCY=single` отвечает «можно», не спрашивая

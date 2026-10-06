@@ -170,8 +170,9 @@ func (a *Auth) Bootstrap(ctx context.Context, handle, token string) error {
 			}
 		}
 		// Личная команда — и у администратора: проект без явной команды
-		// уходит в неё (решение 0033).
-		if _, err := a.ensurePersonalTeam(ctx, tx, p); err != nil {
+		// уходит в неё (решение 0033). На выделенном инстансе её нет и у
+		// него: первую команду даёт SDLC_BOOTSTRAP_TEAM.
+		if err := a.personalTeamAtLogin(ctx, tx, p); err != nil {
 			return err
 		}
 		prefix := token
@@ -612,7 +613,8 @@ type Me struct {
 	// Может ли актор завести проект: администратор системы, человек при
 	// открытом создании (проект уйдёт в его личную команду) или лид команды
 	// с правом на это. Интерфейсу это нужно, чтобы показать кнопку тому, у
-	// кого она сработает.
+	// кого она сработает. На выделенном инстансе личных команд нет, и
+	// открытое создание само по себе права не даёт.
 	CanCreateProjects bool `json:"can_create_projects"`
 }
 
@@ -627,7 +629,7 @@ func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
 		return Me{}, err
 	}
 	canCreate := !a.Enforced() || id.Principal.IsAdmin ||
-		(a.openProjects && id.Principal.Kind == domain.PrincipalUser)
+		(a.openProjects && id.Principal.Kind == domain.PrincipalUser && !a.single())
 	if !canCreate {
 		for _, t := range teams {
 			if t.Role != domain.TeamRoleLead {

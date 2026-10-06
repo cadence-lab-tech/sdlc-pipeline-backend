@@ -192,9 +192,9 @@ func TestOrganizationSelfServeAndMemberQuota(t *testing.T) {
 	if _, err := auth.SetTeamMember(ctx, alice, "acme", "user:erin", domain.TeamRoleMember); err != nil {
 		t.Fatalf("квота на выделенном инстансе: %v", err)
 	}
-	plans, err := auth.ListPlans(ctx, alice)
-	if err != nil || len(plans) != 2 {
-		t.Fatalf("тарифы: %v %+v", err, plans)
+	// Тарифов на выделенном инстансе нет вовсе (CLAB-88, К11).
+	if plans, err := auth.ListPlans(ctx, alice); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("тарифы на выделенном инстансе: %v %+v", err, plans)
 	}
 }
 
