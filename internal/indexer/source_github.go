@@ -14,9 +14,9 @@ import (
 // провайдера к индексации отношения не имеет.
 type gitHubSource struct {
 	client *github.Client
-	// provider выбирает учётные данные: установку приложения у проекта или
-	// именованный секрет. В базе лежат ссылки, значения — в окружении и в
-	// памяти процесса (решение 0028).
+	// provider выдаёт клиента по учётным данным, выбранным
+	// github.CredentialRefs.Resolve. В базе лежат ссылки, значения — в
+	// окружении и в памяти процесса (решение 0028).
 	provider *github.Provider
 }
 
@@ -30,14 +30,18 @@ func NewGitHubSource(provider *github.Provider) Source {
 	return gitHubSource{client: client, provider: provider}
 }
 
+// ForRepository выбирает учётные данные тем же github.CredentialRefs.Resolve,
+// что и проверка доступа: индексатор читает репозиторий тем, чем его
+// проверяет кнопка «Проверить доступ», и своего порядка у него нет. Отказ
+// выбранного источника возвращается как есть, без ухода на следующий.
 func (s gitHubSource) ForRepository(ctx context.Context, creds Credentials) (Source, error) {
-	ref := creds.RepositoryRef
-	if ref == "" {
-		ref = creds.ProjectRef
-	}
-	client, err := s.provider.Client(ctx, github.Credentials{
-		InstallationID: creds.InstallationID, SecretRef: ref,
-	})
+	chosen, _ := github.CredentialRefs{
+		RepositorySecret:       creds.RepositorySecret,
+		RepositoryInstallation: creds.RepositoryInstallation,
+		ProjectInstallation:    creds.ProjectInstallation,
+		ProjectSecret:          creds.ProjectSecret,
+	}.Resolve()
+	client, err := s.provider.Client(ctx, chosen)
 	if err != nil {
 		return nil, err
 	}

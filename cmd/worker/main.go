@@ -85,8 +85,9 @@ func run() error {
 		return err
 	}
 
-	// Учётные данные выбираются по проекту: установка приложения либо
-	// именованный секрет (решение 0028). Без приложения остаётся общий токен.
+	// Учётные данные репозитория выбираются от частного к общему: секрет и
+	// установка репозитория, установка и секрет проекта, общий токен
+	// (решение 0034, github.CredentialRefs.Resolve).
 	app, err := github.LoadApp(cfg.GitHubAPIURL, cfg.GitHubAppID, cfg.GitHubAppKeyFile)
 	if err != nil {
 		return err
