@@ -317,3 +317,60 @@ func TestSyncRepoRefsUnreadableDoNotStarveQueue(t *testing.T) {
 		}
 	}
 }
+
+// Очередь после сброса вебхуком (решение человека 2): ссылка без неудачи
+// встаёт первой, как до задачи; ссылка, чья последняя попытка не удалась,
+// стоит по времени неудачи — иначе поток событий о проверках вернул бы
+// нечитаемые ссылки в голову очереди — и всё равно читается за один круг
+// очереди, а удачное чтение снимает отметку неудачи.
+func TestSyncRepoRefsQueueAfterWebhookReset(t *testing.T) {
+	ctx := context.Background()
+	f := newSyncFixture(t, "token-instance")
+
+	healthy := f.linkPR(t, backendRepo, 128)
+	f.exec(t, `UPDATE task_repo_refs SET synced_at = now() - interval '1 hour' WHERE id = $1`, healthy)
+	failedBefore := f.linkPR(t, backendRepo, 129)
+	f.exec(t, `UPDATE task_repo_refs SET synced_at = now() - interval '2 hours',
+		sync_failed_at = now() - interval '10 minutes' WHERE id = $1`, failedBefore)
+	touched := f.linkPR(t, backendRepo, 130)
+	f.exec(t, `UPDATE task_repo_refs SET synced_at = now() - interval '30 minutes' WHERE id = $1`, touched)
+	for _, n := range []int{129, 130} {
+		if _, err := f.store.TouchPullRequest(ctx, f.store.DB(), "github", "cadence-lab-tech", backendRepo,
+			n, "open", fmt.Sprintf("head-%d", n), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	toSync, err := f.store.RepoRefsToSync(ctx, f.store.DB(), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []uuid.UUID{touched, healthy, failedBefore}
+	if len(toSync) != len(want) {
+		t.Fatalf("в выборке %d ссылок, ждали %d", len(toSync), len(want))
+	}
+	for i, id := range want {
+		if toSync[i].ID != id {
+			t.Fatalf("позиция %d: %s, ждали %s (сброшенная %s, здоровая %s, с неудачей %s)",
+				i, toSync[i].ID, id, touched, healthy, failedBefore)
+		}
+	}
+
+	// Лимит 1: за три прохода (круг очереди) прочитаны все три, по порядку.
+	for pass, id := range want {
+		if n, err := f.ix.SyncRepoRefs(ctx, 1); err != nil || n != 1 {
+			t.Fatalf("проход %d: синхронизировано %d, ошибка %v", pass+1, n, err)
+		}
+		if s := f.ref(t, id); s.SyncedAt == nil {
+			t.Fatalf("проход %d: ссылка %s не синхронизирована", pass+1, id)
+		}
+	}
+	var failedAt *time.Time
+	if err := f.pool.QueryRow(ctx, `SELECT sync_failed_at FROM task_repo_refs WHERE id = $1`,
+		failedBefore).Scan(&failedAt); err != nil {
+		t.Fatal(err)
+	}
+	if failedAt != nil {
+		t.Fatalf("удачное чтение не сняло отметку неудачи: %v", failedAt)
+	}
+}
