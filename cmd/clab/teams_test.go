@@ -48,3 +48,64 @@ func TestTeamRemoveTakesMemberOutOfTeam(t *testing.T) {
 		t.Fatalf("запрос: %s %s", rec.method, rec.path)
 	}
 }
+
+// Выделенный инстанс (CLAB-88, К13): тарифов нет, и `clab team plan`
+// говорит это сам — по ответу, без вопроса серверу о профиле.
+func TestTeamPlanWithoutPlans(t *testing.T) {
+	withJSON(t, false)
+
+	// Без --set: в ответе команды нет ключа plan.
+	c, rec := newInviteClient(t, 200, `{"team":{"key":"acme"},"members":[],"projects":[],"installations":[]}`)
+	stdout, _, err := capture(t, func() error {
+		return cmdTeam(context.Background(), c, []string{"plan", "acme"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "тарифов на этом инстансе нет") {
+		t.Fatalf("без тарифов: %v", err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("в stdout ушло %q", stdout)
+	}
+	if rec.calls != 1 || rec.method != "GET" || rec.path != "/v1/teams/acme" {
+		t.Fatalf("запросы: %d, последний %s %s", rec.calls, rec.method, rec.path)
+	}
+
+	// С --set: 404 сервера с тем же текстом доходит до человека.
+	c, rec = newInviteClient(t, 404, `{"error":{"code":"not_found","message":"тарифов на этом инстансе нет"}}`)
+	_, _, err = capture(t, func() error {
+		return cmdTeam(context.Background(), c, []string{"plan", "acme", "--set", "business"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "тарифов на этом инстансе нет") {
+		t.Fatalf("перевод без тарифов: %v", err)
+	}
+	if rec.calls != 1 || rec.method != "PUT" || rec.path != "/v1/teams/acme/plan" {
+		t.Fatalf("запросы: %d, последний %s %s", rec.calls, rec.method, rec.path)
+	}
+}
+
+// Общий инстанс (К16): тариф печатается как раньше.
+func TestTeamPlanPrintsPlan(t *testing.T) {
+	withJSON(t, false)
+	c, _ := newInviteClient(t, 200, `{"team":{"key":"acme"},"plan":{"code":"free","members_max":3}}`)
+	stdout, _, err := capture(t, func() error {
+		return cmdTeam(context.Background(), c, []string{"plan", "acme"})
+	})
+	if err != nil || !strings.Contains(stdout, "free") {
+		t.Fatalf("тариф: %v %q", err, stdout)
+	}
+}
+
+// К10: отказ сервера в заведении и превращении команды доходит до человека
+// текстом сервера, команда завершается ошибкой.
+func TestTeamCreateConvertForbidden(t *testing.T) {
+	const refusal = `{"error":{"code":"forbidden","message":"команды на этом инстансе заводит администратор"}}`
+	for _, args := range [][]string{
+		{"create", "acme", "--name", "Acme"},
+		{"convert", "alice", "--key", "acme"},
+	} {
+		c, _ := newInviteClient(t, 403, refusal)
+		_, _, err := capture(t, func() error { return cmdTeam(context.Background(), c, args) })
+		if err == nil || !strings.Contains(err.Error(), "заводит администратор") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}
