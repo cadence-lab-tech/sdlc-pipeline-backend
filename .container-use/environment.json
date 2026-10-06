@@ -1,0 +1,25 @@
+{
+  "workdir": "/workdir",
+  "base_image": "golang:1.25-bookworm",
+  "setup_commands": [
+    "apt-get update && apt-get install -y --no-install-recommends make postgresql-client && rm -rf /var/lib/apt/lists/*"
+  ],
+  "install_commands": [
+    "go mod download"
+  ],
+  "env": [
+    "CU_TEST_DATABASE_URL=postgres://sdlc:sdlc@postgres:5432/sdlc_test?sslmode=disable"
+  ],
+  "services": [
+    {
+      "name": "postgres",
+      "image": "pgvector/pgvector:pg17",
+      "exposed_ports": [5432],
+      "env": [
+        "POSTGRES_USER=sdlc",
+        "POSTGRES_PASSWORD=sdlc",
+        "POSTGRES_DB=sdlc_test"
+      ]
+    }
+  ]
+}
