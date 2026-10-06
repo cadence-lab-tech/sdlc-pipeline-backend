@@ -49,19 +49,22 @@ type Source interface {
 	Head(ctx context.Context, repo Repo, branch string) (string, error)
 	Tree(ctx context.Context, repo Repo, commit string) (entries []Entry, truncated bool, err error)
 	Blob(ctx context.Context, repo Repo, sha string) ([]byte, error)
-	// ForRepository отдаёт источник с учётными данными этого репозитория:
-	// установкой приложения у проекта или именем секрета (решение 0028).
-	// Ошибка возможна, потому что токен установки выписывает провайдер.
+	// ForRepository отдаёт источник с учётными данными этого репозитория.
+	// Выбирает между объявленными источниками провайдер, тем же порядком,
+	// что и проверка доступа (решение 0034). Ошибка возможна, потому что
+	// токен установки выписывает провайдер, а секрет может не найтись.
 	ForRepository(ctx context.Context, creds Credentials) (Source, error)
 }
 
-// Credentials — чем ходить в провайдера за репозиторием. В базе лежат ссылки
-// (идентификатор установки, имя секрета), а не значения: секретов в базе нет.
+// Credentials — что репозиторий и его проект объявили о доступе к
+// провайдеру. В базе лежат ссылки (номера установок, имена секретов), а не
+// значения: секретов в базе нет. Индексатор передаёт их как есть, ничего не
+// склеивая: порядок между ними — не его решение.
 type Credentials struct {
-	InstallationID *int64
-	// Секрет репозитория; пусто — берётся секрет проекта.
-	RepositoryRef string
-	ProjectRef    string
+	RepositorySecret       string
+	RepositoryInstallation *int64
+	ProjectInstallation    *int64
+	ProjectSecret          string
 }
 
 // permanentError — сбой, который не исправится повтором: репозиторий не
@@ -152,7 +155,7 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 
 	queued := 0
 	for _, t := range targets {
-		src, err := ix.source.ForRepository(ctx, credentialsOf(t.InstallationID, t.CredentialRef, t.ProjectCredentialRef))
+		src, err := ix.source.ForRepository(ctx, credentialsOf(t.CredentialRef, t.InstallationID, t.ProjectInstallationID, t.ProjectCredentialRef))
 		if err != nil {
 			// Недоступные учётные данные одного проекта не должны
 			// останавливать обход остальных.
@@ -294,7 +297,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 	var counters postgres.IndexCounters
 	var cache cacheCounters
 	repo := Repo{run.Owner, run.Name}
-	src, err := ix.source.ForRepository(ctx, credentialsOf(run.InstallationID, run.CredentialRef, run.ProjectCredentialRef))
+	src, err := ix.source.ForRepository(ctx, credentialsOf(run.CredentialRef, run.InstallationID, run.ProjectInstallationID, run.ProjectCredentialRef))
 	if err != nil {
 		return counters, cache, err
 	}
@@ -502,14 +505,14 @@ func (ix *Indexer) previousContent(ctx context.Context, prev postgres.ParentFile
 	return content, nil
 }
 
-// credentialsOf собирает ссылки на учётные данные: секрет репозитория —
-// исключение из правила проекта, поэтому он остаётся отдельным полем, а
-// приоритет разбирает провайдер.
-func credentialsOf(installationID *int64, repoRef, projectRef *string) Credentials {
+// credentialsOf собирает ссылки на учётные данные репозитория и проекта —
+// каждую своим полем, а порядок между ними разбирает источник.
+func credentialsOf(repoRef *string, repoInstallation, projectInstallation *int64, projectRef *string) Credentials {
 	return Credentials{
-		InstallationID: installationID,
-		RepositoryRef:  deref(repoRef),
-		ProjectRef:     deref(projectRef),
+		RepositorySecret:       deref(repoRef),
+		RepositoryInstallation: repoInstallation,
+		ProjectInstallation:    projectInstallation,
+		ProjectSecret:          deref(projectRef),
 	}
 }
 
