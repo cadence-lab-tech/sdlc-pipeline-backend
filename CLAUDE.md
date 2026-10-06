@@ -477,6 +477,33 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   ([решение 0028](../docs/decisions/0028-github-app-per-project.md)).
 - **Обходить `principals` в аудите.** Все поля актора — внешние ключи.
 
+## Окружение container-use
+
+Код задачи правится и проверяется в окружении container-use
+([решение 0039](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0039-container-use-environments.md)),
+git и PR — в рабочей копии `.worktrees/<ключ>/backend` на хосте. Порядок
+целиком — `../docs/PROCESS.md`, раздел «Окружения container-use».
+
+Окружение описано в `.container-use/environment.json`: `golang:1.25-bookworm`
+с `make` и `psql`, зависимости скачаны, сервис `postgres` — pgvector на pg17,
+своя пустая база `sdlc_test` на каждое окружение. container-use читает конфиг
+из основной копии, то есть с `main`; правка конфига идёт через PR.
+
+- `environment_source` — абсолютный путь к этому каталогу (основная копия),
+  `from_git_ref` — ветка задачи, заголовок `<ключ> backend: …`.
+- Сборка и модульные тесты: `go build ./... && go vet ./... && go test ./...`.
+- Интеграционные тесты — в базе окружения, не через `make test-integration`
+  (он ищет стек через Docker хоста):
+  `SDLC_TEST_DATABASE_URL=$CU_TEST_DATABASE_URL go test ./... -count=1 -p 1`.
+- Внутри окружения нет Docker: `make up`, `dev/stack.sh`, `dev/e2e.sh` и
+  `dev/e2e-orchestration.sh` идут на хосте, в стеке задачи, по коду рабочей
+  копии после `container-use apply`.
+- git в окружении не запускать; результат переносится `container-use apply
+  <id>` в чистой рабочей копии и коммитится там по конвенциям.
+- Новая миграция: номер сверять со свежим `main` и с окружениями соседей —
+  `container-use list` здесь покажет, какие задачи правят бэкенд на этой
+  машине, `container-use diff <id>` — трогают ли они `migrations/`.
+
 ## Референсы реализации
 
 `docs/drift_detection.sql` — запросы детектора дрейфа, проверенные на сценарии
