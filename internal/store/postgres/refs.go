@@ -254,27 +254,45 @@ type RefToSync struct {
 	RefType string
 	Ref     string
 	State   *string
+	// Учётные данные репозитория и проекта — по отдельности, как объявлены,
+	// так же, как у IndexTarget: PR читается тем, чем индексируется его
+	// репозиторий, и выбирает между ними github.CredentialRefs.Resolve
+	// (решение 0034), а не запрос.
+	CredentialRef         *string
+	InstallationID        *int64
+	ProjectInstallationID *int64
+	ProjectCredentialRef  *string
 }
 
 // RepoRefsToSync — PR задач в полёте, начиная с тех, о которых система знает
 // меньше всего.
 //
 // Закрытые и влитые не опрашиваются: их состояние уже конечное, а лимит
-// запросов к провайдеру общий с индексацией.
+// запросов к провайдеру общий с индексацией. Не опрашиваются и PR
+// репозиториев, которые не индексируются по недоступности (indexTargetLive):
+// снятая или приостановленная установка, репозиторий убран из установки.
+//
+// Очередь идёт по последней попытке, удачной (synced_at) или нет
+// (sync_failed_at): нечитаемая ссылка уходит в конец и не держит лимит
+// прохода. Сброшенная вебхуком ссылка без неудачи стоит первой.
 func (s *Store) RepoRefsToSync(ctx context.Context, q Querier, limit int) ([]RefToSync, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := q.Query(ctx, `
-		SELECT rr.id, rr.task_id, t.key, r.owner, r.name, rr.ref_type, rr.ref, rr.state
+		SELECT rr.id, rr.task_id, t.key, r.owner, r.name, rr.ref_type, rr.ref, rr.state,
+		       r.credential_ref, r.installation_id, p.github_installation_id, p.github_credential_ref
 		FROM task_repo_refs rr
 		JOIN repositories r       ON r.id = rr.repository_id
+		JOIN projects p           ON p.id = r.project_id
 		JOIN tasks t              ON t.id = rr.task_id
 		JOIN workflow_statuses ws ON ws.id = t.status_id
+		LEFT JOIN github_installations gi ON gi.installation_id = r.installation_id
 		WHERE rr.ref_type = 'pull_request'
 		  AND t.closed_at IS NULL AND ws.is_terminal = false
 		  AND (rr.state IS NULL OR rr.state NOT IN ('closed', 'merged', 'declined'))
-		ORDER BY rr.synced_at NULLS FIRST
+		  AND `+indexTargetLive+`
+		ORDER BY greatest(rr.synced_at, rr.sync_failed_at) NULLS FIRST
 		LIMIT $1`, limit)
 	if err != nil {
 		return nil, translate(err)
@@ -285,12 +303,21 @@ func (s *Store) RepoRefsToSync(ctx context.Context, q Querier, limit int) ([]Ref
 	for rows.Next() {
 		var r RefToSync
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.TaskKey, &r.Owner, &r.Name,
-			&r.RefType, &r.Ref, &r.State); err != nil {
+			&r.RefType, &r.Ref, &r.State,
+			&r.CredentialRef, &r.InstallationID, &r.ProjectInstallationID, &r.ProjectCredentialRef); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, r)
 	}
 	return out, translate(rows.Err())
+}
+
+// MarkRepoRefSyncFailed отмечает неудачную попытку прочитать PR: ссылка
+// уходит в конец очереди синхронизации. synced_at и снимок не трогаются —
+// гейт external_check продолжает видеть то, что было прочитано последним.
+func (s *Store) MarkRepoRefSyncFailed(ctx context.Context, q Querier, id uuid.UUID) error {
+	_, err := q.Exec(ctx, `UPDATE task_repo_refs SET sync_failed_at = now() WHERE id = $1`, id)
+	return translate(err)
 }
 
 // UpdateRepoRefChecks кладёт снимок состояния PR и его проверок.
@@ -308,7 +335,8 @@ func (s *Store) UpdateRepoRefChecks(ctx context.Context, q Querier, id uuid.UUID
 		    head_sha = nullif($3, ''),
 		    url = coalesce(nullif($4, ''), url),
 		    checks = $5,
-		    synced_at = now()
+		    synced_at = now(),
+		    sync_failed_at = NULL
 		WHERE id = $1`, id, state, headSHA, url, checks)
 	return translate(err)
 }
