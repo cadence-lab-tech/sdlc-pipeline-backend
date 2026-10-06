@@ -106,8 +106,8 @@ func (a *Auth) LoginGitHub(ctx context.Context, code, redirectURI string) (Sessi
 	expires := time.Now().Add(a.sessionTTL)
 	var out Session
 	err = a.store.InTx(ctx, func(tx pgx.Tx) error {
-		// Личная команда — с первого входа (решение 0033).
-		if _, err := a.ensurePersonalTeam(ctx, tx, p); err != nil {
+		// Личная команда — с первого входа (решение 0033), кроме single.
+		if err := a.personalTeamAtLogin(ctx, tx, p); err != nil {
 			return err
 		}
 		record, err := a.store.CreateToken(ctx, tx, postgres.CreateTokenInput{

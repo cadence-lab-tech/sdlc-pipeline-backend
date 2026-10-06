@@ -24,8 +24,9 @@ type TeamDetail struct {
 	Team     domain.Team          `json:"team"`
 	Members  []domain.TeamMember  `json:"members"`
 	Projects []domain.ProjectTeam `json:"projects"`
-	// Действующий тариф: предел участников читается вместе с составом.
-	Plan domain.Plan `json:"plan"`
+	// Действующий тариф: предел участников читается вместе с составом. На
+	// выделенном инстансе тарифов нет, и ключа в ответе нет вовсе.
+	Plan *domain.Plan `json:"plan,omitempty"`
 	// Установки GitHub App, записанные на команду (решение 0034).
 	Installations []domain.GitHubInstallation `json:"installations"`
 }
@@ -69,9 +70,13 @@ func (a *Auth) GetTeam(ctx context.Context, id Identity, key string) (TeamDetail
 	if err != nil {
 		return TeamDetail{}, err
 	}
-	plan, err := a.store.PlanOf(ctx, q, team.ID)
-	if err != nil {
-		return TeamDetail{}, err
+	var plan *domain.Plan
+	if !a.single() {
+		p, err := a.store.PlanOf(ctx, q, team.ID)
+		if err != nil {
+			return TeamDetail{}, err
+		}
+		plan = &p
 	}
 	installations, err := a.store.ListInstallations(ctx, q, team.ID)
 	if err != nil {
@@ -83,8 +88,12 @@ func (a *Auth) GetTeam(ctx context.Context, id Identity, key string) (TeamDetail
 // CreateTeam заводит организацию и делает создателя её лидом: команда без
 // лида не сможет ни принять человека, ни завести проект. Заводит любой
 // вошедший человек (решение 0033); право на проекты новая команда получает
-// по режиму инстанса, а явно его выдаёт только администратор.
+// по режиму инстанса, а явно его выдаёт только администратор. На
+// выделенном инстансе команды заводит только администратор.
 func (a *Auth) CreateTeam(ctx context.Context, id Identity, in CreateTeamInput) (domain.Team, error) {
+	if a.single() && a.Enforced() && !id.Principal.IsAdmin {
+		return domain.Team{}, apperr.Forbidden("команды на этом инстансе заводит администратор")
+	}
 	if a.Enforced() && !id.Principal.IsAdmin && id.Principal.Kind != domain.PrincipalUser {
 		return domain.Team{}, apperr.Forbidden("организацию заводит человек, а не %s", id.Principal.Kind)
 	}
@@ -341,9 +350,15 @@ func (a *Auth) RemoveProjectTeam(ctx context.Context, id Identity, projectKey, t
 // право на проекты у неё есть по режиму инстанса. Явно названная команда
 // проверяется как раньше: лид и `can_create_projects`. Администратор
 // системы и режим без проверки прав проходят в любую.
+//
+// На выделенном инстансе личных команд нет: без явной команды — отказ для
+// всех, в том числе для того, у кого личная команда осталась с общего.
 func (a *Auth) OwnerTeamFor(ctx context.Context, id Identity, teamKey string) (uuid.UUID, error) {
 	teamKey = strings.TrimSpace(teamKey)
 	if teamKey == "" {
+		if a.single() {
+			return uuid.Nil, errNoPersonalTeams()
+		}
 		if id.Principal.Kind != domain.PrincipalUser {
 			return uuid.Nil, apperr.InvalidInput("укажите команду-владельца: личной команды у %s нет", id.Principal.Kind)
 		}

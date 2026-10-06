@@ -4,6 +4,12 @@
 // он есть у любого, кто вошёл. Организацию заводит любой вошедший человек,
 // а рост её состава держит тариф. Квота живёт здесь, рядом с правами и
 // бюджетом, а не в движке: движок про тарифы не знает.
+//
+// Всё это — самообслуживание общего инстанса. На выделенном инстансе
+// компании (`SDLC_TENANCY=single`, CLAB-88) его нет: личные команды не
+// заводятся, проект заводится только в команде, команды заводит
+// администратор инстанса, тарифов и квот нет. Модель та же — меняется
+// только то, что инстанс заводит и показывает.
 package workflow
 
 import (
@@ -32,13 +38,40 @@ func (a *Auth) Tenancy(profile string) *Auth {
 }
 
 // QuotasOn — проверяются ли пределы тарифа.
-func (a *Auth) QuotasOn() bool { return a.tenancy != TenancySingle }
+func (a *Auth) QuotasOn() bool { return !a.single() }
+
+// single — выделенный инстанс компании: самообслуживания общего инстанса
+// (личных команд, организаций по кнопке, тарифов) на нём нет. Все ветвления
+// по профилю читают этот предикат, а не строку.
+func (a *Auth) single() bool { return a.tenancy == TenancySingle }
+
+// Отказы профиля single: одна формулировка, каким путём ни пришёл.
+func errNoPersonalTeams() error {
+	return apperr.InvalidInput("укажите команду-владельца: личных команд на этом инстансе нет")
+}
+
+func errNoPlans() error {
+	return apperr.NotFound("тарифов на этом инстансе нет")
+}
+
+// personalTeamAtLogin заводит личную команду при входе и бутстрапе — на
+// общем инстансе. На выделенном человек попадает только в команды, куда его
+// добавили, пригласили или синхронизировали из групп провайдера.
+func (a *Auth) personalTeamAtLogin(ctx context.Context, tx pgx.Tx, p domain.Principal) error {
+	if a.single() {
+		return nil
+	}
+	_, err := a.ensurePersonalTeam(ctx, tx, p)
+	return err
+}
 
 // ensurePersonalTeam находит личную команду человека или заводит её.
 //
 // Ключ — хэндл; занятый ключ получает суффикс от идентификатора, как и
 // хэндл при входе. Право заводить проекты — по режиму инстанса: при
-// открытом создании оно есть сразу, иначе его выдаёт администратор.
+// открытом создании оно есть сразу, иначе его выдаёт администратор. На
+// выделенном инстансе новая личная команда не заводится: оставшаяся с
+// общего находится, иначе — «не найдена».
 func (a *Auth) ensurePersonalTeam(ctx context.Context, tx pgx.Tx, p domain.Principal) (domain.Team, error) {
 	if p.Kind != domain.PrincipalUser {
 		return domain.Team{}, apperr.InvalidInput("личная команда бывает только у человека, а %s:%s — %s", p.Kind, p.Handle, p.Kind)
@@ -49,6 +82,9 @@ func (a *Auth) ensurePersonalTeam(ctx context.Context, tx pgx.Tx, p domain.Princ
 	}
 	if apperr.As(err).Code != apperr.CodeNotFound {
 		return domain.Team{}, err
+	}
+	if a.single() {
+		return domain.Team{}, apperr.NotFound("личных команд на этом инстансе нет")
 	}
 	name := strings.TrimSpace(p.DisplayName)
 	if name == "" {
@@ -74,7 +110,8 @@ func (a *Auth) ensurePersonalTeam(ctx context.Context, tx pgx.Tx, p domain.Princ
 
 // PersonalTeam — личная команда актора; заводится, если её ещё нет. Так
 // её получает и актор из заголовка в режиме отладки, и администратор из
-// бутстрапа — все, кто заводит проект без явной команды.
+// бутстрапа — все, кто заводит проект без явной команды. На выделенном
+// инстансе не заводится (см. ensurePersonalTeam).
 func (a *Auth) PersonalTeam(ctx context.Context, id Identity) (domain.Team, error) {
 	var out domain.Team
 	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -150,8 +187,13 @@ type ConvertTeamInput struct {
 }
 
 // ConvertTeam превращает личную команду в организацию: проекты остаются,
-// меняется вид. Следующий вход заведёт человеку новую личную команду.
+// меняется вид. Следующий вход заведёт человеку новую личную команду. На
+// выделенном инстансе превращает только администратор: команды там заводит
+// он, а оставшиеся с общего инстанса личные команды — его наследство.
 func (a *Auth) ConvertTeam(ctx context.Context, id Identity, key string, in ConvertTeamInput) (domain.Team, error) {
+	if a.single() && a.Enforced() && !id.Principal.IsAdmin {
+		return domain.Team{}, apperr.Forbidden("команды на этом инстансе заводит и превращает в организации администратор")
+	}
 	var out domain.Team
 	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
 		team, err := a.store.GetTeamByKey(ctx, tx, key)
@@ -173,13 +215,20 @@ func (a *Auth) ConvertTeam(ctx context.Context, id Identity, key string, in Conv
 // ── тарифы ──────────────────────────────────────────────────────────────────
 
 // ListPlans — тарифы с пределами. Открыт любому вошедшему: чтобы понять,
-// во что упёрся, нужно видеть, что предлагается.
+// во что упёрся, нужно видеть, что предлагается. На выделенном инстансе
+// тарифов нет — «не найдено», как и у остальных ручек тарифа.
 func (a *Auth) ListPlans(ctx context.Context, id Identity) ([]domain.Plan, error) {
+	if a.single() {
+		return nil, errNoPlans()
+	}
 	return a.store.ListPlans(ctx, a.store.DB())
 }
 
 // TeamPlan — действующий тариф команды.
 func (a *Auth) TeamPlan(ctx context.Context, id Identity, key string) (domain.Plan, error) {
+	if a.single() {
+		return domain.Plan{}, errNoPlans()
+	}
 	q := a.store.DB()
 	team, err := a.store.GetTeamByKey(ctx, q, key)
 	if err != nil {
@@ -196,6 +245,10 @@ func (a *Auth) TeamPlan(ctx context.Context, id Identity, key string) (domain.Pl
 // денег этот шов не трогает: когда он появится, сюда придёт платёжный
 // провайдер, а не ещё одна ручка.
 func (a *Auth) SetTeamPlan(ctx context.Context, id Identity, key, planCode string) (domain.Plan, error) {
+	// Раньше проверки права: тарифов нет ни у кого, и администратору тоже.
+	if a.single() {
+		return domain.Plan{}, errNoPlans()
+	}
 	if err := a.RequireAdmin(id); err != nil {
 		return domain.Plan{}, err
 	}
