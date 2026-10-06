@@ -22,12 +22,8 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
-const (
-	// Version — версия сервера, которую видит клиент при initialize.
-	Version = "0.4.0"
-	// ServerName показывается в клиенте рядом с тулами.
-	ServerName = "sdlc-pipeline"
-)
+// ServerName показывается в клиенте рядом с тулами.
+const ServerName = "sdlc-pipeline"
 
 type ctxKey int
 
@@ -74,12 +70,17 @@ type Server struct {
 	mcp       *sdk.Server
 }
 
-func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth) *Server {
+// NewServer поднимает MCP-сервер. version — версия сборки (-X main.version):
+// клиент видит её в initialize рядом с REST /v1/instance, и строка у них одна.
+func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, version string) *Server {
+	if version == "" {
+		version = "dev"
+	}
 	s := &Server{log: log, store: store, engine: engine, authoring: authoring, auth: auth}
 	s.mcp = sdk.NewServer(&sdk.Implementation{
 		Name:    ServerName,
 		Title:   "Cadence Lab",
-		Version: Version,
+		Version: version,
 	}, nil)
 	s.registerTools()
 	s.registerCatalogTools()

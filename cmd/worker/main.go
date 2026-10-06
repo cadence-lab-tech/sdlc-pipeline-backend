@@ -33,6 +33,10 @@ import (
 // тоже есть своё лицо.
 const systemActor = "sdlc-worker"
 
+// version подставляется при сборке: -ldflags "-X main.version=…". Пишется в
+// лог при старте — та же строка, что у api в /v1/instance.
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("воркер остановлен с ошибкой", "error", err)
@@ -105,7 +109,7 @@ func run() error {
 			StuckAfter:      cfg.IndexStuckAfter,
 		})
 
-	log.Info("воркер запущен",
+	log.Info("воркер запущен", "version", version,
 		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL,
 		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
 		"embeddings", cfg.EmbeddingProvider,
