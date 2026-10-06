@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,9 @@ type Client struct {
 	globals globals
 	// Откуда взялись адрес и токен — для подсказок в ошибках.
 	source string
+	// Версию сервера сверяем по первому ответу: одно предупреждение на
+	// команду, сколько бы запросов она ни сделала.
+	versionOnce sync.Once
 }
 
 // NewClient собирает клиент из окружения и конфига (решение 0032):
@@ -104,6 +108,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return err
 	}
 	defer resp.Body.Close()
+	c.checkServerVersion(resp)
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -158,6 +163,7 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	c.checkServerVersion(resp)
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
