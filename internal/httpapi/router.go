@@ -32,6 +32,8 @@ type Server struct {
 	auth      *workflow.Auth
 	// nil, если MCP выключен настройкой.
 	mcp *mcp.Server
+	// Версия сборки (-X main.version в cmd/api); пусто — dev.
+	version string
 }
 
 func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
@@ -48,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 
 	r := gin.New()
 	r.Use(requestID(), requestLog(s.log), recovery(s.log))
+	r.Use(serverVersion(s.buildVersion()))
 
 	// Пробы вне группы с резолвом актора: kubelet не присылает заголовков и не
 	// должен заводить принципала на каждый опрос.
@@ -70,6 +73,9 @@ func (s *Server) Handler() http.Handler {
 	// CLI без токена, подтверждает — вошедший из интерфейса.
 	r.POST("/v1/auth/cli", s.cliLoginStart)
 	r.POST("/v1/auth/cli/poll", s.cliLoginPoll)
+	// Сведения об инстансе (CLAB-87): версия, профиль и способы входа одним
+	// открытым запросом — его читают и страница входа, и clab version.
+	r.GET("/v1/instance", s.instance)
 
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)

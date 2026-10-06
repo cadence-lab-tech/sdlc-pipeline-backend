@@ -81,7 +81,7 @@ func commands() []command {
 		{"role", "показать роль или завести версию инструкции", "clab role show analyst | clab role put --key analyst --name Аналитик --file instructions.md [--contract contract.json]", cmdRole},
 		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
-		{"version", "версия clab", "clab version", cmdVersion},
+		{"version", "версия clab и сервера", "clab version", cmdVersion},
 	}
 }
 
@@ -132,14 +132,8 @@ func usage() {
 }
 
 // version подставляется при сборке: -ldflags "-X main.version=…".
+// Сверка с сервером и clab version — в version.go.
 var version = "dev"
-
-func cmdVersion(_ context.Context, _ *Client, _ []string) error {
-	return emit(map[string]any{"version": version}, func() error {
-		fmt.Println("clab", version)
-		return nil
-	})
-}
 
 // exit печатает ошибку домена так, чтобы её можно было разобрать скриптом:
 // код ошибки уходит в stderr первым словом, подробности — JSON'ом.
