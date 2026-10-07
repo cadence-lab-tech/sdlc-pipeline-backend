@@ -1,4 +1,5 @@
-# Релиз clab: бинарники под три платформы по тегу v*, формула в тап Homebrew.
+# Релиз по тегу v*: бинарники clab под три платформы с формулой в тап
+# Homebrew и образ сервиса той же версии (задание image ниже).
 #
 # CLI ставят на машины разработчиков, где нет ни Go, ни доступа к GHCR, —
 # поэтому не образ, а готовые архивы в GitHub Releases. Раздача публичная
@@ -133,3 +134,67 @@ jobs:
           echo "и формула не обновилась; руками:"
           echo "  gh release create ${GITHUB_REF_NAME} --repo ${TAP} dist/*"
           echo "  gh workflow run update.yml --repo ${TAP}"
+
+  # Образ версии: ghcr.io/<владелец>/sdlc-pipeline-backend:vX.Y.Z. Тот же
+  # Dockerfile, что у deploy.yml, но тег образа и VERSION — имя git-тега:
+  # /v1/instance, clab version и VERSION поставки пишут одно и то же.
+  # Выкладку нашего инстанса тег не запускает — она идёт из deploy.yml по
+  # SHA. Задание не зависит от CLI: архивы и тап выходят, даже если образ
+  # не собрался.
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HAS_SELF_HOSTED_TOKEN: ${{ secrets.SELF_HOSTED_DISPATCH_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Образ версии уходит наружу и без лицензии выходить не должен.
+      # Dockerfile отсутствие файла терпит — ради сборок по SHA.
+      - name: лицензия на месте
+        run: |
+          if [ ! -f LICENSE ]; then
+            echo "::error file=LICENSE::в корне репозитория нет LICENSE — образ ${GITHUB_REF_NAME} без лицензии не публикуется"
+            exit 1
+          fi
+
+      - id: meta
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Метка source привязывает пакет к репозиторию — видимость в GHCR
+      # тогда переключается на пакете целиком.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend:${{ github.ref_name }}
+          build-args: VERSION=${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Событие cadence-release шлёт тот выпуск, который опубликовал свой
+      # образ вторым (см. скрипт). Без секрета шаг не падает, а печатает
+      # команду для отправки руками.
+      - name: оповестить self-hosted
+        env:
+          VERSION: ${{ github.ref_name }}
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+          SELF: backend
+          HAS_TOKEN: ${{ env.HAS_SELF_HOSTED_TOKEN }}
+          GH_TOKEN: ${{ secrets.SELF_HOSTED_DISPATCH_TOKEN }}
+        run: .github/release/notify-self-hosted.sh
