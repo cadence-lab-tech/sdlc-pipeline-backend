@@ -146,30 +146,39 @@ type MissingEmbedding struct {
 	TextSHA string
 }
 
-// ChunksMissingEmbeddings отдаёт куски без векторов. Куски кода берутся только
-// из актуальных прогонов: платить за векторизацию истории коммитов незачем,
-// поиск по ней всё равно не ходит.
-func (s *Store) ChunksMissingEmbeddings(ctx context.Context, q Querier, limit int) ([]MissingEmbedding, error) {
+// latestRuns — последний завершённый прогон каждой ветки, без фильтра по
+// проекту: досчёт векторов идёт по всему инстансу.
+const latestRuns = `
+	WITH runs AS (
+	    SELECT DISTINCT ON (repository_id, branch) id
+	    FROM repo_index_runs WHERE state = 'completed'
+	    ORDER BY repository_id, branch, finished_at DESC
+	)`
+
+// ChunksMissingEmbeddings отдаёт куски без вектора текущей модели: записанные
+// без вектора или посчитанные другой моделью. Куски кода берутся только из
+// актуальных прогонов: платить за векторизацию истории коммитов незачем, поиск
+// по ней всё равно не ходит.
+//
+// Store о провайдерах не знает: model — это Model() эмбеддера вызывающего.
+func (s *Store) ChunksMissingEmbeddings(ctx context.Context, q Querier, model string, limit int) ([]MissingEmbedding, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.Query(ctx, `
-		WITH runs AS (
-		    SELECT DISTINCT ON (repository_id, branch) id
-		    FROM repo_index_runs WHERE state = 'completed'
-		    ORDER BY repository_id, branch, finished_at DESC
-		)
+	rows, err := q.Query(ctx, latestRuns+`
 		(SELECT 'code', cc.id, cc.text, coalesce(cc.text_sha, '')
 		   FROM code_chunks cc
 		   JOIN code_files cf ON cf.id = cc.code_file_id
 		   JOIN runs ON runs.id = cf.index_run_id
-		  WHERE cc.embedding IS NULL LIMIT $1)
+		  WHERE cc.embedding IS NULL OR cc.embedding_model IS DISTINCT FROM $2 LIMIT $1)
 		UNION ALL
 		(SELECT 'artifact', ac.id, ac.text, coalesce(ac.text_sha, '')
-		   FROM artifact_chunks ac WHERE ac.embedding IS NULL LIMIT $1)
+		   FROM artifact_chunks ac
+		  WHERE ac.embedding IS NULL OR ac.embedding_model IS DISTINCT FROM $2 LIMIT $1)
 		UNION ALL
 		(SELECT 'document', dc.id, dc.text, coalesce(dc.text_sha, '')
-		   FROM document_chunks dc WHERE dc.embedding IS NULL LIMIT $1)`, limit)
+		   FROM document_chunks dc
+		  WHERE dc.embedding IS NULL OR dc.embedding_model IS DISTINCT FROM $2 LIMIT $1)`, limit, model)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -184,6 +193,28 @@ func (s *Store) ChunksMissingEmbeddings(ctx context.Context, q Querier, limit in
 		out = append(out, m)
 	}
 	return out, translate(rows.Err())
+}
+
+// ClearStaleRunEmbeddings снимает векторы других моделей с кусков кода
+// неактуальных прогонов — тех, что не последние завершённые в своей ветке.
+//
+// Пересчитывать их незачем: поиск ходит только по актуальному индексу, а
+// прогоны истории держатся ради базовых линий и детектора дрейфа, которому
+// векторы не нужны. Одним UPDATE, без вызова модели. Без этого строки прежней
+// модели оставались бы в базе до вычистки прогона.
+func (s *Store) ClearStaleRunEmbeddings(ctx context.Context, q Querier, model string) (int, error) {
+	tag, err := q.Exec(ctx, latestRuns+`
+		UPDATE code_chunks cc
+		   SET embedding = NULL, embedding_model = NULL
+		 WHERE cc.embedding IS NOT NULL
+		   AND cc.embedding_model IS DISTINCT FROM $1
+		   AND NOT EXISTS (
+		       SELECT 1 FROM code_files cf JOIN runs ON runs.id = cf.index_run_id
+		        WHERE cf.id = cc.code_file_id)`, model)
+	if err != nil {
+		return 0, translate(err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *Store) SetChunkEmbedding(ctx context.Context, q Querier, source string, id uuid.UUID, vec []float32, model string) error {

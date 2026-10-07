@@ -112,6 +112,14 @@ type Indexer struct {
 	headErrors map[string]string
 }
 
+// embedderModel — модель текущего эмбеддера; пусто, когда провайдера нет.
+func (ix *Indexer) embedderModel() string {
+	if ix.embedder == nil {
+		return ""
+	}
+	return ix.embedder.Model()
+}
+
 func New(store *postgres.Store, source Source, embedder embed.Embedder, log *slog.Logger, opts Options) *Indexer {
 	if opts.MaxFileBytes <= 0 {
 		opts.MaxFileBytes = defaultMaxFileBytes
@@ -365,8 +373,9 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		prev, existed := parentFiles[e.Path]
 
 		if existed && prev.SourceSHA != "" && prev.SourceSHA == e.SHA {
-			// Файл не изменился: ни сети, ни модели он не стоит.
-			chunks, err := ix.store.CopyFileFromParent(ctx, ix.store.DB(), run.ID, prev.ID)
+			// Файл не изменился: ни сети, ни модели он не стоит. Векторы
+			// прежней модели не наследуются — их пересчитает досчёт.
+			chunks, err := ix.store.CopyFileFromParent(ctx, ix.store.DB(), run.ID, prev.ID, ix.embedderModel())
 			if err != nil {
 				return counters, cache, err
 			}

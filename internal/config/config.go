@@ -76,14 +76,24 @@ type Config struct {
 	IndexMaxFiles     int
 	ChunkMaxChars     int
 
-	// Эмбеддинги: voyage — модель, hash — детерминированная заглушка для
-	// локального прогона без ключа, none — вектора не считаются и поиск
+	// Эмбеддинги: voyage — модель Voyage, openai — любой OpenAI-совместимый
+	// эндпоинт (OpenAI, Ollama, TEI, vLLM), hash — детерминированная заглушка
+	// для локального прогона без ключа, none — вектора не считаются и поиск
 	// вырождается в полнотекстовый.
-	EmbeddingProvider string
-	EmbeddingModel    string
-	EmbeddingBatch    int
-	VoyageAPIURL      string
-	VoyageAPIKey      string
+	//
+	// EmbeddingModel после Load уже выбрана под провайдера: у voyage своя по
+	// умолчанию, у openai умолчания нет — имя модели чужого сервера угадать
+	// нельзя. EmbeddingURL — базовый адрес OpenAI-совместимого API (…/v1),
+	// EmbeddingSendDimensions — отправлять ли в запросе dimensions: часть
+	// серверов отвечает 400 на незнакомое поле.
+	EmbeddingProvider       string
+	EmbeddingModel          string
+	EmbeddingBatch          int
+	EmbeddingURL            string
+	EmbeddingAPIKey         string
+	EmbeddingSendDimensions bool
+	VoyageAPIURL            string
+	VoyageAPIKey            string
 
 	// Движок
 	// StrictGates=false: гейт нереализованного типа отдаёт skipped и пропускает
@@ -214,9 +224,11 @@ func Load() (Config, error) {
 		IndexMaxFiles:         20000,
 		ChunkMaxChars:         1600,
 		EmbeddingProvider:     env("SDLC_EMBEDDINGS_PROVIDER", ""),
-		EmbeddingModel:        env("SDLC_EMBEDDINGS_MODEL", "voyage-code-3"),
+		EmbeddingModel:        env("SDLC_EMBEDDINGS_MODEL", ""),
 		EmbeddingBatch:        96,
-		VoyageAPIURL:          env("SDLC_VOYAGE_API_URL", "https://api.voyageai.com/v1/embeddings"),
+		EmbeddingURL:          strings.TrimRight(env("SDLC_EMBEDDINGS_URL", ""), "/"),
+		EmbeddingAPIKey:       env("SDLC_EMBEDDINGS_API_KEY", ""),
+		VoyageAPIURL:          env("SDLC_VOYAGE_API_URL", ""),
 		VoyageAPIKey:          env("SDLC_VOYAGE_API_KEY", ""),
 		AuthMode:              env("SDLC_AUTH_MODE", ""),
 		AdminHandle:           env("SDLC_ADMIN_HANDLE", "admin"),
@@ -380,23 +392,11 @@ func Load() (Config, error) {
 	if c.EmbeddingBatch, err = envPositiveInt("SDLC_EMBEDDINGS_BATCH", c.EmbeddingBatch, indexSizeHint); err != nil {
 		return c, err
 	}
-	// Провайдер по умолчанию выводится из наличия ключа: забыть переменную
-	// провайдера при заданном ключе — типичная причина молча пустого индекса.
-	if c.EmbeddingProvider == "" {
-		if c.VoyageAPIKey != "" {
-			c.EmbeddingProvider = "voyage"
-		} else {
-			c.EmbeddingProvider = "none"
-		}
+	if c.EmbeddingSendDimensions, err = envBool("SDLC_EMBEDDINGS_SEND_DIMENSIONS", true); err != nil {
+		return c, err
 	}
-	switch c.EmbeddingProvider {
-	case "voyage":
-		if c.VoyageAPIKey == "" {
-			return c, fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER=voyage без SDLC_VOYAGE_API_KEY")
-		}
-	case "hash", "none":
-	default:
-		return c, fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER: %q — не voyage, hash или none", c.EmbeddingProvider)
+	if err := resolveEmbeddings(&c); err != nil {
+		return c, err
 	}
 
 	// Режим аутентификации по умолчанию выводится из окружения: локальная
@@ -492,6 +492,66 @@ func Load() (Config, error) {
 // мегабайты в строке таблицы — ровно то, от чего спасает вынос. Проверка
 // безусловна, как и проверка на непозитивные значения: противоречивая пара не
 // должна лежать незамеченной до дня, когда включат внешнее хранилище.
+// Адреса и модели эмбеддингов по умолчанию.
+const (
+	defaultVoyageURL   = "https://api.voyageai.com/v1/embeddings"
+	defaultVoyageModel = "voyage-code-3"
+	defaultOpenAIURL   = "https://api.openai.com/v1"
+)
+
+// resolveEmbeddings выбирает провайдера эмбеддингов и доводит его настройки
+// до рабочих.
+//
+// Провайдер по умолчанию выводится из ключа Voyage: забыть переменную
+// провайдера при заданном ключе — типичная причина молча пустого индекса, а
+// наш инстанс так и настроен. Общие SDLC_EMBEDDINGS_URL и _API_KEY служат
+// Voyage запасными к SDLC_VOYAGE_*, но сами провайдера не выбирают: по ним не
+// понять, чей это сервер.
+func resolveEmbeddings(c *Config) error {
+	if c.EmbeddingProvider == "" {
+		if c.VoyageAPIKey != "" {
+			c.EmbeddingProvider = "voyage"
+		} else {
+			c.EmbeddingProvider = "none"
+		}
+	}
+	switch c.EmbeddingProvider {
+	case "voyage":
+		if c.VoyageAPIKey == "" {
+			c.VoyageAPIKey = c.EmbeddingAPIKey
+		}
+		if c.VoyageAPIKey == "" {
+			return fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER=voyage без SDLC_VOYAGE_API_KEY (или SDLC_EMBEDDINGS_API_KEY)")
+		}
+		// SDLC_VOYAGE_API_URL — адрес ручки целиком, SDLC_EMBEDDINGS_URL —
+		// базовый адрес API, к которому ручка дописывается.
+		if c.VoyageAPIURL == "" && c.EmbeddingURL != "" {
+			c.VoyageAPIURL = c.EmbeddingURL + "/embeddings"
+		}
+		if c.VoyageAPIURL == "" {
+			c.VoyageAPIURL = defaultVoyageURL
+		}
+		if c.EmbeddingModel == "" {
+			c.EmbeddingModel = defaultVoyageModel
+		}
+	case "openai":
+		// Модель у OpenAI-совместимого сервера своя у каждого: voyage-code-3
+		// по умолчанию ушёл бы чужому серверу и вернулся бы 404 на каждом
+		// прогоне индексации.
+		if c.EmbeddingModel == "" {
+			return fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER=openai без SDLC_EMBEDDINGS_MODEL: " +
+				"модель OpenAI-совместимого сервера по умолчанию не угадать, задайте её явно")
+		}
+		if c.EmbeddingURL == "" {
+			c.EmbeddingURL = defaultOpenAIURL
+		}
+	case "hash", "none":
+	default:
+		return fmt.Errorf("SDLC_EMBEDDINGS_PROVIDER: %q — не voyage, openai, hash или none", c.EmbeddingProvider)
+	}
+	return nil
+}
+
 func checkBlobLimits(inline, maxBytes int) error {
 	if inline > maxBytes {
 		return fmt.Errorf("SDLC_BLOB_INLINE_MAX_BYTES (%d) больше SDLC_BLOB_MAX_BYTES (%d): "+
