@@ -190,6 +190,61 @@ gh release download --repo cadence-lab-tech/homebrew-tap \
 формула и `install.sh`, а здесь у релиза остаются только заметки. Код
 сервиса закрыт, наружу выходят только бинарники CLI.
 
+### Выпуск версии
+
+Версия — один тег `vX.Y.Z` на `main` обоих репозиториев, backend и
+[frontend](https://github.com/cadence-lab-tech/sdlc-pipeline-frontend), в любом
+порядке. По тегу каждый `release.yml` публикует свой образ:
+
+| Образ | Что внутри |
+|---|---|
+| `ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:vX.Y.Z` | api, worker, clab, собранные с `VERSION=vX.Y.Z`; `/LICENSE` |
+| `ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:vX.Y.Z` | статика интерфейса в Caddy; `/LICENSE` |
+
+Тег образа совпадает с git-тегом, буква `v` остаётся. `/LICENSE` — файл
+`LICENSE` из корня репозитория на коммите тега; без него задание `image`
+падает до сборки, и образ версии не выходит. Сборки по SHA из `deploy.yml`
+отсутствие файла терпят, а тег их не запускает: наш инстанс выкатывается
+только по push в `main`. Архивы CLI и событие `clab-release` в тап — как
+раньше.
+
+Когда в реестре есть оба образа версии, в
+[`cadence-lab-tech/self-hosted`](https://github.com/cadence-lab-tech/self-hosted)
+уходит `repository_dispatch`:
+
+```json
+{"event_type": "cadence-release",
+ "client_payload": {"version": "vX.Y.Z",
+                    "backend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:vX.Y.Z",
+                    "frontend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:vX.Y.Z"}}
+```
+
+Шлёт его тот выпуск, который опубликовал свой образ вторым: после push шаг
+«оповестить self-hosted» (`.github/release/notify-self-hosted.sh`, такой же
+во frontend) смотрит в реестр, есть ли образ второй половины. Если оба
+выпуска закончат одновременно, событие может прийти дважды — обработчик в
+`self-hosted` идемпотентен. Проверка скрипта без сети —
+`bash .github/release/notify-self-hosted.test.sh`.
+
+Что нужно завести:
+
+- секрет `SELF_HOSTED_DISPATCH_TOKEN` в backend и frontend (или секрет
+  организации на оба): fine-grained PAT владельца `cadence-lab-tech` с
+  доступом только к `cadence-lab-tech/self-hosted`, право Contents: Read and
+  write. Без секрета прогон зелёный, а шаг печатает команду для отправки
+  руками;
+- пока пакеты GHCR приватные — чтение чужого пакета из прогона: в настройках
+  пакета `sdlc-pipeline-frontend` → Manage Actions access → репозиторий
+  `sdlc-pipeline-backend` с ролью Read, и наоборот. Иначе каждый выпуск
+  видит отказ реестра вместо второго образа и событие не уходит.
+
+Пришла только половина выпуска — в логе шага «оповестить self-hosted»
+написано, какого образа нет, и ответ реестра. Поставить тег во втором
+репозитории или перезапустить упавший прогон (`gh run rerun <id> --failed`):
+событие отправит он. Отправить руками — команда из лога шага при прогоне без
+секрета: `gh api repos/cadence-lab-tech/self-hosted/dispatches -f
+event_type=cadence-release -f 'client_payload[version]=vX.Y.Z'`.
+
 ## Структура
 
 ```
