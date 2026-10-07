@@ -28,6 +28,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -o /out/clab ./cmd/clab && \
     mkdir -p /out/blobs
 
+# LICENSE из корня репозитория ложится в корень образа, /LICENSE. Файла нет —
+# каталог пуст и сборка по SHA для нашего инстанса не падает; образ версии
+# без лицензии не выпускает release.yml, он проверяет файл до сборки.
+RUN mkdir -p /out/license && if [ -f LICENSE ]; then cp LICENSE /out/license/; fi
+
 # distroless без shell: внутрь нечего эксплуатировать, а проба готовности
 # делается самим бинарником (api healthcheck).
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -42,6 +47,7 @@ COPY --from=build /out/clab /clab
 # владельцем nonroot: именованный том наследует права каталога образа, а
 # пустой том создался бы под root, и сервис не смог бы в него писать.
 COPY --from=build --chown=nonroot:nonroot /out/blobs /blobs
+COPY --from=build /out/license/ /
 
 USER nonroot:nonroot
 EXPOSE 8080
