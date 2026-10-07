@@ -66,7 +66,9 @@ func (e *Engine) SearchContext(ctx context.Context, projectKey string, in Search
 			// и без модели, и агенту лучше получить меньше, чем ничего.
 			e.log.Warn("вектор запроса не посчитан, ищем полнотекстом", "error", err)
 		} else if len(vectors) == 1 {
-			q.Vector = vectors[0]
+			// Вектор ищет только среди кусков той же модели: после смены
+			// модели прежние векторы несравнимы и ждут досчёта.
+			q.Vector, q.Model = vectors[0], e.embedder.Model()
 			out.Mode = "hybrid"
 		}
 	}

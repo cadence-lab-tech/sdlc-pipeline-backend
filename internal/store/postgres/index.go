@@ -443,7 +443,13 @@ func (s *Store) InsertCodeSymbols(ctx context.Context, q Querier, fileID, repoID
 // Это и есть инкрементальность: неизменившийся файл не выкачивается, не
 // режется заново и не эмбеддится — его куски вместе с уже посчитанными
 // векторами копируются одним запросом.
-func (s *Store) CopyFileFromParent(ctx context.Context, q Querier, runID, parentFileID uuid.UUID) (int, error) {
+//
+// model — модель текущего эмбеддера. Вектор другой модели не копируется:
+// после смены модели он несравним с новыми, и кусок уходит на досчёт без
+// вектора, а не тащит прежнюю модель в каждый следующий прогон. Пустая model
+// (провайдер выключен) копирует векторы как есть: поиск их без вектора
+// запроса всё равно не использует, а при возврате провайдера они пригодятся.
+func (s *Store) CopyFileFromParent(ctx context.Context, q Querier, runID, parentFileID uuid.UUID, model string) (int, error) {
 	var newFileID uuid.UUID
 	err := q.QueryRow(ctx, `
 		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes, blob_sha, source_sha)
@@ -459,8 +465,10 @@ func (s *Store) CopyFileFromParent(ctx context.Context, q Querier, runID, parent
 		    (code_file_id, project_id, ord, start_line, end_line, symbol_fqn,
 		     text, token_count, text_sha, embedding, embedding_model)
 		SELECT $1, project_id, ord, start_line, end_line, symbol_fqn,
-		       text, token_count, text_sha, embedding, embedding_model
-		FROM code_chunks WHERE code_file_id = $2`, newFileID, parentFileID)
+		       text, token_count, text_sha,
+		       CASE WHEN $3 = '' OR embedding_model = $3 THEN embedding END,
+		       CASE WHEN $3 = '' OR embedding_model = $3 THEN embedding_model END
+		FROM code_chunks WHERE code_file_id = $2`, newFileID, parentFileID, model)
 	if err != nil {
 		return 0, translate(err)
 	}
