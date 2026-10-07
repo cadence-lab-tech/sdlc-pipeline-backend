@@ -563,6 +563,14 @@ install`, таблицы для команд чтения и `--json`, рели�
 раздача — публичный тап `cadence-lab-tech/homebrew-tap` ([решение 0038](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0038-public-cli-distribution.md)):
 `release.yml` выкладывает архивы релизом туда и шлёт `repository_dispatch` с
 тегом и суммами, формулу и `install.sh` держит сам тап, качают без токена.
+Тот же тег собирает образ версии `sdlc-pipeline-backend:vX.Y.Z` (задание
+`image`: `VERSION` из тега, `/LICENSE` внутри, без `LICENSE` в корне выпуск
+падает до сборки); frontend по тому же тегу — свой образ. Тот выпуск, что
+опубликовал образ вторым, шлёт `cadence-release` с `client_payload.version`
+в `cadence-lab-tech/self-hosted` (`.github/release/notify-self-hosted.sh`,
+одинаковый в обоих репозиториях, секрет `SELF_HOSTED_DISPATCH_TOKEN`).
+Порядок выпуска и что делать с половиной — раздел «Выпуск версии» в
+README.
 
 Фаза 8, арендатор ([решение 0033](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0033-tenant-is-team.md)):
 `teams.kind`, личная команда при входе, обязательный `owner_team_id`,
