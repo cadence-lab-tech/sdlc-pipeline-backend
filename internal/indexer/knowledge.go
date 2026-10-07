@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -87,17 +88,57 @@ func (ix *Indexer) textChunks(ctx context.Context, t postgres.PendingChunkTarget
 	return out, nil
 }
 
-// BackfillEmbeddings досчитывает векторы кускам, записанным без них.
+// RefreshStats — итог прохода досчёта: сколько кусков получили вектор текущей
+// модели и у скольких кусков неактуальных прогонов вектор прежней модели снят.
+type RefreshStats struct {
+	Embedded int
+	Cleared  int
+}
+
+// RefreshEmbeddings переводит индекс на текущую модель: снимает векторы
+// прежних моделей с неактуальных прогонов и досчитывает пачками всё, что без
+// вектора текущей модели, пока кандидаты не кончатся или не выйдет бюджет.
+//
+// Одной пачки за проход мало: после смены модели пересчитывать приходится
+// весь актуальный индекс. Ошибка модели (429, сеть) прерывает проход с тем,
+// что уже успели, — остальное досчитает следующий.
+//
+// Без провайдера ничего не делает: векторы, посчитанные раньше, остаются в
+// базе, а поиск без вектора запроса их всё равно не использует.
+func (ix *Indexer) RefreshEmbeddings(ctx context.Context, batch int, budget time.Duration) (RefreshStats, error) {
+	var stats RefreshStats
+	if ix.embedder == nil {
+		return stats, nil
+	}
+	cleared, err := ix.store.ClearStaleRunEmbeddings(ctx, ix.store.DB(), ix.embedder.Model())
+	if err != nil {
+		return stats, err
+	}
+	stats.Cleared = cleared
+
+	deadline := time.Now().Add(budget)
+	for {
+		n, err := ix.BackfillEmbeddings(ctx, batch)
+		stats.Embedded += n
+		if err != nil || n == 0 || !time.Now().Before(deadline) {
+			return stats, err
+		}
+	}
+}
+
+// BackfillEmbeddings досчитывает одну пачку векторов кускам, записанным без
+// них или посчитанным другой моделью.
 //
 // Нужен ровно потому, что прогон не валится из-за недоступной модели: индекс
 // строится, поиск живёт на полнотекстовом, а векторы приезжают, когда
 // провайдер снова отвечает — или когда его вообще включили после того, как
-// система уже поработала без него.
+// система уже поработала без него. Смена модели — тот же случай: векторы
+// прежней несравнимы с новыми, поиск их не видит, и их надо посчитать заново.
 func (ix *Indexer) BackfillEmbeddings(ctx context.Context, limit int) (int, error) {
 	if ix.embedder == nil {
 		return 0, nil
 	}
-	missing, err := ix.store.ChunksMissingEmbeddings(ctx, ix.store.DB(), limit)
+	missing, err := ix.store.ChunksMissingEmbeddings(ctx, ix.store.DB(), ix.embedder.Model(), limit)
 	if err != nil || len(missing) == 0 {
 		return 0, err
 	}

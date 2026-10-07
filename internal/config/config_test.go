@@ -691,3 +691,142 @@ func TestIndexBlobLimitDefaultsPass(t *testing.T) {
 		})
 	}
 }
+
+// Переменные эмбеддингов, которые тест обязан сбросить: окружение машины,
+// на которой гоняют тесты, могло их задать.
+var embeddingVars = []string{
+	"SDLC_EMBEDDINGS_PROVIDER", "SDLC_EMBEDDINGS_MODEL", "SDLC_EMBEDDINGS_URL",
+	"SDLC_EMBEDDINGS_API_KEY", "SDLC_EMBEDDINGS_SEND_DIMENSIONS",
+	"SDLC_VOYAGE_API_URL", "SDLC_VOYAGE_API_KEY",
+}
+
+func embeddingEnv(t *testing.T, vars map[string]string) {
+	t.Helper()
+	t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+	for _, name := range embeddingVars {
+		t.Setenv(name, vars[name])
+	}
+}
+
+// К6.1: конфиг нашего инстанса — только ключ Voyage — даёт voyage-code-3.
+func TestEmbeddingsVoyageByKey(t *testing.T) {
+	embeddingEnv(t, map[string]string{"SDLC_VOYAGE_API_KEY": "pa-test"})
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.EmbeddingProvider != "voyage" || c.EmbeddingModel != "voyage-code-3" ||
+		c.VoyageAPIKey != "pa-test" || c.VoyageAPIURL != "https://api.voyageai.com/v1/embeddings" {
+		t.Fatalf("voyage по ключу: %q %q %q %q",
+			c.EmbeddingProvider, c.EmbeddingModel, c.VoyageAPIKey, c.VoyageAPIURL)
+	}
+}
+
+// Б4: без ключа и провайдера — none.
+func TestEmbeddingsNoneByDefault(t *testing.T) {
+	embeddingEnv(t, nil)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.EmbeddingProvider != "none" {
+		t.Fatalf("провайдер по умолчанию %q", c.EmbeddingProvider)
+	}
+}
+
+// К1.1, С1: openai четырьмя переменными; адрес без хвостового слэша,
+// dimensions отправляется по умолчанию.
+func TestEmbeddingsOpenAI(t *testing.T) {
+	embeddingEnv(t, map[string]string{
+		"SDLC_EMBEDDINGS_PROVIDER": "openai",
+		"SDLC_EMBEDDINGS_URL":      "http://ollama:11434/v1/",
+		"SDLC_EMBEDDINGS_API_KEY":  "sk-test",
+		"SDLC_EMBEDDINGS_MODEL":    "bge-m3",
+	})
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.EmbeddingProvider != "openai" || c.EmbeddingURL != "http://ollama:11434/v1" ||
+		c.EmbeddingAPIKey != "sk-test" || c.EmbeddingModel != "bge-m3" || !c.EmbeddingSendDimensions {
+		t.Fatalf("openai: %+v", c)
+	}
+}
+
+// С1: без адреса — адрес OpenAI; С2: dimensions выключается.
+func TestEmbeddingsOpenAIDefaults(t *testing.T) {
+	embeddingEnv(t, map[string]string{
+		"SDLC_EMBEDDINGS_PROVIDER":        "openai",
+		"SDLC_EMBEDDINGS_MODEL":           "text-embedding-3-small",
+		"SDLC_EMBEDDINGS_SEND_DIMENSIONS": "false",
+	})
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.EmbeddingURL != "https://api.openai.com/v1" || c.EmbeddingSendDimensions || c.EmbeddingAPIKey != "" {
+		t.Fatalf("умолчания openai: %q send=%v key=%q", c.EmbeddingURL, c.EmbeddingSendDimensions, c.EmbeddingAPIKey)
+	}
+}
+
+// К1.5: openai без модели — ошибка с именем переменной; voyage-code-3 на
+// openai не переносится.
+func TestEmbeddingsOpenAIRequiresModel(t *testing.T) {
+	embeddingEnv(t, map[string]string{"SDLC_EMBEDDINGS_PROVIDER": "openai"})
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "SDLC_EMBEDDINGS_MODEL") {
+		t.Fatalf("openai без модели: %v", err)
+	}
+}
+
+// К1.5: неизвестный провайдер — среди допустимых значений есть openai.
+func TestEmbeddingsUnknownProvider(t *testing.T) {
+	embeddingEnv(t, map[string]string{"SDLC_EMBEDDINGS_PROVIDER": "cohere"})
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "openai") || !strings.Contains(err.Error(), "cohere") {
+		t.Fatalf("неизвестный провайдер: %v", err)
+	}
+}
+
+// Вопрос 3 аналитика: общие SDLC_EMBEDDINGS_URL и _API_KEY — запасные к
+// SDLC_VOYAGE_*; свои переменные Voyage главнее.
+func TestEmbeddingsVoyageFallbackVars(t *testing.T) {
+	embeddingEnv(t, map[string]string{
+		"SDLC_EMBEDDINGS_PROVIDER": "voyage",
+		"SDLC_EMBEDDINGS_URL":      "https://proxy.example/v1",
+		"SDLC_EMBEDDINGS_API_KEY":  "pa-shared",
+	})
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.VoyageAPIKey != "pa-shared" || c.VoyageAPIURL != "https://proxy.example/v1/embeddings" ||
+		c.EmbeddingModel != "voyage-code-3" {
+		t.Fatalf("запасные переменные voyage: %q %q %q", c.VoyageAPIKey, c.VoyageAPIURL, c.EmbeddingModel)
+	}
+
+	embeddingEnv(t, map[string]string{
+		"SDLC_EMBEDDINGS_PROVIDER": "voyage",
+		"SDLC_EMBEDDINGS_URL":      "https://proxy.example/v1",
+		"SDLC_EMBEDDINGS_API_KEY":  "pa-shared",
+		"SDLC_VOYAGE_API_URL":      "https://voyage.example/v1/embeddings",
+		"SDLC_VOYAGE_API_KEY":      "pa-own",
+	})
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if c.VoyageAPIKey != "pa-own" || c.VoyageAPIURL != "https://voyage.example/v1/embeddings" {
+		t.Fatalf("свои переменные voyage не главнее: %q %q", c.VoyageAPIKey, c.VoyageAPIURL)
+	}
+
+	// Общий ключ провайдера не выбирает: по нему не понять, чей сервер.
+	embeddingEnv(t, map[string]string{"SDLC_EMBEDDINGS_API_KEY": "sk-test"})
+	if c, err = Load(); err != nil || c.EmbeddingProvider != "none" {
+		t.Fatalf("общий ключ выбрал провайдера %q: %v", c.EmbeddingProvider, err)
+	}
+
+	embeddingEnv(t, map[string]string{"SDLC_EMBEDDINGS_PROVIDER": "voyage"})
+	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "SDLC_VOYAGE_API_KEY") {
+		t.Fatalf("voyage без ключа: %v", err)
+	}
+}

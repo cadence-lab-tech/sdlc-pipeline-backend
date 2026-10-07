@@ -45,7 +45,12 @@ type SearchInput struct {
 	Query     string
 	// Вектор запроса. Пустой — поиск остаётся полнотекстовым: без провайдера
 	// эмбеддингов система обязана продолжать работать, просто хуже.
-	Vector       []float32
+	Vector []float32
+	// Модель, посчитавшая Vector. Векторная половина ищет только среди
+	// кусков этой модели: векторы разных моделей несравнимы, и после смены
+	// модели старые дали бы шум с уверенным видом. Куски прежней модели
+	// находит полнотекстовая половина, пока их не пересчитал досчёт.
+	Model        string
 	Scopes       []string
 	Repositories []string
 	TopK         int
@@ -143,7 +148,7 @@ func (s *Store) searchScope(ctx context.Context, q Querier, scope string, in Sea
 		}
 	}
 	if len(in.Vector) > 0 {
-		vector, err = s.searchQuery(ctx, q, vectorSQL, scan, in.ProjectID, in.Repositories, vectorLiteral(in.Vector), limit)
+		vector, err = s.searchQuery(ctx, q, vectorSQL, scan, in.ProjectID, in.Repositories, vectorLiteral(in.Vector), limit, in.Model)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -153,9 +158,9 @@ func (s *Store) searchScope(ctx context.Context, q Querier, scope string, in Sea
 
 func (s *Store) searchQuery(ctx context.Context, q Querier, sql string,
 	scan func(rows interface{ Scan(...any) error }) (SearchHit, error),
-	projectID uuid.UUID, repos []string, arg string, limit int) ([]SearchHit, error) {
+	projectID uuid.UUID, repos []string, arg string, limit int, extra ...any) ([]SearchHit, error) {
 
-	rows, err := q.Query(ctx, sql, projectID, repos, arg, limit)
+	rows, err := q.Query(ctx, sql, append([]any{projectID, repos, arg, limit}, extra...)...)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -202,7 +207,7 @@ func codeSearchSQL() (string, string, func(interface{ Scan(...any) error }) (Sea
 		LIMIT $4`
 
 	vector := currentRuns + columns + `
-		  AND cc.embedding IS NOT NULL
+		  AND cc.embedding IS NOT NULL AND cc.embedding_model = $5
 		ORDER BY cc.embedding <=> $3::vector
 		LIMIT $4`
 
@@ -234,7 +239,7 @@ func artifactSearchSQL() (string, string, func(interface{ Scan(...any) error }) 
 		LIMIT $4`
 
 	vector := columns + `
-		  AND ac.embedding IS NOT NULL
+		  AND ac.embedding IS NOT NULL AND ac.embedding_model = $5
 		ORDER BY ac.embedding <=> $3::vector
 		LIMIT $4`
 
@@ -261,7 +266,7 @@ func documentSearchSQL() (string, string, func(interface{ Scan(...any) error }) 
 		LIMIT $4`
 
 	vector := columns + `
-		  AND dc.embedding IS NOT NULL
+		  AND dc.embedding IS NOT NULL AND dc.embedding_model = $5
 		ORDER BY dc.embedding <=> $3::vector
 		LIMIT $4`
 

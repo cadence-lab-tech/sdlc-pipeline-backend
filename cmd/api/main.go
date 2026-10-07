@@ -91,14 +91,19 @@ func run() error {
 		log.Info("доступ к GitHub через приложение", "app_id", cfg.GitHubAppID)
 	}
 
+	// Индексацию ведёт воркер, но вектор поискового запроса считается
+	// здесь: поиск синхронный, и ждать фонового прохода ему нечего. Модель
+	// не той размерности останавливает старт (embed.New).
+	embedder, err := embed.New(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
 	engine := workflow.NewEngine(store, log, workflow.Options{
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
 		HeartbeatInterval: cfg.HeartbeatInterval,
-		// Индексацию ведёт воркер, но вектор поискового запроса считается
-		// здесь: поиск синхронный, и ждать фонового прохода ему нечего.
-		Embedder: newEmbedder(cfg, log),
-		GitHub:   gh,
+		Embedder:          embedder,
+		GitHub:            gh,
 	})
 	authoring := workflow.NewAuthoring(store, log, engine)
 	if !cfg.StrictGates {
@@ -249,20 +254,6 @@ func newLogger(cfg config.Config) *slog.Logger {
 		return slog.New(slog.NewJSONHandler(os.Stdout, opts))
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, opts))
-}
-
-// newEmbedder выбирает, кто векторизует поисковый запрос. Без провайдера
-// поиск остаётся полнотекстовым — это рабочий режим, а не поломка.
-func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
-	switch cfg.EmbeddingProvider {
-	case "voyage":
-		return embed.NewVoyage(cfg.VoyageAPIURL, cfg.VoyageAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBatch)
-	case "hash":
-		log.Warn("эмбеддинги считает заглушка: это мешок слов, а не семантика")
-		return embed.Hash{}
-	default:
-		return nil
-	}
 }
 
 // githubAccess — доступ к репозиторию учётными данными проекта. Движок знает

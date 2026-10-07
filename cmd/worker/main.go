@@ -76,7 +76,12 @@ func run() error {
 	}
 	// Миграции катит api: два процесса, накатывающие схему, разошлись бы в
 	// порядке старта. Воркер работает по уже готовой схеме.
-	embedder := newEmbedder(cfg, log)
+	// Модель не той размерности останавливает старт: векторы, которые
+	// воркер посчитал бы ею, в схему vector(1024) всё равно не лягут.
+	embedder, err := embed.New(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
 	engine := workflow.NewEngine(store, log, workflow.Options{
 		StrictGates:       cfg.StrictGates,
 		LeaseTTL:          cfg.LeaseTTL,
@@ -112,7 +117,7 @@ func run() error {
 	log.Info("воркер запущен", "version", version,
 		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL,
 		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
-		"embeddings", cfg.EmbeddingProvider,
+		"embeddings", cfg.EmbeddingProvider, "embedding_model", embeddingModel(embedder),
 		"blob_gc_enabled", cfg.BlobGCEnabled, "blob_gc_interval", cfg.BlobGCInterval,
 		"blob_gc_dry_run", cfg.BlobGCDryRun,
 		"embedding_cache_gc_enabled", cfg.EmbeddingCacheGCEnabled,
@@ -278,19 +283,21 @@ func evictEmbeddings(ctx context.Context, store *postgres.Store, log *slog.Logge
 		"dry_run", cfg.EmbeddingCacheGCDryRun)
 }
 
-// newEmbedder выбирает, кто считает векторы. Провайдера может не быть вовсе:
-// тогда индекс строится без векторов, поиск живёт на полнотекстовой половине,
-// а досчитать векторы можно потом — backfill для того и написан.
-func newEmbedder(cfg config.Config, log *slog.Logger) embed.Embedder {
-	switch cfg.EmbeddingProvider {
-	case "voyage":
-		return embed.NewVoyage(cfg.VoyageAPIURL, cfg.VoyageAPIKey, cfg.EmbeddingModel, cfg.EmbeddingBatch)
-	case "hash":
-		log.Warn("эмбеддинги считает заглушка: это мешок слов, а не семантика")
-		return embed.Hash{}
-	default:
-		return nil
+// Пачка и бюджет досчёта векторов за проход воркера. Пачка — кусков на
+// источник за один заход (код, артефакты, документы), бюджет — сколько проход
+// готов отдать модели: минута из пятиминутного интервала индексации. Репозиторий
+// на 20 тыс. кусков переходит на новую модель за несколько проходов, а не за
+// сутки.
+const (
+	embedRefreshBatch  = 100
+	embedRefreshBudget = time.Minute
+)
+
+func embeddingModel(e embed.Embedder) string {
+	if e == nil {
+		return ""
 	}
+	return e.Model()
 }
 
 // indexPass — полный проход по всему, что приезжает из провайдера и уезжает
@@ -328,10 +335,16 @@ func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine
 			"artifacts", artifacts, "documents", documents)
 	}
 
-	if n, err := ix.BackfillEmbeddings(ctx, 100); err != nil {
+	// Досчёт и пересчёт на текущую модель идут пачками, пока есть кандидаты,
+	// но не дольше бюджета: после смены модели кусков десятки тысяч, а
+	// детектор пересечений и следующий прогон ждать их не должны.
+	stats, err := ix.RefreshEmbeddings(ctx, embedRefreshBatch, embedRefreshBudget)
+	if err != nil {
 		logJobError(ctx, log, "досчёт эмбеддингов", err)
-	} else if n > 0 {
-		log.Info("векторы досчитаны кускам, записанным без них", "count", n)
+	}
+	if stats.Embedded > 0 || stats.Cleared > 0 {
+		log.Info("векторы досчитаны на текущую модель",
+			"count", stats.Embedded, "cleared_stale_runs", stats.Cleared)
 	}
 
 	// Пересечение задач возникает не от движения main, а от того, что вторая
