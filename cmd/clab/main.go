@@ -45,10 +45,10 @@ func commands() []command {
 		{"mcp", "подключить локального агента к MCP проекта", "clab mcp install [--project SDLC] [--name sdlc] [--scope local|user] | clab mcp config | clab mcp url", cmdMCP},
 		{"whoami", "кто я и к какому проекту подключён", "clab whoami", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
-		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4]", cmdTasks},
+		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4] [--external PROJ-12 | --external jira:PROJ-12]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
-		{"create", "завести задачу или эпик", "clab create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot]", cmdCreate},
-		{"edit", "поправить постановку задачи", "clab edit SDLC-42 [--title ...] [--description ... | --description - | --description-file d.md] [--priority high] [--labels bug,phase8]", cmdEdit},
+		{"create", "завести задачу или эпик", "clab create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot] [--external-ref jira:PROJ-12=https://jira.example.com/browse/PROJ-12]", cmdCreate},
+		{"edit", "поправить постановку задачи", "clab edit SDLC-42 [--title ...] [--description ... | --description - | --description-file d.md] [--priority high] [--labels bug,phase8] [--external-ref jira:PROJ-12=https://… | --external-ref \"\"]", cmdEdit},
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
 		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
@@ -273,12 +273,13 @@ func cmdQueue(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdTasks(ctx context.Context, c *Client, args []string) error {
-	var projectFlag, status, taskType, parent string
+	var projectFlag, status, taskType, parent, external string
 	_, err := flags("tasks", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&status, "status", "", "фильтр по статусу")
 		fs.StringVar(&taskType, "type", "", "фильтр по типу задачи, например epic")
 		fs.StringVar(&parent, "parent", "", "только дочерние задачи этой")
+		fs.StringVar(&external, "external", "", "только задачи со ссылкой на этот тикет: PROJ-12 или jira:PROJ-12")
 	})
 	if err != nil {
 		return err
@@ -297,6 +298,9 @@ func cmdTasks(ctx context.Context, c *Client, args []string) error {
 	}
 	if parent != "" {
 		q.Set("parent", parent)
+	}
+	if external != "" {
+		q.Set("external", external)
 	}
 
 	var out json.RawMessage

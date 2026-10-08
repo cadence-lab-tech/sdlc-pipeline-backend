@@ -21,15 +21,17 @@ import (
 func (s *Server) registerOrchestrationTools() {
 	add(s, "sdlc_create_task",
 		"Завести задачу. Оркестратор так нарезает эпик: type задаёт цикл, parent вешает "+
-			"задачу на эпик, blocks задаёт порядок, assignee адресует её исполнителю. "+
+			"задачу на эпик, blocks задаёт порядок, assignee адресует её исполнителю, "+
+			"external_ref ссылается на тикет основного трекера. "+
 			"Агент вправе создавать только дочерние задачи той, которую держит, и только "+
 			"внутри её области репозиториев.",
 		s.createTask)
 	add(s, "sdlc_update_task",
-		"Поправить постановку задачи: заголовок, описание, приоритет, метки. Так аналитик "+
+		"Поправить постановку задачи: заголовок, описание, приоритет, метки, ссылку на "+
+			"основной трекер. Так аналитик "+
 			"уточняет нарезку эпика, когда код ушёл вперёд её описания. Агент вправе править "+
 			"задачу, которую держит, и её дочерние. Не переданное поле не меняется, пустое "+
-			"описание очищает его, метки заменяются списком целиком. Тип, статус, родитель, "+
+			"описание очищает его, метки и external_ref заменяются целиком ({} снимает ссылки). Тип, статус, родитель, "+
 			"область и исполнитель этой ручкой не меняются — у каждого своя.",
 		s.updateTask)
 	add(s, "sdlc_link_tasks",
@@ -58,6 +60,9 @@ type createTaskInput struct {
 	Properties   json.RawMessage `json:"properties,omitempty" jsonschema:"свойства задачи объектом"`
 	Repositories []string        `json:"repositories,omitempty" jsonschema:"область задачи: owner/name, name или подсказка роли"`
 	Blocks       []string        `json:"blocks,omitempty" jsonschema:"ключи задач, которые новая блокирует"`
+	// any, а не json.RawMessage: схему тула выводит jsonschema-go, и
+	// RawMessage для него — массив байтов, а не объект.
+	ExternalRef any `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://jira.example.com/browse/PROJ-12\"}}"`
 }
 
 func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallToolResult, any, error) {
@@ -77,11 +82,16 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 	if in.Description != "" {
 		description = &in.Description
 	}
+	externalRef, err := rawArgument(in.ExternalRef)
+	if err != nil {
+		return fail(err)
+	}
 	task, err := s.engine.CreateTask(ctx, key, actor(ctx).ID, workflow.CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{
 			ParentKey: in.Parent, TaskType: in.Type, Title: in.Title,
 			Description: description, Priority: in.Priority, Labels: in.Labels,
 			Properties: in.Properties, Repositories: in.Repositories,
+			ExternalRef: externalRef,
 		},
 		AssigneeHandle: in.Assignee,
 		Blocks:         in.Blocks,
@@ -94,7 +104,21 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		"key": task.Key, "title": task.Title, "type": task.Type(),
 		"status": task.StatusKey, "parent": task.ParentKey,
 		"assignee": task.AssigneeHandle, "repositories": repoNames(task),
+		"external_ref": task.ExternalRef,
 	})
+}
+
+// rawArgument возвращает аргумент тула открытой формы как JSON: проверяет его
+// движок, одним правилом с REST. nil — аргумент не передан.
+func rawArgument(v any) (json.RawMessage, error) {
+	if v == nil {
+		return nil, nil
+	}
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, apperr.InvalidInput("аргумент не сериализуется в JSON: %v", err)
+	}
+	return body, nil
 }
 
 type updateTaskInput struct {
@@ -103,6 +127,8 @@ type updateTaskInput struct {
 	Description *string   `json:"description,omitempty" jsonschema:"новое описание; пустая строка очищает его"`
 	Priority    *string   `json:"priority,omitempty" jsonschema:"low, normal, high, urgent"`
 	Labels      *[]string `json:"labels,omitempty" jsonschema:"метки целиком: список заменяет прежний набор"`
+	// nil — не трогать: null и отсутствие поля для агента одно и то же.
+	ExternalRef any `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер целиком: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://…\"}}; {} снимает ссылки"`
 }
 
 func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallToolResult, any, error) {
@@ -117,16 +143,25 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 		return fail(err)
 	}
 
-	task, err := s.engine.UpdateTask(ctx, in.TaskKey, actor(ctx).ID, workflow.UpdateTaskInput{
+	edit := workflow.UpdateTaskInput{
 		Title: in.Title, Description: in.Description, Priority: in.Priority,
 		Labels: in.Labels, Level: level,
-	})
+	}
+	if in.ExternalRef != nil {
+		ref, err := rawArgument(in.ExternalRef)
+		if err != nil {
+			return fail(err)
+		}
+		edit.ExternalRef = &ref
+	}
+	task, err := s.engine.UpdateTask(ctx, in.TaskKey, actor(ctx).ID, edit)
 	if err != nil {
 		return fail(err)
 	}
 	return ok(map[string]any{
 		"key": task.Key, "title": task.Title, "description": task.Description,
 		"priority": task.Priority, "labels": task.Labels, "status": task.StatusKey,
+		"external_ref": task.ExternalRef,
 	})
 }
 

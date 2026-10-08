@@ -157,6 +157,7 @@ func (s *Server) listTasks(c *gin.Context) {
 		StatusKey: c.Query("status"),
 		ParentKey: c.Query("parent"),
 		Type:      c.Query("type"),
+		External:  c.Query("external"),
 		Limit:     limit,
 	})
 	if err != nil {
@@ -179,6 +180,8 @@ type createTaskRequest struct {
 	Repositories []string        `json:"repositories"`
 	// Ключи задач, которые новая блокирует.
 	Blocks []string `json:"blocks"`
+	// Ссылка на основной трекер: {"jira": {"key", "url"}}. Проверяет движок.
+	ExternalRef json.RawMessage `json:"external_ref"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -206,6 +209,7 @@ func (s *Server) createTask(c *gin.Context) {
 				Labels:       req.Labels,
 				Properties:   req.Properties,
 				Repositories: req.Repositories,
+				ExternalRef:  req.ExternalRef,
 			},
 			AssigneeHandle: req.Assignee,
 			Blocks:         req.Blocks,
@@ -451,6 +455,8 @@ type updateTaskRequest struct {
 	Description *string   `json:"description"`
 	Priority    *string   `json:"priority"`
 	Labels      *[]string `json:"labels"`
+	// Ссылка на основной трекер целиком; {} снимает её.
+	ExternalRef *json.RawMessage `json:"external_ref"`
 }
 
 // updateTask меняет постановку задачи. Право проверяет движок: у агента она
@@ -473,6 +479,7 @@ func (s *Server) updateTask(c *gin.Context) {
 			Description: req.Description,
 			Priority:    req.Priority,
 			Labels:      req.Labels,
+			ExternalRef: req.ExternalRef,
 			Level:       level,
 		})
 	if err != nil {

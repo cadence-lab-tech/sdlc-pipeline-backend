@@ -198,8 +198,9 @@ func (s *Server) Handler() http.Handler {
 
 		v1.GET("/tasks/:taskKey", viewer, s.getTask)
 		v1.GET("/tasks/:taskKey/timeline", viewer, s.listEvents)
-		// Постановка задачи: заголовок, описание, приоритет, метки. Уровень
-		// agent — точное право проверяет движок, как и у области.
+		// Постановка задачи: заголовок, описание, приоритет, метки, ссылка на
+		// основной трекер. Уровень agent — точное право проверяет движок, как
+		// и у области.
 		v1.PATCH("/tasks/:taskKey", agent, s.updateTask)
 		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
 		v1.POST("/tasks/:taskKey/links", agent, s.linkTasks)
