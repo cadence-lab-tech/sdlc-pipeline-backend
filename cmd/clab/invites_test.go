@@ -69,9 +69,9 @@ const issuedProject = `{"invite":{"id":"4f1c0c1e-0000-4000-8000-000000000002","t
 
 func TestInviteLink(t *testing.T) {
 	cases := map[[2]string]string{
-		{"https://sdlc.food-cart.ru", "clab_inv_x"}: "https://sdlc.food-cart.ru/invite/clab_inv_x",
-		{"https://example.com/clab", "clab_inv_x"}:  "https://example.com/clab/invite/clab_inv_x",
-		{"http://localhost:5173/", "clab_inv_x"}:    "http://localhost:5173/invite/clab_inv_x",
+		{"https://sdlc.example.com", "clab_inv_x"}: "https://sdlc.example.com/invite/clab_inv_x",
+		{"https://example.com/clab", "clab_inv_x"}: "https://example.com/clab/invite/clab_inv_x",
+		{"http://localhost:5173/", "clab_inv_x"}:   "http://localhost:5173/invite/clab_inv_x",
 	}
 	for in, want := range cases {
 		if got := inviteLink(in[0], in[1]); got != want {

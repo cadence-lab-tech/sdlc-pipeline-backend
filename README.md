@@ -4,14 +4,13 @@ Go-сервис, ведущий задачи по настраиваемому �
 MCP-сервер для локальных агентов, воркеры индексации репозиториев и детектора
 дрейфа.
 
-Документация по домену вынесена в отдельный репозиторий
-[sdlc-pipeline-docs](https://github.com/cadence-lab-tech/sdlc-pipeline-docs):
+Поставить Cadence Lab у себя — репозиторий
+[cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted):
+стек Docker Compose, скрипты установки, обновления и резервной копии,
+руководство администратора. Этот репозиторий — исходники сервиса и CLI,
+распространяются под FSL-1.1-ALv2 (раздел [«Лицензия»](#лицензия)).
 
-- [Архитектура](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/ARCHITECTURE.md) — модель домена, гейты, дрейф, схема БД, план по фазам
-- [Контракт агента](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md) — MCP-тулы для локального агента
-- [Принятые решения](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/tree/main/decisions) — почему устроено именно так
-
-Здесь остаются референсы реализации: [drift_detection.sql](docs/drift_detection.sql) —
+Здесь же референсы реализации: [drift_detection.sql](docs/drift_detection.sql) —
 запросы детектора дрейфа, которые исполняет воркер.
 
 Фронтенд: [sdlc-pipeline-frontend](https://github.com/cadence-lab-tech/sdlc-pipeline-frontend).
@@ -68,9 +67,13 @@ make reset up && dev/e2e.sh
 
 ## API
 
-Аутентификации нет ([решение 0010](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0010-auth-deferred.md)):
-действующее лицо приезжает заголовком `X-SDLC-Actor` и заводится в `principals`
-при первом обращении.
+Режим доступа задаёт `SDLC_AUTH_MODE`. В `token` (по умолчанию вне
+development) каждый запрос несёт `Authorization: Bearer <token>`, права
+проверяются по участию в проекте и команде; люди входят через GitHub или
+корпоративного провайдера OIDC, CLI — через браузер. В `header` (локальная
+отладка цикла) действующее лицо приезжает заголовком `X-SDLC-Actor` без
+проверки прав. В обоих режимах принципал заводится в `principals` при первом
+обращении. Подробности — [dev/README.md](dev/README.md).
 
 | Метод | Путь | Что делает |
 |---|---|---|
@@ -114,7 +117,7 @@ make reset up && dev/e2e.sh
 именно не сдано и что с этим делать.
 
 Роли и цикл правятся версиями, а не на месте: версия роли иммутабельна, а
-редактируется только черновик цикла ([решение 0016](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0016-workflow-versions-immutable.md)).
+редактируется только черновик цикла.
 Попытка изменить активный цикл — `409`.
 
 ## Агенты
@@ -127,7 +130,31 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 
 Инструкция роли, результаты предыдущих этапов, область репозиториев и требования
 гейтов приезжают в ответе на `sdlc_claim_task` — синхронизировать в локальный
-репозиторий нечего. Полный контракт — в [MCP_CONTRACT.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/MCP_CONTRACT.md).
+репозиторий нечего.
+
+Контракт агента коротко. Агент работает с проектом, к которому привязан путь
+MCP, и проходит этап так:
+
+1. **Захват.** `sdlc_claim_task` выдаёт этап задачи под аренду: роль и её
+   инструкцию, контракт артефактов, входные артефакты, область репозиториев,
+   переходы с гейтами и интервал heartbeat. `sdlc_list_tasks` и
+   `sdlc_get_task` — посмотреть очередь и карточку без аренды.
+2. **Работа.** `sdlc_search_context` ищет по коду, артефактам и документам
+   проекта; `sdlc_get_artifact`, `sdlc_get_document`, `sdlc_get_drift` —
+   прочитать нужное. Долгий этап держится `sdlc_heartbeat`.
+3. **Сдача.** `sdlc_submit_artifact` кладёт артефакт того `kind`, что в
+   контракте роли; правка — новая версия, сданное не меняется.
+   `sdlc_link_repo_ref` привязывает PR, ветку или коммит.
+4. **Переход.** `sdlc_check_gates` показывает, что держит переход;
+   `sdlc_request_transition` выполняет его или возвращает разбор гейтов.
+   Гейт апрува закрывает человек. Найдена проблема — артефакт с её описанием
+   и переход-возврат. Бросить этап — `sdlc_release`.
+
+Стоимость прогона агент сообщает `sdlc_report_usage`. Остальные тулы — для
+заведения и настройки: `sdlc_create_task`, `sdlc_update_task`,
+`sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_update_task_scope`,
+`sdlc_put_role`, `sdlc_put_document`, `sdlc_add_repository`, перенос правил
+`sdlc_export_bundle` и `sdlc_import_bundle`.
 
 Задача выдаётся под аренду с heartbeat: агент локальный и может умереть, не
 отпустив её. Протухшие аренды возвращает в общий доступ `cmd/worker`.
@@ -150,10 +177,9 @@ clab show SDLC-1
 clab mcp install                                  # claude mcp add с тем же токеном
 ```
 
-Подключение своего проекта с нуля — установка, вход, проект, репозитории,
-стартовые роли и цикл, агент, первая задача — расписано в
-[QUICKSTART.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/QUICKSTART.md);
-подробности каждого шага — в [INTRODUCTION.md](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/INTRODUCTION.md).
+Установка своего инстанса, вход, первый проект и подключение агента —
+в [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted):
+README и руководство администратора.
 
 Скрипты и CI обходятся без конфига — переменные окружения перекрывают его:
 
@@ -168,8 +194,7 @@ export SDLC_API_URL=http://localhost:8088/v1 SDLC_PROJECT=SDLC SDLC_ACTOR=agent:
 ./bin/clab index
 ```
 
-Поставить `clab` на свою машину можно тремя способами. Раздача публичная
-([решение 0038](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0038-public-cli-distribution.md)):
+Поставить `clab` на свою машину можно тремя способами. Раздача публичная:
 ни токена, ни участия в организации не нужно.
 
 ```bash
@@ -187,8 +212,7 @@ gh release download --repo cadence-lab-tech/homebrew-tap \
 Релизы собирает `.github/workflows/release.yml` по тегу `v*`: архивы уходят
 релизом в публичный тап
 [homebrew-tap](https://github.com/cadence-lab-tech/homebrew-tap), где живут
-формула и `install.sh`, а здесь у релиза остаются только заметки. Код
-сервиса закрыт, наружу выходят только бинарники CLI.
+формула и `install.sh`, а здесь у релиза остаются только заметки.
 
 ### Выпуск версии
 
@@ -280,3 +304,18 @@ heartbeat, CLI, инкрементальная индексация репози
 Дальше — фаза 4: символьный граф через tree-sitter, вынос blobs в объектное
 хранилище, аутентификация и метрики цикла. Из мелкого: вебхуки GitHub вместо
 опроса и политика вычистки старых прогонов индексации.
+
+## Лицензия
+
+Cadence Lab распространяется с открытыми исходниками под
+[Functional Source License 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2):
+
+- пользоваться, изменять и разворачивать у себя для своих нужд можно
+  бесплатно, в том числе в компании;
+- предлагать продукт третьим лицам как конкурирующий продукт или сервис
+  нельзя;
+- через два года после выхода каждая версия становится доступна под
+  Apache 2.0.
+
+Готовый к установке пакет и руководство —
+[cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted).

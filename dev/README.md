@@ -91,7 +91,7 @@ SDLC_API_URL=http://localhost:18080 SDLC_UI_PORT=5180 npm run dev
 ### Верстаки задачи
 
 Вместе со стеком поднимаются два контейнера-верстака
-([решение 0041](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0041-task-toolbox-in-compose.md)):
+(решение 0041):
 `dev-backend` на `golang:1.25-bookworm` и `dev-frontend` на
 `node:24-bookworm`. В каждый примонтирована рабочая копия задачи
 (`/src`): файлы агент правит на хосте, как обычно, а собирает и тестирует
@@ -222,7 +222,7 @@ SDLC_EMBEDDINGS_MODEL=text-embedding-3-large   # с dimensions=1024
 `SDLC_EMBEDDINGS_SEND_DIMENSIONS=false`.
 
 **Модель обязана отдавать вектор размерности 1024**: колонки `vector(1024)`
-заданы схемой ([решение 0008](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0008-voyage-embeddings.md)).
+заданы схемой (решение 0008).
 api и воркер на старте отправляют модели одну пробу: вектор другой длины,
 неверный ключ (401/403) или отбитый запрос — ошибка, процесс не стартует;
 сеть, таймаут, 429 и 5xx — предупреждение в лог, старт продолжается, векторы
@@ -340,7 +340,7 @@ claude mcp add --transport http sdlc http://localhost:8088/mcp/projects/SDLC
 
 ## Аутентификация и права
 
-Режим `SDLC_AUTH_MODE=token` ([решение 0021](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0021-token-auth-and-project-members.md)):
+Режим `SDLC_AUTH_MODE=token` (решение 0021):
 запрос без `Authorization: Bearer <token>` отбивается, права проверяются по
 участию в проекте (`viewer`, `agent`, `maintainer`, `admin`). Первый
 администратор заводится из окружения — в пустой базе некому выдать первый
@@ -358,7 +358,7 @@ export SDLC_TOKEN=sdlc_замените_на_длинный_секрет SDLC_PR
 ```
 
 Какие роли специалистов участник может забирать, задаёт администратор проекта
-на участии ([решение 0030](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0030-member-roles-github-login-open-projects.md)):
+на участии (решение 0030):
 `clab members set user:alice agent --roles developer,reviewer`; без `--roles` —
 любые. Команде роли выдаются так же: `clab team grant platform --project SDLC
 --level agent --roles reviewer`. Токен может только сузить эти рамки: `--roles`
@@ -393,7 +393,7 @@ invite create …` отдаёт ответ сервера и поле `url`. В�
 интерфейс. Чтобы ссылка открывалась в интерфейсе на vite, выдавайте с
 `--host localhost:5173`: dev-сервер проксирует `/v1`, и запрос уходит туда же.
 
-**Вход CLI через браузер** ([решение 0032](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0032-cli-login-device-flow.md)).
+**Вход CLI через браузер** (решение 0032).
 Человеку токен руками не нужен: `clab auth login --host http://localhost:8088`
 печатает код, открывает `/login/cli`, и после «Разрешить» в интерфейсе
 кладёт долгоживущий токен в `~/.config/clab/config.json` (`CLAB_CONFIG_DIR`
@@ -451,7 +451,7 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 ## Перенос правил в проект
 
 Существующие правила команды — CLAUDE.md, AGENTS.md, ADR, описания ролей —
-переносятся в проект связкой ([решение 0022](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0022-bundle-import-export.md)).
+переносятся в проект связкой (решение 0022).
 Агенту достаточно промпта `/mcp__sdlc__import_rules` или тула
 `sdlc_import_guide`; из CLI:
 
@@ -472,13 +472,13 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 ## Вебхуки GitHub
 
 С секретом `SDLC_GITHUB_WEBHOOK_SECRET` сервис принимает события на
-`POST /webhooks/github` ([решение 0023](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0023-github-webhooks-write-to-queue.md)):
+`POST /webhooks/github` (решение 0023):
 `push` ставит коммит в очередь индексации, `pull_request` и `check_run`
 помечают привязанные PR к пересинхронизации, `installation` и
 `installation_repositories` отмечают снятие, приостановку и убранные из
 установки репозитории — индексация по ним останавливается, индекс остаётся.
 Доставка ищет репозиторий сначала по установке, потом по координатам:
-без `installation.id` она не обслуживается ([решение 0034](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0034-github-installation-on-tenant.md)).
+без `installation.id` она не обслуживается (решение 0034).
 В сеть обработчик не ходит — воркер забирает очередь раз в
 `SDLC_INDEX_POLL_INTERVAL`. Локально без публичного адреса индексация
 по-прежнему идёт по таймеру.
