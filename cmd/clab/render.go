@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -76,14 +77,15 @@ type stateView struct {
 	StageRunID string `json:"stage_run_id"`
 	Kind       string `json:"kind"`
 	Task       struct {
-		Key        string  `json:"key"`
-		Title      string  `json:"title"`
-		Status     string  `json:"status"`
-		StatusName string  `json:"status_name"`
-		Attempt    int     `json:"attempt"`
-		Priority   string  `json:"priority"`
-		Type       string  `json:"type"`
-		Parent     *string `json:"parent"`
+		Key         string          `json:"key"`
+		Title       string          `json:"title"`
+		Status      string          `json:"status"`
+		StatusName  string          `json:"status_name"`
+		Attempt     int             `json:"attempt"`
+		Priority    string          `json:"priority"`
+		Type        string          `json:"type"`
+		Parent      *string         `json:"parent"`
+		ExternalRef json.RawMessage `json:"external_ref"`
 	} `json:"task"`
 	Role *struct {
 		Key     string `json:"key"`
@@ -129,6 +131,9 @@ func renderState(raw json.RawMessage) error {
 	}
 	if s.Task.Parent != nil {
 		pairs = append(pairs, "Эпик:", *s.Task.Parent)
+	}
+	for _, link := range externalLinks(s.Task.ExternalRef) {
+		pairs = append(pairs, "Трекер:", link)
 	}
 	if s.Role != nil {
 		pairs = append(pairs, "Роль:", fmt.Sprintf("%s (%s) v%d", s.Role.Key, s.Role.Name, s.Role.Version))
@@ -264,8 +269,9 @@ func renderTask(raw json.RawMessage) error {
 func renderEditedTask(raw json.RawMessage) error {
 	var t struct {
 		taskRow
-		Labels      []string `json:"labels"`
-		Description *string  `json:"description"`
+		Labels      []string        `json:"labels"`
+		Description *string         `json:"description"`
+		ExternalRef json.RawMessage `json:"external_ref"`
 	}
 	if err := decode(raw, &t); err != nil {
 		return err
@@ -273,7 +279,36 @@ func renderEditedTask(raw json.RawMessage) error {
 	fmt.Printf("%s  %s  [%s, %s]\n", t.Key, t.Title, taskType(t.Properties), t.StatusKey)
 	fmt.Printf("Приоритет: %s   Метки: %s   Описание: %s\n",
 		t.Priority, dash(strings.Join(t.Labels, ", ")), dash(describeLength(t.Description)))
+	fmt.Printf("Трекер: %s\n", joinOr(externalLinks(t.ExternalRef), "—"))
 	return nil
+}
+
+// externalLinks раскладывает ссылки на основной трекер в строки «система
+// КЛЮЧ URL» по порядку систем. Записи чужой формы — legacy_epic_key у эпиков,
+// перенесённых миграцией 000011, — пропускаются молча: это не ссылка, и
+// ломать из-за неё вывод незачем.
+func externalLinks(raw json.RawMessage) []string {
+	var entries map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &entries) != nil {
+		return nil
+	}
+	systems := make([]string, 0, len(entries))
+	for system := range entries {
+		systems = append(systems, system)
+	}
+	sort.Strings(systems)
+	var out []string
+	for _, system := range systems {
+		var link struct {
+			Key string `json:"key"`
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(entries[system], &link) != nil || link.Key == "" {
+			continue
+		}
+		out = append(out, strings.TrimSpace(system+" "+link.Key+" "+link.URL))
+	}
+	return out
 }
 
 // describeLength не печатает описание целиком: это абзацы, и в сводке правки
