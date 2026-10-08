@@ -269,6 +269,8 @@ type UpdateTaskInput struct {
 	Description *string
 	Priority    *string
 	Labels      *[]string
+	// Ссылка на основной трекер целиком: `{}` снимает все ссылки (CLAB-95).
+	ExternalRef *json.RawMessage
 	// Уровень актора в проекте. Ниже сопровождающего действует правило
 	// агента: править можно задачу с его живой арендой и её дочерние —
 	// ровно та рамка, в которой он их заводит. Пусто — правило выключено:
@@ -276,7 +278,8 @@ type UpdateTaskInput struct {
 	Level domain.MemberRole
 }
 
-// UpdateTask меняет постановку задачи: заголовок, описание, приоритет, метки.
+// UpdateTask меняет постановку задачи: заголовок, описание, приоритет, метки
+// и ссылку на основной трекер.
 //
 // Тип, статус, родитель, область и исполнитель этой ручкой не меняются — у
 // каждого своя операция и свои правила. Особого правила для терминальных
@@ -303,9 +306,16 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		return domain.Task{}, apperr.InvalidInput(
 			"приоритет %q не поддерживается: %v", *in.Priority, domain.TaskPriorities)
 	}
+	if in.ExternalRef != nil {
+		ref, err := normalizeExternalRef(*in.ExternalRef)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		fields.ExternalRef = &ref
+	}
 	if !fields.Any() {
 		return domain.Task{}, apperr.InvalidInput(
-			"не указано ни одно поле: править можно title, description, priority, labels")
+			"не указано ни одно поле: править можно title, description, priority, labels, external_ref")
 	}
 
 	var out domain.Task
@@ -337,6 +347,11 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		}
 		if fields.Labels != nil {
 			changed["labels"] = map[string]any{"from": task.Labels, "to": *fields.Labels}
+		}
+		if fields.ExternalRef != nil {
+			changed["external_ref"] = map[string]any{
+				"from": task.ExternalRef, "to": *fields.ExternalRef,
+			}
 		}
 		fieldNames := make([]string, 0, len(changed))
 		for name := range changed {
@@ -444,6 +459,9 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		in.ProjectID = project.ID
 		in.CreatedBy = actor
 
+		if in.ExternalRef, err = normalizeExternalRef(in.ExternalRef); err != nil {
+			return err
+		}
 		if in.AssigneeHandle != "" {
 			assignee, err := e.resolveAssignee(ctx, tx, in.AssigneeHandle)
 			if err != nil {
@@ -491,6 +509,9 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		}
 		if in.AssigneeHandle != "" {
 			payload["assignee"] = in.AssigneeHandle
+		}
+		if string(in.ExternalRef) != "{}" {
+			payload["external_ref"] = in.ExternalRef
 		}
 		if err := e.store.AppendEvent(ctx, tx, out.ID, &run.ID, domain.EventTaskCreated, actor,
 			payload); err != nil {

@@ -21,7 +21,9 @@ func (s *Server) registerTools() {
 	add(s, "sdlc_list_tasks",
 		"Задачи проекта. claimable=true оставляет только то, что можно забрать прямо сейчас, "+
 			"с указанием роли, которой эта работа адресована; parent — нарезка эпика, "+
-			"type — только задачи этого типа. Задача, назначенная другому, показана, но не claimable.",
+			"type — только задачи этого типа, external — задачи со ссылкой на тикет основного "+
+			"трекера (PROJ-12 или jira:PROJ-12, регистр не важен). Задача, назначенная другому, "+
+			"показана, но не claimable.",
 		s.listTasks)
 	add(s, "sdlc_claim_task",
 		"Забрать задачу: выдаётся аренда, в ответ приезжают инструкция роли, результаты "+
@@ -162,6 +164,7 @@ type listTasksInput struct {
 	Claimable bool   `json:"claimable,omitempty" jsonschema:"только то, что можно забрать прямо сейчас"`
 	Parent    string `json:"parent,omitempty" jsonschema:"ключ родительской задачи: нарезка этого эпика"`
 	Type      string `json:"type,omitempty" jsonschema:"тип задачи, например epic"`
+	External  string `json:"external,omitempty" jsonschema:"ключ тикета основного трекера (PROJ-12) или система:ключ (jira:PROJ-12)"`
 	Limit     int    `json:"limit,omitempty"`
 }
 
@@ -188,6 +191,7 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 		if err != nil {
 			return fail(err)
 		}
+		extSystem, extKey := domain.ParseExternalQuery(in.External)
 		items := make([]map[string]any, 0, len(runs))
 		for _, r := range runs {
 			if in.Claimable && !r.Claimable {
@@ -199,6 +203,9 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 			if in.Type != "" && r.Task.Type() != in.Type {
 				continue
 			}
+			if !domain.ExternalRefMatches(r.Task.ExternalRef, extSystem, extKey) {
+				continue
+			}
 			items = append(items, map[string]any{
 				"key": r.Task.Key, "title": r.Task.Title, "status": r.Task.StatusKey,
 				"type": r.Task.Type(), "parent": r.Task.ParentKey,
@@ -206,14 +213,15 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 				"attempt": r.Run.Attempt, "role": r.RoleKey, "role_name": r.RoleName,
 				"claimable": r.Claimable, "assignee": r.Task.AssigneeHandle,
 				"held_by": r.Run.ClaimedHandle, "lease_expires_at": r.Run.LeaseExpires,
-				"repositories": repoNames(r.Task),
+				"repositories": repoNames(r.Task), "external_ref": r.Task.ExternalRef,
 			})
 		}
 		return ok(map[string]any{"tasks": items})
 	}
 
 	tasks, err := s.store.ListTasks(ctx, q, project.ID, postgres.ListTasksFilter{
-		StatusKey: in.Status, ParentKey: in.Parent, Type: in.Type, Limit: in.Limit,
+		StatusKey: in.Status, ParentKey: in.Parent, Type: in.Type, External: in.External,
+		Limit: in.Limit,
 	})
 	if err != nil {
 		return fail(err)
@@ -224,7 +232,7 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 			"key": t.Key, "title": t.Title, "status": t.StatusKey,
 			"type": t.Type(), "parent": t.ParentKey, "assignee": t.AssigneeHandle,
 			"priority": t.Priority, "multi_repo": t.MultiRepo(),
-			"repositories": repoNames(t),
+			"repositories": repoNames(t), "external_ref": t.ExternalRef,
 		})
 	}
 	return ok(map[string]any{"tasks": items})

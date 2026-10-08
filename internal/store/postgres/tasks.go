@@ -36,8 +36,11 @@ type ListTasksFilter struct {
 	// Ключ родительской задачи: дети эпика. Пусто — фильтра нет.
 	ParentKey string
 	// Тип задачи. Пусто — все типы: доска показывает и эпики, и задачи.
-	Type  string
-	Limit int
+	Type string
+	// Ссылка на тикет основного трекера: «КЛЮЧ» в любой системе или
+	// «система:КЛЮЧ». Регистр ключа не важен. Пусто — фильтра нет.
+	External string
+	Limit    int
 }
 
 func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
@@ -45,13 +48,26 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
+	// Поиск по ссылке идёт без индекса: он всегда внутри проекта, где задач
+	// сотни, а не миллионы. Записи чужой формы (legacy_epic_key из 000011 —
+	// строка, а не объект) отсеивает jsonb_typeof; то же правило в Go —
+	// domain.ExternalRefMatches.
+	extSystem, extKey := domain.ParseExternalQuery(f.External)
 	rows, err := q.Query(ctx, taskSelect+`
 		WHERE t.project_id = $1
 		  AND ($2 = '' OR ws.key = $2)
 		  AND ($3 = '' OR parent.key = $3)
 		  AND ($4 = '' OR coalesce(t.properties->>'type', $5) = $4)
+		  AND ($7 = '' OR EXISTS (
+		        SELECT 1
+		        FROM jsonb_each(CASE WHEN jsonb_typeof(t.external_ref) = 'object'
+		                             THEN t.external_ref ELSE '{}'::jsonb END) e
+		        WHERE jsonb_typeof(e.value) = 'object'
+		          AND lower(e.value->>'key') = lower($7)
+		          AND ($8 = '' OR e.key = $8)))
 		ORDER BY ws.position, t.seq
-		LIMIT $6`, projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType, limit)
+		LIMIT $6`, projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType, limit,
+		extKey, extSystem)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -160,6 +176,8 @@ type CreateTaskInput struct {
 	AssigneeID *uuid.UUID
 	Labels     []string
 	Properties json.RawMessage
+	// Ссылка на основной трекер, уже проверенная движком. Пусто — ссылок нет.
+	ExternalRef json.RawMessage
 	// Ссылки на репозитории: owner/name, просто name или role_hint.
 	// Область задачи — не украшение: на ней стоит гейт repo_scope и по ней
 	// детектор дрейфа понимает, за какими репозиториями следить.
@@ -222,17 +240,21 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 	if labels == nil {
 		labels = []string{}
 	}
+	externalRef := in.ExternalRef
+	if len(externalRef) == 0 {
+		externalRef = json.RawMessage(`{}`)
+	}
 
 	var taskID uuid.UUID
 	key := fmt.Sprintf("%s-%d", projectKey, seq)
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO tasks (project_id, parent_id, key, seq, title, description,
 		                   workflow_id, status_id, priority, assignee_id, labels,
-		                   properties, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		                   properties, created_by, external_ref)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id`,
 		in.ProjectID, parentID, key, seq, in.Title, in.Description,
-		wf.ID, initial.ID, priority, in.AssigneeID, labels, props, in.CreatedBy,
+		wf.ID, initial.ID, priority, in.AssigneeID, labels, props, in.CreatedBy, externalRef,
 	).Scan(&taskID); err != nil {
 		return domain.Task{}, translate(err)
 	}
@@ -384,19 +406,22 @@ func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid
 	return translate(err)
 }
 
-// UpdateTaskFieldsInput — постановка задачи: заголовок, описание, приоритет и
-// метки. nil означает «не трогать»: правка одного поля не должна затирать
-// остальные.
+// UpdateTaskFieldsInput — постановка задачи: заголовок, описание, приоритет,
+// метки и ссылка на основной трекер. nil означает «не трогать»: правка одного
+// поля не должна затирать остальные.
 type UpdateTaskFieldsInput struct {
 	Title       *string
 	Description *string
 	Priority    *string
 	Labels      *[]string
+	// Ссылка заменяется целиком, как метки; `{}` снимает все ссылки.
+	ExternalRef *json.RawMessage
 }
 
 // Any отвечает на вопрос, есть ли что писать.
 func (in UpdateTaskFieldsInput) Any() bool {
-	return in.Title != nil || in.Description != nil || in.Priority != nil || in.Labels != nil
+	return in.Title != nil || in.Description != nil || in.Priority != nil || in.Labels != nil ||
+		in.ExternalRef != nil
 }
 
 // UpdateTaskFields пишет переданные поля постановки и двигает updated_at.
@@ -417,15 +442,25 @@ func (s *Store) UpdateTaskFields(ctx context.Context, tx pgx.Tx, taskID uuid.UUI
 			labels = []string{}
 		}
 	}
+	// Ссылка, как и метки, едет значением: nil драйвер кладёт как NULL, и
+	// coalesce оставляет прежнюю.
+	var externalRef []byte
+	if in.ExternalRef != nil {
+		externalRef = *in.ExternalRef
+		if len(externalRef) == 0 {
+			externalRef = []byte(`{}`)
+		}
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE tasks
-		SET title       = coalesce($2, title),
-		    description = CASE WHEN $3::boolean THEN $4 ELSE description END,
-		    priority    = coalesce($5, priority),
-		    labels      = coalesce($6::text[], labels),
-		    updated_at  = now()
+		SET title        = coalesce($2, title),
+		    description  = CASE WHEN $3::boolean THEN $4 ELSE description END,
+		    priority     = coalesce($5, priority),
+		    labels       = coalesce($6::text[], labels),
+		    external_ref = coalesce($7::jsonb, external_ref),
+		    updated_at   = now()
 		WHERE id = $1`,
-		taskID, in.Title, in.Description != nil, description, in.Priority, labels)
+		taskID, in.Title, in.Description != nil, description, in.Priority, labels, externalRef)
 	return translate(err)
 }
 

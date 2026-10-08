@@ -18,6 +18,7 @@ import (
 func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, title, description, taskType, parent, priority, assignee string
 	var repos, labels, blocks, properties string
+	var external externalRefFlag
 	_, err := flags("create", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&title, "title", "", "заголовок задачи")
@@ -30,6 +31,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&labels, "labels", "", "метки через запятую")
 		fs.StringVar(&blocks, "blocks", "", "ключи задач, которые новая блокирует")
 		fs.StringVar(&properties, "properties", "", "свойства задачи объектом JSON")
+		fs.Var(&external, "external-ref", externalRefUsage)
 	})
 	if err != nil {
 		return err
@@ -74,6 +76,9 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		}
 		body["properties"] = props
 	}
+	if len(external.links) > 0 {
+		body["external_ref"] = external.links
+	}
 
 	var out json.RawMessage
 	if err := c.do(ctx, "POST", "/projects/"+key+"/tasks", body, &out); err != nil {
@@ -89,6 +94,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 // собирается по fs.Visit, а не по непустым значениям.
 func cmdEdit(ctx context.Context, c *Client, args []string) error {
 	var title, description, descriptionFile, priority, labels string
+	var external externalRefFlag
 	task, rest := popTask(args)
 	fs, err := flags("edit", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&title, "title", "", "новый заголовок, не длиннее 80 символов")
@@ -96,6 +102,7 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&descriptionFile, "description-file", "", "файл с описанием")
 		fs.StringVar(&priority, "priority", "", "low, normal, high, urgent")
 		fs.StringVar(&labels, "labels", "", "метки через запятую; \"\" очищает")
+		fs.Var(&external, "external-ref", externalRefUsage+"; \"\" снимает ссылки")
 	})
 	if err != nil {
 		return err
@@ -139,9 +146,13 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 	if passed["labels"] {
 		body["labels"] = splitList(labels)
 	}
+	if passed["external-ref"] {
+		// Ссылки заменяются целиком, как метки: пустой объект их снимает.
+		body["external_ref"] = external.links
+	}
 	if len(body) == 0 {
 		fs.Usage()
-		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority или --labels")
+		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority, --labels или --external-ref")
 	}
 
 	var out json.RawMessage
@@ -291,4 +302,47 @@ func splitList(raw string) []string {
 		}
 	}
 	return out
+}
+
+const externalRefUsage = "ссылка на тикет основного трекера система:КЛЮЧ=URL, " +
+	"например jira:PROJ-12=https://jira.example.com/browse/PROJ-12; флаг повторяется для разных систем"
+
+// externalRefFlag собирает повторяемый --external-ref в объект
+// external_ref. Форма проверяется до запроса: без системы или без URL сервер
+// всё равно откажет, а человеку полезнее пример сразу. Остальные правила
+// (формат системы, http(s)) — на сервере, одни для REST, MCP и CLI.
+type externalRefFlag struct {
+	links   map[string]map[string]string
+	cleared bool
+}
+
+func (f *externalRefFlag) String() string { return "" }
+
+func (f *externalRefFlag) Set(value string) error {
+	if f.links == nil {
+		f.links = map[string]map[string]string{}
+	}
+	if strings.TrimSpace(value) == "" {
+		if len(f.links) > 0 {
+			return fmt.Errorf("пустой --external-ref снимает ссылки и не сочетается с другими")
+		}
+		f.cleared = true
+		return nil
+	}
+	if f.cleared {
+		return fmt.Errorf("пустой --external-ref снимает ссылки и не сочетается с другими")
+	}
+	// Сначала «=»: в URL есть двоеточие, а в ключе тикета знака «=» не бывает.
+	ref, address, hasURL := strings.Cut(value, "=")
+	system, key, hasSystem := strings.Cut(ref, ":")
+	system, key, address = strings.TrimSpace(system), strings.TrimSpace(key), strings.TrimSpace(address)
+	if !hasURL || !hasSystem || system == "" || key == "" || address == "" {
+		return fmt.Errorf("%q не по форме система:КЛЮЧ=URL, например "+
+			"jira:PROJ-12=https://jira.example.com/browse/PROJ-12", value)
+	}
+	if _, dup := f.links[system]; dup {
+		return fmt.Errorf("система %s указана дважды: у задачи одна ссылка на систему", system)
+	}
+	f.links[system] = map[string]string{"key": key, "url": address}
+	return nil
 }
