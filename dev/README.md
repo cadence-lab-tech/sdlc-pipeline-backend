@@ -39,6 +39,9 @@ docker compose -f dev/docker-compose.yml up -d --build
 
 ```bash
 dev/stack.sh up CLAB-59       # поднять и дождаться готовности
+dev/stack.sh exec CLAB-59 backend go test ./...   # команда в верстаке backend
+dev/stack.sh exec CLAB-59 frontend npm run lint   # команда в верстаке frontend
+dev/stack.sh shell CLAB-59 backend                # bash в верстаке
 dev/stack.sh ls               # какие стеки заняты и на каких портах
 dev/stack.sh logs CLAB-59     # логи api (или другого сервиса аргументом)
 dev/stack.sh psql CLAB-59     # psql в базу стека
@@ -84,6 +87,58 @@ SDLC_API_URL=http://localhost:18080 SDLC_UI_PORT=5180 npm run dev
 ходит в рабочий инстанс через MCP и `clab`.
 
 Снести стек — часть уборки за задачей, вместе с `git worktree`.
+
+### Верстаки задачи
+
+Вместе со стеком поднимаются два контейнера-верстака
+([решение 0041](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0041-task-toolbox-in-compose.md)):
+`dev-backend` на `golang:1.25-bookworm` и `dev-frontend` на
+`node:24-bookworm`. В каждый примонтирована рабочая копия задачи
+(`/src`): файлы агент правит на хосте, как обычно, а собирает и тестирует
+внутри — на хосте не нужны ни Go, ни Node, а соседние задачи не делят ни
+кэши, ни `node_modules`, ни базу тестов. Контейнер спит и ждёт `exec`,
+поэтому стоит почти даром.
+
+```bash
+dev/stack.sh exec CLAB-59 backend go build ./... && dev/stack.sh exec CLAB-59 backend go vet ./...
+dev/stack.sh exec CLAB-59 backend make test-integration   # в базе sdlc_test этого стека
+dev/stack.sh exec CLAB-59 frontend npm run typecheck
+dev/stack.sh exec CLAB-59 frontend bash -c 'npm run lint && npm run build'
+dev/stack.sh shell CLAB-59 frontend
+```
+
+Копия backend у верстака — та, из которой вызван `up` (`SOURCE` в
+реестре); повторный `up` из другой копии — ошибка, а не тихая подмена.
+Копия frontend — соседка копии backend: `.worktrees/CLAB-59/frontend`
+рядом с `.worktrees/CLAB-59/backend`, `frontend` рядом с основной копией.
+Задача только по фронтенду поднимает стек из основной копии backend с
+явным путём: `backend/dev/stack.sh up CLAB-59 --frontend
+.worktrees/CLAB-59/frontend`. Копии фронтенда рядом нет — верстака
+фронтенда у стека не будет, `exec … frontend` скажет об этом.
+
+Что внутри и чего там нет:
+
+- Рабочая копия — `git worktree`, её `.git` — файл со ссылкой на хост;
+  git внутри не работает и не нужен: ветка, коммиты и push — на хосте.
+  `GOFLAGS=-buildvcs=false` выставлен, иначе `go build -o` падал бы на
+  штампе VCS.
+- `SDLC_TEST_DATABASE_URL` указывает на `sdlc_test` в Postgres стека, и
+  `make test-integration` внутри берёт его как есть, не ища стек через
+  Docker — его в верстаке нет. `make up`, `dev/stack.sh`, `dev/e2e.sh` идут
+  на хосте.
+- Зависимости фронтенда ставятся при первом `exec … frontend` и после
+  смены `package-lock.json` в том стека, не в копию: на хосте в копии лежат
+  свои `node_modules` под macOS (для `npm run dev` и `npm run e2e`), в
+  контейнере — линуксовые. `npm run e2e` — на хосте: ему нужен
+  headless-Chrome.
+- Кэш модулей Go, кэш сборки Go и кэш npm — общие на машину тома
+  `clab-go-mod`, `clab-go-build`, `clab-npm-cache`: заводятся при `up`,
+  `down` стека их не трогает, параллельный доступ им не страшен. Снести —
+  `docker volume rm` после `down` всех стеков.
+- `bin/` после `make build` внутри — линуксовые бинарники в копии на хосте;
+  `clab-runner` для этой машины собирается на хосте.
+- Контейнер работает от root; на Docker Desktop для macOS файлы в
+  примонтированной копии всё равно принадлежат пользователю хоста.
 
 ### Второй стек вручную
 
@@ -210,8 +265,11 @@ make test-integration
 накатывает миграции заново. Без `SDLC_TEST_DATABASE_URL` такие тесты
 пропускаются, и `make test` остаётся быстрым.
 
-В какой Postgres идёт `sdlc_test`, решает `dev/stack.sh test-db` — `Makefile`
-формат реестра стеков не читает:
+Задан `SDLC_TEST_DATABASE_URL` — он и берётся: так работает верстак стека
+задачи (`dev/stack.sh exec CLAB-59 backend make test-integration`), где
+Docker нет, а адрес базы стека выдан при старте. Иначе в какой Postgres идёт
+`sdlc_test`, решает `dev/stack.sh test-db` — `Makefile` формат реестра
+стеков не читает:
 
 1. `make test-integration KEY=CLAB-59` — стек этой задачи, из любой копии.
    Стек не поднимался — ошибка с `dev/stack.sh up CLAB-59`.

@@ -231,6 +231,60 @@ services:
       MINIO_ROOT_PASSWORD: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-sdlcsdlc}
       SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
 
+  # Верстаки задачи (решение 0041): контейнер с инструментами репозитория, в
+  # который примонтирована рабочая копия задачи. Агент правит файлы на хосте,
+  # а собирает и тестирует внутри: dev/stack.sh exec <ключ> backend go test ./...
+  # Хост от этого свободен от Go, Node и чужих кэшей, а соседние задачи не
+  # делят ни базу, ни порты, ни node_modules. Контейнер ничего не делает сам —
+  # спит и ждёт exec, поэтому стоит почти даром.
+  #
+  # Включаются профилями dev-backend и dev-frontend: общий `make up` их не
+  # поднимает, стек задачи — поднимает, подставляя пути копий. Пути по
+  # умолчанию — основные копии рядом с этим репозиторием.
+  #
+  # Кэши модулей Go, сборки Go и npm — общие на машину (внешние тома
+  # clab-*): их заводит dev/stack.sh, а `down -v` стека их не трогает; оба
+  # кэша Go рассчитаны на параллельный доступ. node_modules — том стека: на
+  # хосте в копии лежат свои, под macOS, в контейнере нужны линуксовые.
+  dev-backend:
+    image: golang:1.25-bookworm
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-dev-backend
+    profiles: ["dev-backend"]
+    init: true
+    command: ["sleep", "infinity"]
+    working_dir: /src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Рабочая копия — git worktree: её .git — файл со ссылкой на хост, и
+      # git внутри не работает. Он здесь и не нужен, а штамп VCS в бинарник
+      # без этого флага ронял бы `go build -o`.
+      GOFLAGS: -buildvcs=false
+      # База интеграционных тестов — Postgres этого же стека; базу sdlc_test
+      # заводит dev/stack.sh. Makefile берёт адрес из переменной как есть.
+      SDLC_TEST_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD:-sdlc}@postgres:5432/sdlc_test?sslmode=disable
+      # api этого стека изнутри сети compose: для ручных запросов curl.
+      CLAB_STACK_API: http://api:8080
+    volumes:
+      - ${DEV_BACKEND_SRC:-..}:/src
+      - clab-go-mod:/go/pkg/mod
+      - clab-go-build:/root/.cache/go-build
+
+  dev-frontend:
+    image: node:24-bookworm
+    container_name: ${DEV_STACK_PREFIX:-sdlc}-dev-frontend
+    profiles: ["dev-frontend"]
+    init: true
+    command: ["sleep", "infinity"]
+    working_dir: /src
+    environment:
+      CLAB_STACK_API: http://api:8080
+    volumes:
+      - ${DEV_FRONTEND_SRC:-../../frontend}:/src
+      - node_modules:/src/node_modules
+      - clab-npm-cache:/root/.npm
+
   # Просмотр базы руками: docker compose --profile tools up -d
   adminer:
     image: adminer:4
@@ -250,3 +304,13 @@ volumes:
   # Вынесенное содержимое артефактов и документов; общий для api и воркера.
   blobs:
   minio:
+  # Зависимости фронтенда верстака: свои у каждого стека, уходят с ним.
+  node_modules:
+  # Кэши верстаков, общие на машину: заводит dev/stack.sh up, живут дольше
+  # стеков. Внешние, чтобы `down -v` одного стека не снёс кэш соседям.
+  clab-go-mod:
+    external: true
+  clab-go-build:
+    external: true
+  clab-npm-cache:
+    external: true
