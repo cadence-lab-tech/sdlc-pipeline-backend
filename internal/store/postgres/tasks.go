@@ -479,6 +479,29 @@ func (s *Store) AddTaskRepository(ctx context.Context, tx pgx.Tx, t domain.Task,
 	return translate(err)
 }
 
+// RemoveTaskRepository убирает репозиторий из области задачи и отвечает,
+// был ли он основным. Строки в области нет — ошибки здесь нет: что
+// убирать можно, решает движок, хранилище только исполняет.
+func (s *Store) RemoveTaskRepository(ctx context.Context, tx pgx.Tx, taskID, repoID uuid.UUID) (wasPrimary bool, err error) {
+	err = tx.QueryRow(ctx, `
+		DELETE FROM task_repositories WHERE task_id = $1 AND repository_id = $2
+		RETURNING is_primary`, taskID, repoID).Scan(&wasPrimary)
+	if isNoRows(err) {
+		return false, nil
+	}
+	return wasPrimary, translate(err)
+}
+
+// PromoteTaskRepository делает репозиторий основным в области задачи.
+// Прежний основной к этому моменту уже снят: уникальный индекс
+// task_repositories_one_primary второго основного не пропустит.
+func (s *Store) PromoteTaskRepository(ctx context.Context, tx pgx.Tx, taskID, repoID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE task_repositories SET is_primary = true
+		WHERE task_id = $1 AND repository_id = $2`, taskID, repoID)
+	return translate(err)
+}
+
 // taskTypeInProperties сводит тип задачи и её свойства в одно место: тип —
 // системное свойство, и хранить его отдельной колонкой значило бы держать два
 // источника правды об одном.

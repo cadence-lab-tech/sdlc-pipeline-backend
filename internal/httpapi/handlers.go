@@ -490,22 +490,33 @@ func (s *Server) updateTask(c *gin.Context) {
 }
 
 type updateScopeRequest struct {
-	AddRepositories []string        `json:"add_repositories"`
-	Properties      json.RawMessage `json:"properties"`
-	Note            string          `json:"note"`
+	AddRepositories    []string        `json:"add_repositories"`
+	RemoveRepositories []string        `json:"remove_repositories"`
+	Properties         json.RawMessage `json:"properties"`
+	Note               string          `json:"note"`
 }
 
+// updateScope расширяет или сужает область задачи. Уровень ручки — agent:
+// расширять область агент вправе, а сузить её может только сопровождающий —
+// это правило движка, транспорт лишь передаёт уровень.
 func (s *Server) updateScope(c *gin.Context) {
 	var req updateScopeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
 		return
 	}
+	level, err := s.level(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	task, err := s.engine.UpdateScope(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
 		workflow.UpdateScopeInput{
-			AddRepositories: req.AddRepositories,
-			Properties:      req.Properties,
-			Note:            req.Note,
+			AddRepositories:    req.AddRepositories,
+			RemoveRepositories: req.RemoveRepositories,
+			Properties:         req.Properties,
+			Note:               req.Note,
+			Level:              level,
 		})
 	if err != nil {
 		fail(c, s.log, err)
