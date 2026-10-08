@@ -190,9 +190,15 @@ func (e *Engine) checkContract(ctx context.Context, q postgres.Querier, run doma
 type UpdateScopeInput struct {
 	// Ссылки на репозитории проекта: owner/name, name или role_hint.
 	AddRepositories []string
+	// Репозитории, которые уходят из области; ссылки — те же, что у
+	// AddRepositories. Сужение — решение человека: агентский тул его не
+	// передаёт, а движок требует уровень не ниже сопровождающего.
+	RemoveRepositories []string
 	// Свойства задачи целиком; nil — не трогать.
 	Properties json.RawMessage
 	Note       string
+	// Уровень актора в проекте. Пусто — права выключены (режим header).
+	Level domain.MemberRole
 }
 
 // UpdateScope меняет область задачи по репозиториям и её свойства.
@@ -202,7 +208,17 @@ type UpdateScopeInput struct {
 // enforce_task_repo_scope(), который сработает на коммите и увидит уже
 // согласованное состояние. Разбить это на два запроса нельзя — ни один из
 // порядков не проходит по отдельности.
+//
+// Сужение идёт раньше расширения: так одним вызовом можно заменить
+// единственный репозиторий однорепозиторной задачи, и пустой область
+// оказывается только посередине, а не на коммите.
 func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUID, in UpdateScopeInput) (domain.Task, error) {
+	if len(in.RemoveRepositories) > 0 && in.Level != "" && !in.Level.Covers(domain.MemberMaintainer) {
+		return domain.Task{}, apperr.Forbidden(
+			"сузить область задачи может сопровождающий проекта: " +
+				"убрать репозиторий из области — решение человека, не агента")
+	}
+
 	var out domain.Task
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -223,6 +239,11 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 			run = &r.ID
 		}
 
+		removed, err := e.narrowScope(ctx, tx, &task, in)
+		if err != nil {
+			return err
+		}
+
 		added := []string{}
 		for _, ref := range in.AddRepositories {
 			repo, err := e.store.FindRepository(ctx, tx, task.ProjectID, ref)
@@ -235,16 +256,32 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 			added = append(added, repo.Owner+"/"+repo.Name)
 			task.Repositories = append(task.Repositories, domain.TaskRepository{
 				RepositoryID: repo.ID, Owner: repo.Owner, Name: repo.Name,
+				IsPrimary: len(task.Repositories) == 0,
 			})
 		}
 
-		if len(added) > 0 || in.Properties != nil {
-			if err := e.store.AppendEvent(ctx, tx, task.ID, run, "task.scope_updated", actor,
-				map[string]any{
-					"added_repositories": added,
-					"multi_repo":         task.MultiRepo(),
-					"note":               in.Note,
-				}); err != nil {
+		if len(removed) > 0 && len(task.Repositories) == 0 {
+			return apperr.Conflict(
+				"нельзя убрать из области задачи %s последний репозиторий: "+
+					"без области не проходит гейт repo_scope и дрейфу не за чем следить — "+
+					"добавьте замену в том же запросе или снимите задачу", task.Key)
+		}
+
+		if len(added) > 0 || len(removed) > 0 || in.Properties != nil {
+			payload := map[string]any{
+				"added_repositories": added,
+				"multi_repo":         task.MultiRepo(),
+				"note":               in.Note,
+			}
+			if len(removed) > 0 {
+				payload["removed_repositories"] = removed
+				for _, r := range task.Repositories {
+					if r.IsPrimary {
+						payload["primary_repository"] = r.Owner + "/" + r.Name
+					}
+				}
+			}
+			if err := e.store.AppendEvent(ctx, tx, task.ID, run, "task.scope_updated", actor, payload); err != nil {
 				return err
 			}
 		}
@@ -254,6 +291,97 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 	})
 
 	return out, err
+}
+
+// narrowScope убирает репозитории из области задачи и правит task на месте,
+// чтобы расширение в том же вызове видело уже суженную область.
+//
+// Репозиторий с привязанными PR, ветками или коммитами не убирается: в нём
+// уже идёт работа задачи, гейты по PR и external_check читают эти ссылки, и
+// после сужения они указывали бы за область. Отвязки ссылок нет, поэтому
+// такой репозиторий остаётся в области до конца задачи — убирают только
+// тот, что был справочником.
+//
+// Ушёл основной — основным становится первый из оставшихся по owner/name:
+// правило детерминированное и не требует от человека второго решения в том
+// же вызове. Если важен другой, его ставят отдельной правкой.
+func (e *Engine) narrowScope(ctx context.Context, tx pgx.Tx, task *domain.Task, in UpdateScopeInput) ([]string, error) {
+	removed := []string{}
+	if len(in.RemoveRepositories) == 0 {
+		return removed, nil
+	}
+
+	adding := map[uuid.UUID]bool{}
+	for _, ref := range in.AddRepositories {
+		repo, err := e.store.FindRepository(ctx, tx, task.ProjectID, ref)
+		if err != nil {
+			return nil, err
+		}
+		adding[repo.ID] = true
+	}
+	refs, err := e.store.ListRepoRefs(ctx, tx, task.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	primaryGone := false
+	for _, ref := range in.RemoveRepositories {
+		repo, err := e.store.FindRepository(ctx, tx, task.ProjectID, ref)
+		if err != nil {
+			return nil, err
+		}
+		name := repo.Owner + "/" + repo.Name
+		if adding[repo.ID] {
+			return nil, apperr.InvalidInput(
+				"репозиторий %s указан и в добавлении, и в удалении", name)
+		}
+		idx := -1
+		for i, r := range task.Repositories {
+			if r.RepositoryID == repo.ID {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			return nil, apperr.InvalidInput(
+				"репозитория %s нет в области задачи %s", name, task.Key)
+		}
+
+		var linked []string
+		for _, r := range refs {
+			if r.RepositoryID == repo.ID {
+				linked = append(linked, r.RefType+" "+r.Ref)
+			}
+		}
+		if len(linked) > 0 {
+			return nil, apperr.Conflict(
+				"репозиторий %s не убрать из области задачи %s: к нему привязаны %s, "+
+					"в нём уже идёт работа задачи", name, task.Key, strings.Join(linked, ", ")).
+				WithDetails(map[string]any{"repository": name, "repo_refs": linked})
+		}
+
+		wasPrimary, err := e.store.RemoveTaskRepository(ctx, tx, task.ID, repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		primaryGone = primaryGone || wasPrimary
+		task.Repositories = append(task.Repositories[:idx], task.Repositories[idx+1:]...)
+		removed = append(removed, name)
+	}
+
+	if primaryGone && len(task.Repositories) > 0 {
+		next := 0
+		for i, r := range task.Repositories {
+			cur := task.Repositories[next]
+			if r.Owner < cur.Owner || (r.Owner == cur.Owner && r.Name < cur.Name) {
+				next = i
+			}
+		}
+		if err := e.store.PromoteTaskRepository(ctx, tx, task.ID, task.Repositories[next].RepositoryID); err != nil {
+			return nil, err
+		}
+		task.Repositories[next].IsPrimary = true
+	}
+	return removed, nil
 }
 
 // maxTaskTitleRunes — предел заголовка задачи. Считается рунами, а не
