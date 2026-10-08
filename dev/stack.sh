@@ -2,6 +2,11 @@
 # Изолированный стек на задачу: своя база, своё приложение, свои порты.
 #
 #   dev/stack.sh up CLAB-59      — поднять стек задачи и дождаться готовности
+#   dev/stack.sh exec CLAB-59 backend go test ./...
+#                                — команда в верстаке репозитория (backend |
+#                                  frontend): рабочая копия примонтирована
+#   dev/stack.sh shell CLAB-59 frontend
+#                                — bash в верстаке
 #   dev/stack.sh env CLAB-59     — напечатать адреса и переменные (для eval)
 #   dev/stack.sh ls              — какие стеки заняты
 #   dev/stack.sh logs CLAB-59    — логи api
@@ -24,6 +29,14 @@
 #
 # Стек — объект тестирования, а не источник задач: за задачей агент по-прежнему
 # ходит в рабочий инстанс через MCP и clab, а в своём стеке только проверяет код.
+#
+# Верстаки (решение 0041). Вместе со стеком поднимаются контейнеры с
+# инструментами репозиториев — Go для backend, Node для frontend, — в которые
+# примонтированы рабочие копии задачи. Файлы агент правит на хосте, а
+# собирает и тестирует внутри: `exec <ключ> backend make test-integration`.
+# Так соседние задачи не делят ни кэши, ни node_modules, ни базу тестов, а
+# на хосте не нужны ни Go, ни Node. Копия backend — та, из которой вызван
+# скрипт; копия frontend — её соседка `../frontend` или путь из --frontend.
 set -euo pipefail
 
 dev=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -76,6 +89,10 @@ alloc() {
 
 state_file() { printf '%s/%s.env' "$registry" "$(slug "$1")"; }
 
+# Физический путь каталога: рабочая копия может лежать за символической
+# ссылкой, а сравнивать источники нужно по одному и тому же написанию.
+real_dir() { (cd -- "$1" 2>/dev/null && pwd -P); }
+
 # Состояние стека: смещение, порты и корень, из которого он собран. Пишется
 # один раз при первом up и читается всеми остальными командами.
 load_or_create() {
@@ -100,9 +117,36 @@ ADMINER_PORT=$((18100 + off))
 MINIO_PORT=$((19100 + off))
 MINIO_CONSOLE_PORT=$((19200 + off))
 SOURCE=$(cd "$dev/.." && pwd)
+FRONTEND_SOURCE=
 EOF
     # shellcheck disable=SC1090
     . "$file"
+}
+
+# Копия фронтенда для верстака: явный --frontend, иначе соседка копии
+# backend (`.worktrees/<ключ>/frontend` рядом с `.worktrees/<ключ>/backend`,
+# `frontend` рядом с основной копией). Нет каталога — верстака фронтенда у
+# стека не будет; он нужен не каждой задаче. Пишется в состояние: остальные
+# команды читают его оттуда.
+set_frontend_source() {
+    local file want=$1 path
+    file=$(state_file "$KEY")
+    if [ -n "$want" ]; then
+        path=$(real_dir "$want") || die "копии фронтенда нет: $want"
+    else
+        path=$(real_dir "$SOURCE/../frontend") || path=
+    fi
+    FRONTEND_SOURCE=$path
+    sed -i '' "s|^FRONTEND_SOURCE=.*|FRONTEND_SOURCE=$path|" "$file"
+}
+
+# Кэши верстаков общие на машину и переживают стеки, поэтому в compose они
+# внешние, а заводятся здесь; создание идемпотентно.
+ensure_caches() {
+    local v
+    for v in clab-go-mod clab-go-build clab-npm-cache; do
+        docker volume create "$v" >/dev/null
+    done
 }
 
 # Переменные, с которыми поднимается стек задачи. Фоновые задания выключены
@@ -111,6 +155,14 @@ EOF
 stack_env() {
     export DEV_STACK_PREFIX="$PROJECT"
     export API_PORT POSTGRES_PORT ADMINER_PORT MINIO_PORT MINIO_CONSOLE_PORT
+    # Верстаки — профили compose, и профили нужны каждой команде: иначе
+    # `down` не увидит их контейнеров, а `exec` — сервисов.
+    export DEV_BACKEND_SRC="$SOURCE"
+    export COMPOSE_PROFILES=dev-backend
+    if [ -n "${FRONTEND_SOURCE:-}" ]; then
+        export DEV_FRONTEND_SRC="$FRONTEND_SOURCE"
+        COMPOSE_PROFILES=dev-backend,dev-frontend
+    fi
     if [ "${INDEX:-0}" = 1 ]; then return; fi
     export SDLC_INDEX_ENABLED=false
     export SDLC_EMBEDDINGS_PROVIDER=
@@ -133,6 +185,42 @@ wait_ready() {
 # Выделенная база интеграционных тестов в Postgres стека: тест сносит в ней
 # схему целиком, поэтому рядом с базой приложения, а не вместо неё.
 test_db_url() { printf 'postgres://sdlc:sdlc@localhost:%s/sdlc_test?sslmode=disable' "$POSTGRES_PORT"; }
+
+ensure_test_db() {
+    if ! dc exec -T postgres pg_isready -U sdlc -d postgres >/dev/null 2>&1; then
+        die "Postgres стека $KEY не отвечает (стек остановлен?): dev/stack.sh up $KEY"
+    fi
+    if [ "$(dc exec -T postgres psql -U sdlc -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'sdlc_test'")" != 1 ]; then
+        dc exec -T postgres psql -U sdlc -d postgres -qc 'CREATE DATABASE sdlc_test' >/dev/null \
+            || die "не удалось завести sdlc_test в стеке $KEY"
+    fi
+}
+
+# Верстак репозитория по его имени. Зависимости фронтенда ставятся при первом
+# обращении и после смены package-lock.json: они живут в томе стека, а не в
+# копии на хосте, и команде `up` ждать npm ci незачем.
+toolbox() {
+    case $1 in
+    backend) printf 'dev-backend' ;;
+    frontend)
+        [ -n "${FRONTEND_SOURCE:-}" ] || die "у стека $KEY нет копии фронтенда: dev/stack.sh up $KEY --frontend <путь к копии>"
+        dc exec -T dev-frontend bash -c \
+            '[ node_modules/.package-lock.json -nt package-lock.json ] || npm ci --no-audit --no-fund' >&2 \
+            || die "npm ci в верстаке фронтенда не прошёл"
+        printf 'dev-frontend' ;;
+    *) die "верстак бывает backend или frontend, не $1" ;;
+    esac
+}
+
+# exec без терминала (саб-агент, конвейер) — без -t, иначе docker откажет.
+exec_in() {
+    local svc=$1; shift
+    if [ -t 0 ] && [ -t 1 ]; then
+        dc exec "$svc" "$@"
+    else
+        dc exec -T "$svc" "$@"
+    fi
+}
 
 # Стек, поднятый из этой рабочей копии: SOURCE в реестре совпадает с её корнем.
 # Сравнение по физическому пути — worktree может лежать за символической
@@ -167,11 +255,13 @@ export CLAB_STACK_DB=postgres://sdlc:sdlc@localhost:$POSTGRES_PORT/sdlc?sslmode=
 export CLAB_STACK_TEST_DB=$(test_db_url)
 export SDLC_UI_PORT=$UI_PORT
 # интерфейс: SDLC_API_URL=\$CLAB_STACK_API npm run dev
+# верстаки: dev/stack.sh exec $KEY backend <команда>${FRONTEND_SOURCE:+ · dev/stack.sh exec $KEY frontend <команда>}
 EOF
 }
 
+usage='up|down|stop|exec|shell|env|ls|logs|psql|e2e|test-db'
 cmd=${1:-}
-[ -n "$cmd" ] || die "что делать? up|down|stop|env|ls|logs|psql|e2e|test-db"
+[ -n "$cmd" ] || die "что делать? $usage"
 shift || true
 
 case "$cmd" in
@@ -180,20 +270,38 @@ ls)
     for f in "$registry"/*.env; do
         if [ ! -e "$f" ]; then echo "(стеков нет)"; break; fi
         # shellcheck disable=SC1090
-        ( . "$f"; printf '%-12s %-14s %-6s %-6s %-6s %s\n' "$KEY" "$PROJECT" "$API_PORT" "$POSTGRES_PORT" "$UI_PORT" "$SOURCE" )
+        ( . "$f"; printf '%-12s %-14s %-6s %-6s %-6s %s\n' "$KEY" "$PROJECT" "$API_PORT" "$POSTGRES_PORT" "$UI_PORT" "$SOURCE${FRONTEND_SOURCE:+ + $FRONTEND_SOURCE}" )
     done
     ;;
 up)
     key=${1:-} ; shift || true
     [ -n "$key" ] || die "какой задаче поднять стек? dev/stack.sh up CLAB-59"
     INDEX=0
-    for a in "$@"; do
-        if [ "$a" = --index ]; then INDEX=1; fi
+    frontend=
+    while [ $# -gt 0 ]; do
+        case $1 in
+        --index) INDEX=1 ;;
+        --frontend)
+            shift; frontend=${1:-}
+            [ -n "$frontend" ] || die "--frontend ждёт путь к копии фронтенда"
+            # До записи в реестр: умереть с пустой записью — оставить стек-призрак.
+            [ -d "$frontend" ] || die "копии фронтенда нет: $frontend" ;;
+        *) die "неизвестный флаг $1: up <ключ> [--index] [--frontend <путь>]" ;;
+        esac
+        shift
     done
     load_or_create "$key" create
+    # Стек собран из конкретной копии backend, и верстак смотрит в неё же.
+    # Повторный up из другой копии тихо подменил бы одно другим.
+    if [ "$(real_dir "$SOURCE")" != "$(real_dir "$dev/..")" ]; then
+        die "стек $KEY поднят из $SOURCE; поднимайте его оттуда или снесите: dev/stack.sh down $KEY"
+    fi
+    set_frontend_source "$frontend"
     stack_env
+    ensure_caches
     dc up -d --build
     wait_ready
+    ensure_test_db
     cat <<EOF
 
 Стек задачи $KEY поднят.
@@ -204,10 +312,44 @@ up)
   Интерфейс  SDLC_API_URL=http://localhost:$API_PORT SDLC_UI_PORT=$UI_PORT npm run dev
              http://localhost:$UI_PORT
 
+  Верстак backend ($SOURCE):
+             dev/stack.sh exec $KEY backend go build ./... · make test-integration
+EOF
+    if [ -n "$FRONTEND_SOURCE" ]; then
+        cat <<EOF
+  Верстак frontend ($FRONTEND_SOURCE):
+             dev/stack.sh exec $KEY frontend npm run typecheck · npm run lint · npm run build
+EOF
+    else
+        cat <<EOF
+  Верстака frontend нет: копии рядом с backend не нашлось.
+             Нужен — dev/stack.sh up $KEY --frontend <путь к копии>
+EOF
+    fi
+    cat <<EOF
+  Внутрь:    dev/stack.sh shell $KEY backend|frontend
+
   Переменные в оболочку:          eval "\$(dev/stack.sh env $KEY)"
   (SDLC_API_URL в них нет: его читает clab, и он смотрит в рабочий инстанс)
   Снести вместе с данными:        dev/stack.sh down $KEY
 EOF
+    ;;
+exec)
+    load_or_create "${1:?какой задаче}"; shift
+    repo=${1:-}; shift || true
+    [ -n "$repo" ] || die "в каком верстаке? dev/stack.sh exec $KEY backend|frontend <команда>"
+    [ $# -gt 0 ] || die "какую команду выполнить в верстаке $repo?"
+    stack_env
+    svc=$(toolbox "$repo")
+    exec_in "$svc" "$@"
+    ;;
+shell)
+    load_or_create "${1:?какой задаче}"; shift
+    repo=${1:-}
+    [ -n "$repo" ] || die "в какой верстак? dev/stack.sh shell $KEY backend|frontend"
+    stack_env
+    svc=$(toolbox "$repo")
+    exec_in "$svc" bash
     ;;
 env)
     load_or_create "${1:?какой задаче}"
@@ -241,13 +383,7 @@ test-db)
     fi
     load_or_create "$key"
     stack_env
-    if ! dc exec -T postgres pg_isready -U sdlc -d postgres >/dev/null 2>&1; then
-        die "Postgres стека $KEY не отвечает (стек остановлен?): dev/stack.sh up $KEY"
-    fi
-    if [ "$(dc exec -T postgres psql -U sdlc -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'sdlc_test'")" != 1 ]; then
-        dc exec -T postgres psql -U sdlc -d postgres -qc 'CREATE DATABASE sdlc_test' >/dev/null \
-            || die "не удалось завести sdlc_test в стеке $KEY"
-    fi
+    ensure_test_db
     printf 'стек задачи %s (compose-проект %s)\n' "$KEY" "$PROJECT" >&2
     test_db_url
     echo
@@ -258,13 +394,20 @@ stop)
     dc stop
     ;;
 down)
-    load_or_create "${1:?какой задаче}"
+    # Уборка идемпотентна: оркестратор сносит стек в конце, не зная, снёс ли
+    # его уже разработчик на выкладке.
+    key=${1:?какой задаче}
+    if [ ! -f "$(state_file "$key")" ]; then
+        echo "стека задачи $key нет"
+        exit 0
+    fi
+    load_or_create "$key"
     stack_env
     dc down -v
     rm -f "$(state_file "$KEY")"
     echo "стек задачи $KEY снесён вместе с данными"
     ;;
 *)
-    die "неизвестная команда $cmd: up|down|stop|env|ls|logs|psql|e2e|test-db"
+    die "неизвестная команда $cmd: $usage"
     ;;
 esac

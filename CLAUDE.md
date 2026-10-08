@@ -503,32 +503,28 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   ([решение 0028](../docs/decisions/0028-github-app-per-project.md)).
 - **Обходить `principals` в аудите.** Все поля актора — внешние ключи.
 
-## Окружение container-use
+## Верстак задачи
 
-Код задачи правится и проверяется в окружении container-use
-([решение 0039](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0039-container-use-environments.md)),
-git и PR — в рабочей копии `.worktrees/<ключ>/backend` на хосте. Порядок
-целиком — `../docs/PROCESS.md`, раздел «Окружения container-use».
+Файлы задачи правятся в рабочей копии `.worktrees/<ключ>/backend` на хосте,
+а собираются и проверяются в верстаке её стека — контейнере
+`golang:1.25-bookworm` с примонтированной копией
+([решение 0041](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0041-task-toolbox-in-compose.md)).
+Порядок целиком — `../docs/PROCESS.md`, раздел «Верстак задачи»; устройство —
+`dev/README.md`, «Верстаки задачи».
 
-Окружение описано в `.container-use/environment.json`: `golang:1.25-bookworm`
-с `make` и `psql`, зависимости скачаны, сервис `postgres` — pgvector на pg17,
-своя пустая база `sdlc_test` на каждое окружение. container-use читает конфиг
-из основной копии, то есть с `main`; правка конфига идёт через PR.
-
-- `environment_source` — абсолютный путь к этому каталогу (основная копия),
-  `from_git_ref` — ветка задачи, заголовок `<ключ> backend: …`.
-- Сборка и модульные тесты: `go build ./... && go vet ./... && go test ./...`.
-- Интеграционные тесты — в базе окружения, не через `make test-integration`
-  (он ищет стек через Docker хоста):
-  `SDLC_TEST_DATABASE_URL=$CU_TEST_DATABASE_URL go test ./... -count=1 -p 1`.
-- Внутри окружения нет Docker: `make up`, `dev/stack.sh`, `dev/e2e.sh` и
-  `dev/e2e-orchestration.sh` идут на хосте, в стеке задачи, по коду рабочей
-  копии после `container-use apply`.
-- git в окружении не запускать; результат переносится `container-use apply
-  <id>` в чистой рабочей копии и коммитится там по конвенциям.
-- Новая миграция: номер сверять со свежим `main` и с окружениями соседей —
-  `container-use list` здесь покажет, какие задачи правят бэкенд на этой
-  машине, `container-use diff <id>` — трогают ли они `migrations/`.
+- Стек из копии задачи: `dev/stack.sh up <ключ>`. Поднят оркестратором или
+  соседней ролью — повторный `up` безвреден.
+- Сборка и модульные тесты: `dev/stack.sh exec <ключ> backend go build ./...`,
+  так же `go vet ./...`, `go test ./...`, `make lint`.
+- Интеграционные тесты: `dev/stack.sh exec <ключ> backend make test-integration`
+  — в `sdlc_test` Postgres этого стека, соседям не мешают.
+- Внутри верстака нет Docker и не работает git: `make up`, `dev/e2e.sh`,
+  `dev/e2e-orchestration.sh`, коммиты и push — на хосте. Стек пересобирает
+  api по коду копии при каждом `up`.
+- Новая миграция: номер сверять со свежим `main` и с ветками соседей —
+  `git worktree list` здесь покажет, какие задачи правят бэкенд на этой
+  машине, `git diff --stat origin/main...<ветка соседа>` — трогают ли они
+  `migrations/`.
 
 ## Референсы реализации
 
@@ -594,8 +590,10 @@ CLI не знает.
 возврат результата ревьюером и повторную перепроверку после доработки. Проход
 эпика — `dev/e2e-orchestration.sh`: нарезка, назначение, стоимость, гейт
 зависимостей. Инкрементальность, дрейф, поиск и оркестрация —
-`make test-integration` на выделенной базе; в рабочей копии с поднятым стеком
-задачи — в базе этого стека (`dev/stack.sh test-db`, `KEY=` для явного выбора).
+`make test-integration` на выделенной базе; в верстаке стека задачи
+(`dev/stack.sh exec <ключ> backend make test-integration`) — в базе этого
+стека, на хосте — `dev/stack.sh test-db` находит её сам (`KEY=` для явного
+выбора).
 
 Деплой (решение 0031): `devops/terraform` описывает машину в Timeweb,
 IPv4, файрвол, A-запись и бакет; `deploy/` — стек за Caddy и выкладку по

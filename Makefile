@@ -20,14 +20,17 @@ test:
 # индексации и гибридный поиск живут в связке с базой и на моках не ловятся.
 # База выделенная — тест сносит в ней схему целиком.
 #
-# Какую базу брать, решает dev/stack.sh test-db: стек задачи KEY, иначе стек,
+# Какую базу брать: заданный SDLC_TEST_DATABASE_URL как есть (так работает
+# верстак стека — внутри него нет Docker, а адрес базы стека ему выдан при
+# старте); иначе решает dev/stack.sh test-db: стек задачи KEY, иначе стек,
 # поднятый из этой рабочей копии, иначе (пустой ответ) — общий стек make up.
 # Стек есть, но стоит, — ошибка, а не тихий уход в общий: там чужие тесты.
 #
 # -p 1: база одна на все пакеты, а каждый начинает с чистой схемы —
 # параллельные пакеты снесли бы её друг у друга посреди прогона.
 test-integration:
-	@url=$$(dev/stack.sh test-db $(KEY)) || exit 1; \
+	@url="$${SDLC_TEST_DATABASE_URL:-}"; \
+	if [ -z "$$url" ]; then url=$$(dev/stack.sh test-db $(KEY)) || exit 1; fi; \
 	if [ -z "$$url" ]; then \
 		docker compose -f dev/docker-compose.yml exec -T postgres \
 			psql -U sdlc -d postgres -c 'CREATE DATABASE sdlc_test' >/dev/null 2>&1 || true; \
