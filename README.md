@@ -97,7 +97,7 @@ development) каждый запрос несёт `Authorization: Bearer <token>
 | `GET`/`POST` | `/v1/projects/{key}/tasks` | список и создание задач |
 | `GET` | `/v1/tasks/{key}` | карточка: задача, попытки этапов, артефакты, вердикт гейтов |
 | `GET` | `/v1/tasks/{key}/timeline` | лента событий |
-| `PATCH` | `/v1/tasks/{key}/scope` | свойства и область задачи по репозиториям |
+| `PATCH` | `/v1/tasks/{key}/scope` | свойства и область задачи: `add_repositories`, `remove_repositories` (сопровождающий), `note` |
 | `GET`/`POST` | `/v1/tasks/{key}/artifacts` | артефакты текущей попытки этапа |
 | `GET` | `/v1/tasks/{key}/transitions` | доступные переходы с прогоном гейтов |
 | `POST` | `/v1/tasks/{key}/transitions/{transition}` | выполнить переход |
@@ -176,6 +176,21 @@ clab tasks                                        # таблица; --json — �
 clab show SDLC-1
 clab mcp install                                  # claude mcp add с тем же токеном
 ```
+
+Область задачи меняет `clab scope`. Расширить её вправе и агент
+(`sdlc_update_task_scope` умеет только это), сузить — решение человека
+уровня `maintainer` и выше, поэтому `--remove` есть только в CLI и REST:
+
+```bash
+clab scope SDLC-42 --add acme/web --reason "поле надо показать на фронте"
+clab scope SDLC-42 --remove acme/api --reason "бэкенд был только справочником"
+clab scope SDLC-42 --remove acme/api --add acme/web --reason "..."  # замена одним вызовом
+```
+
+Убрать нельзя последний репозиторий области и репозиторий, к которому у
+задачи привязаны PR, ветки или коммиты: в нём уже идёт работа задачи. Ушёл
+основной — основным становится первый из оставшихся по `owner/name`. В ленте
+это то же событие `task.scope_updated` с `removed_repositories`.
 
 Установка своего инстанса, вход, первый проект и подключение агента —
 в [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted):

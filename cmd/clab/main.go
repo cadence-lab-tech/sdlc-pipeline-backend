@@ -57,7 +57,7 @@ func commands() []command {
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
-		{"scope", "расширить область задачи", "clab scope SDLC-42 --add acme/web --reason ...", cmdScope},
+		{"scope", "расширить или сузить область задачи", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] --reason ...", cmdScope},
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file]", cmdTransition},
 		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
@@ -461,11 +461,12 @@ func cmdLink(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdScope(ctx context.Context, c *Client, args []string) error {
-	var add, reason string
+	var add, remove, reason string
 	task, rest := popTask(args)
 	fs, err := flags("scope", rest, func(fs *flag.FlagSet) {
-		fs.StringVar(&add, "add", "", "репозитории через запятую")
-		fs.StringVar(&reason, "reason", "", "почему изменение не помещается в текущую область")
+		fs.StringVar(&add, "add", "", "репозитории через запятую: добавить в область")
+		fs.StringVar(&remove, "remove", "", "репозитории через запятую: убрать из области (нужен уровень maintainer)")
+		fs.StringVar(&reason, "reason", "", "почему область меняется")
 	})
 	if err != nil {
 		return err
@@ -473,20 +474,14 @@ func cmdScope(ctx context.Context, c *Client, args []string) error {
 	if err := requireTask(fs, task); err != nil {
 		return err
 	}
-	if add == "" {
-		return fmt.Errorf("не указан --add")
-	}
-
-	repos := []string{}
-	for _, r := range strings.Split(add, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			repos = append(repos, r)
-		}
+	if add == "" && remove == "" {
+		return fmt.Errorf("не указан ни --add, ни --remove")
 	}
 
 	var out any
 	if err := c.do(ctx, "PATCH", "/tasks/"+task+"/scope", map[string]any{
-		"add_repositories": repos, "note": reason,
+		"add_repositories": splitList(add), "remove_repositories": splitList(remove),
+		"note": reason,
 	}, &out); err != nil {
 		return err
 	}
