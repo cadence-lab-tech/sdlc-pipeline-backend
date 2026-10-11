@@ -72,6 +72,10 @@ CLEANUP_DIR="$T/bad" "$HERE/cleanup.sh" verify >/dev/null 2>&1 && fail "verify �
 echo "нет" | "$HERE/cleanup.sh" push >/dev/null 2>&1 && fail "push прошёл без подтверждения" || pass "push без подтверждения отказывает"
 [ "$(git -C "$T/origin.git" rev-parse main)" = "$(git -C "$CLEANUP_DIR/backup.git" rev-parse main)" ] \
   || fail "отказавший push изменил сервер"
+# сервер ушёл вперёд после снимка (новый тег): push обязан отказать, ничего не затирая
+git -C "$T/origin.git" tag v9.9.9 main
+echo "force-push origin main+2tags" | "$HERE/cleanup.sh" push >/dev/null 2>&1 && fail "push прошёл при разошедшихся тегах" || pass "push отказывает, если сервер разошёлся со снимком"
+git -C "$T/origin.git" tag -d v9.9.9 >/dev/null
 echo "force-push origin main+2tags" | "$HERE/cleanup.sh" push >/dev/null 2>&1 || fail "push с подтверждением не прошёл"
 pass "push"
 run verify-remote; pass "verify-remote: свежий клон = отправленное"

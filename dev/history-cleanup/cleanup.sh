@@ -416,6 +416,15 @@ cmd_push() {
   [ "$server_main" = "$backup_main" ] \
     || die "на сервере $BRANCH = $server_main, в бэкапе $backup_main: после снимка был push, повторите snapshot"
 
+  # Любая ветка и любой тег на сервере совпадают со снимком: иначе force затёр бы
+  # тег, который кто-то сдвинул или завёл после бэкапа.
+  if [ -f "$CLEANUP_DIR/ls-remote-before.txt" ]; then
+    local now before
+    now=$(git ls-remote --heads --tags "$REPO_URL" | sort)
+    before=$(awk '$2 ~ /^refs\/(heads|tags)\//' "$CLEANUP_DIR/ls-remote-before.txt" | sort)
+    [ "$now" = "$before" ] || die "ветки или теги на сервере разошлись со снимком (ls-remote-before.txt): повторите snapshot"
+  fi
+
   # Ветки, кроме main, пушем не мы: в них devops/ остался бы достижим. П2 требует
   # удалить их до снимка; здесь страховка на случай, если одна появилась позже.
   local extra
