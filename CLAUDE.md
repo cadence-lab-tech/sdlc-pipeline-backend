@@ -70,7 +70,8 @@ internal/
   testdb/           выделенная база для интеграционных проверок
   blobstore/        вынос крупного содержимого: каталог и S3 за одним интерфейсом
 migrations/         схема и сиды; embed.go встраивает их в бинарник
-dev/                docker-compose для локального запуска, e2e.sh
+dev/                docker-compose для локального запуска, e2e.sh;
+                    history-cleanup/ — разовая чистка истории от devops/
 deploy/             продовый стек: compose за Caddy, deploy.sh, дампы
 devops/             локальная папка владельца, вне репозитория: Terraform,
                     cloud-init и скрипты машины нашего инстанса
