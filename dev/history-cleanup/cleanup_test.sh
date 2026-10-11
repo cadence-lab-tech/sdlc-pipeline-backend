@@ -28,7 +28,7 @@ echo tf >devops/main.tf && echo compose >deploy/compose.yml && git add -A && git
 git tag -a v0.1.0 -m "v0.1.0"
 echo more >>devops/main.tf && git add -A && git commit -q -m "только devops"          # будет вычеркнут
 echo x >>deploy/compose.yml && echo y >>devops/main.tf && git add -A && git commit -q -m "deploy и devops вместе"
-git rm -q -r devops && echo done >done.txt && git add -A && git commit -q -m "devops вне репозитория"
+git rm -q -r devops && echo finished >finished.txt && git add -A && git commit -q -m "devops вне репозитория"
 git tag -a v0.2.0 -m "v0.2.0"
 git clone -q --bare "$SRC" "$T/origin.git"
 

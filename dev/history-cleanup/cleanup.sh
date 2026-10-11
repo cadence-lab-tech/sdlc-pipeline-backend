@@ -288,9 +288,8 @@ verify_repo() {
     || bad "Р2 дерево $BRANCH разошлось: было $tb, стало $ta"
 
   # Р3: число коммитов и их содержание.
-  local dropped dropped_n cb ca
+  local dropped cb ca
   dropped=$(devops_only_commits "$BACKUP" | sort)
-  dropped_n=$(printf '%s\n' "$dropped" | grep -c . || true)
   cb=$(git -C "$BACKUP" rev-list --count "refs/heads/$BRANCH")
   ca=$(git -C "$after" rev-list --count "refs/heads/$BRANCH")
   [ "$ca" -eq $((cb - $(count_in_branch "$dropped"))) ] \
