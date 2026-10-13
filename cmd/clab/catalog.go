@@ -549,25 +549,27 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.get(ctx, "/projects/"+key+"/workflows", nil, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderWorkflows, out))
 	case "validate", "activate":
 		id, _ := popTask(rest)
 		if id == "" {
 			return fmt.Errorf("clab workflow %s <id>", sub)
 		}
-		var out any
+		var out json.RawMessage
 		if sub == "validate" {
 			if err := c.get(ctx, "/workflows/"+id+"/validation", nil, &out); err != nil {
 				return err
 			}
-		} else if err := c.post(ctx, "/workflows/"+id+"/activate", map[string]any{}, &out); err != nil {
+			return print(out)
+		}
+		if err := c.post(ctx, "/workflows/"+id+"/activate", map[string]any{}, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderActivation, out))
 	default:
 		return fmt.Errorf("clab workflow list|validate|activate")
 	}

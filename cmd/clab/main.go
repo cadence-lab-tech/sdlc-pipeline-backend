@@ -575,9 +575,28 @@ func cmdTransition(ctx context.Context, c *Client, args []string) error {
 	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+task+"/transitions/"+to,
 		map[string]any{"comment": comment}, &out); err != nil {
-		return err
+		return blockedTransition(task, to, err)
 	}
 	return emit(out, render(renderTransitionResult, out))
+}
+
+// blockedTransition показывает гейты заблокированного перехода тем же
+// списком, что clab gates, а не JSON деталей ошибки. С --json детали
+// остаются как есть: скрипты читают их из stderr.
+func blockedTransition(task, to string, err error) error {
+	var apiErr *APIError
+	if jsonOut || !errors.As(err, &apiErr) || apiErr.Code != "gates_not_satisfied" {
+		return err
+	}
+	var details struct {
+		Gates []gateOutcome `json:"gates"`
+	}
+	if json.Unmarshal(apiErr.Details, &details) != nil || len(details.Gates) == 0 {
+		return err
+	}
+	fmt.Printf("%s остаётся на месте: переход %s заблокирован гейтами\n", task, to)
+	printGates(details.Gates)
+	return &APIError{Code: apiErr.Code, Message: apiErr.Message, Status: apiErr.Status}
 }
 
 // cmdDecide закрывает гейт решением. Нужен CI: чек-лист и внешнюю проверку
@@ -610,13 +629,13 @@ func cmdDecide(ctx context.Context, c *Client, args []string) error {
 		body["details"] = parsed
 	}
 
-	var out any
+	var out json.RawMessage
 	if err := c.post(ctx,
 		"/tasks/"+task+"/transitions/"+transition+"/gates/"+gate+"/decision",
 		body, &out); err != nil {
 		return err
 	}
-	return print(out)
+	return emit(out, render(renderDecision, out))
 }
 
 func cmdDrift(ctx context.Context, c *Client, args []string) error {

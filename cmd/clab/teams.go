@@ -74,11 +74,11 @@ func cmdTeam(ctx context.Context, c *Client, args []string) error {
 		if description != "" {
 			body["description"] = description
 		}
-		var out any
+		var out json.RawMessage
 		if err := c.do(ctx, "POST", "/teams", body, &out); err != nil {
 			return err
 		}
-		return print(out)
+		return emit(out, render(renderTeamCreated, out))
 
 	case "convert":
 		// Личная команда становится организацией (решение 0033): проекты

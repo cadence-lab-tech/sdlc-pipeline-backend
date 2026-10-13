@@ -966,3 +966,86 @@ func renderProjects(raw json.RawMessage) error {
 	t.print()
 	return nil
 }
+
+// ── версии цикла, решения, команды ──────────────────────────────────────────
+
+type workflowRow struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Version   int      `json:"version"`
+	State     string   `json:"state"`
+	TaskTypes []string `json:"task_types"`
+}
+
+// renderWorkflows — таблица версий цикла. Идентификатор печатается целиком:
+// его копируют в clab workflow activate.
+func renderWorkflows(raw json.RawMessage) error {
+	var out struct {
+		Workflows []workflowRow `json:"workflows"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	t := newTable("ID", "ЦИКЛ", "ВЕРСИЯ", "СОСТОЯНИЕ", "ТИПЫ ЗАДАЧ")
+	for _, w := range out.Workflows {
+		t.add(w.ID, w.Name, fmt.Sprint(w.Version), w.State, joinOr(w.TaskTypes, "task"))
+	}
+	t.print()
+	return nil
+}
+
+func renderActivation(raw json.RawMessage) error {
+	var out struct {
+		Workflow      workflowRow `json:"workflow"`
+		Retired       []string    `json:"retired_workflow_ids"`
+		PreviousTotal int         `json:"tasks_on_previous_version_total"`
+		MovedTotal    int         `json:"tasks_moved_total"`
+		Warnings      []struct {
+			Message string `json:"message"`
+		} `json:"warnings"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	w := out.Workflow
+	fmt.Printf("активирован: %s, версия %d (%s)\n", w.Name, w.Version, joinOr(w.TaskTypes, "task"))
+	if len(out.Retired) > 0 {
+		fmt.Printf("  ушло на покой версий: %d\n", len(out.Retired))
+	}
+	if out.PreviousTotal > 0 {
+		fmt.Printf("  задач доходит по прежней версии: %d\n", out.PreviousTotal)
+	}
+	if out.MovedTotal > 0 {
+		fmt.Printf("  задач бэклога переехало на новую: %d\n", out.MovedTotal)
+	}
+	for _, p := range out.Warnings {
+		fmt.Printf("  ! %s\n", p.Message)
+	}
+	return nil
+}
+
+// renderDecision — записанное решение по гейту в той же строке, что у
+// clab gates.
+func renderDecision(raw json.RawMessage) error {
+	var g gateOutcome
+	if err := decode(raw, &g); err != nil {
+		return err
+	}
+	fmt.Println("решение записано:")
+	printGates([]gateOutcome{g})
+	return nil
+}
+
+func renderTeamCreated(raw json.RawMessage) error {
+	var team struct {
+		Key               string `json:"key"`
+		Name              string `json:"name"`
+		CanCreateProjects bool   `json:"can_create_projects"`
+	}
+	if err := decode(raw, &team); err != nil {
+		return err
+	}
+	fmt.Printf("команда %s «%s» создана; может заводить проекты: %s\n",
+		team.Key, team.Name, yesNo(team.CanCreateProjects))
+	return nil
+}
