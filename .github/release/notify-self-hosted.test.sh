@@ -14,7 +14,8 @@ cat > "$tmp/docker" <<'SH'
 echo "docker $*" >> "$FAKE_LOG"
 case "${FAKE_OTHER:-missing}" in
   present) echo "Name: $4"; exit 0 ;;
-  denied) echo "ERROR: failed to authorize: 403 Forbidden" >&2; exit 1 ;;
+  denied) echo "ERROR: unexpected status from HEAD request to https://ghcr.io/v2/x/manifests/v9.9.9: 403 Forbidden" >&2; echo "denied" >&2; exit 1 ;;
+  unreachable) echo "ERROR: failed to do request: Head \"https://ghcr.io/v2/x/manifests/v9.9.9\": dial tcp: i/o timeout" >&2; exit 1 ;;
   *) echo "ERROR: $4: not found" >&2; exit 1 ;;
 esac
 SH
@@ -49,18 +50,31 @@ expect_not() {
 
 # Половина выпуска: второго образа нет — события нет, лог называет образ.
 run half-backend 0 SELF=backend HAS_TOKEN=true FAKE_OTHER=missing
-expect half-backend out "нет образа ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v9.9.9"
+expect half-backend out "::notice::в реестре нет образа ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v9.9.9"
 expect half-backend out "not found"
+expect_not half-backend out "::error::"
 expect_not half-backend log "gh "
 
 run half-frontend 0 SELF=frontend HAS_TOKEN=true FAKE_OTHER=missing
 expect half-frontend out "нет образа ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v9.9.9"
 expect_not half-frontend log "gh "
 
-# Нет доступа к чужому пакету — тоже не событие, ответ реестра в логе.
-run denied 0 SELF=backend HAS_TOKEN=true FAKE_OTHER=denied
+# Отказ реестра — не «образа нет», а поломка доступа (CLAB-99): прогон
+# красный, ответ реестра и команда для отправки руками в логе, события нет.
+run denied 1 SELF=backend HAS_TOKEN=true FAKE_OTHER=denied
+expect denied out "::error::реестр отказал в чтении ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v9.9.9"
 expect denied out "403 Forbidden"
+expect denied out "Manage Actions access"
+expect denied out "gh api repos/cadence-lab-tech/self-hosted/dispatches -f event_type=cadence-release"
+expect_not denied out "::notice::"
 expect_not denied log "gh "
+
+# Реестр недоступен — тоже не половина выпуска: красный, команда руками.
+run unreachable 1 SELF=frontend HAS_TOKEN=true FAKE_OTHER=unreachable
+expect unreachable out "::error::реестр не ответил, есть ли образ ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v9.9.9"
+expect unreachable out "i/o timeout"
+expect unreachable out "client_payload[version]=v9.9.9"
+expect_not unreachable log "gh "
 
 # Оба образа есть, секрета нет — прогон зелёный, в логе команда руками.
 run no-token 0 SELF=frontend HAS_TOKEN=false FAKE_OTHER=present

@@ -34,26 +34,47 @@ case "$SELF" in
   *) echo "SELF должен быть backend или frontend, а не «$SELF»" >&2; exit 2 ;;
 esac
 
-# Пока пакеты GHCR приватные, токен прогона читает чужой пакет, только если
-# в настройках пакета этому репозиторию выдан доступ (Manage Actions access).
-# Отказ в доступе выглядит так же, как отсутствие образа, — поэтому в лог
-# идёт и ответ реестра.
+manual() {
+  echo "Отправить руками:"
+  echo "  gh api repos/$TARGET/dispatches -f event_type=cadence-release \\"
+  echo "    -f 'client_payload[version]=$VERSION' \\"
+  echo "    -f 'client_payload[backend_image]=$backend_image' \\"
+  echo "    -f 'client_payload[frontend_image]=$frontend_image'"
+}
+
+# Образ соседа читается тем же GITHUB_TOKEN, которым прогон вошёл в реестр.
+# Пакеты публичны (CLAB-94), поэтому «образа нет» — это только 404. Отказ
+# реестра (401/403: пакет снова приватный, прогону не выдано чтение чужого
+# пакета) и молчание сети — не половина выпуска, а поломка: если считать их
+# отсутствием образа, событие не уйдёт ни из одного прогона (CLAB-99).
+# Такой прогон красный и печатает команду для отправки руками.
 if ! out=$(docker buildx imagetools inspect "$other" 2>&1); then
+  registry_says() { echo "Ответ реестра:"; printf '%s\n' "$out" | tail -n 3 | sed 's/^/  /'; }
+  if printf '%s' "$out" | grep -qiE 'unauthorized|forbidden|denied|\b40[13]\b'; then
+    echo "::error::реестр отказал в чтении $other — это не отсутствие образа; событие в $TARGET не отправлено."
+    echo "Пакет $other_repo стал приватным, или этому репозиторию не выдано его чтение"
+    echo "(Package settings → Manage Actions access), или прогон не вошёл в ghcr.io."
+    registry_says
+    manual
+    exit 1
+  fi
+  if ! printf '%s' "$out" | grep -qiE 'not found|manifest unknown|name unknown|\b404\b'; then
+    echo "::error::реестр не ответил, есть ли образ $other — событие в $TARGET не отправлено."
+    registry_says
+    manual
+    exit 1
+  fi
   echo "::notice::в реестре нет образа $other — событие в $TARGET не отправлено."
   echo "Его отправит выпуск $other_repo, когда опубликует свой образ $VERSION:"
   echo "поставьте тег $VERSION там или перезапустите упавший прогон."
-  echo "Ответ реестра:"
-  printf '%s\n' "$out" | tail -n 3 | sed 's/^/  /'
+  registry_says
   exit 0
 fi
 echo "оба образа версии в реестре: $backend_image, $frontend_image"
 
 if [ "${HAS_TOKEN:-false}" != true ]; then
-  echo "::warning::секрета SELF_HOSTED_DISPATCH_TOKEN нет — событие в $TARGET не отправлено; руками:"
-  echo "  gh api repos/$TARGET/dispatches -f event_type=cadence-release \\"
-  echo "    -f 'client_payload[version]=$VERSION' \\"
-  echo "    -f 'client_payload[backend_image]=$backend_image' \\"
-  echo "    -f 'client_payload[frontend_image]=$frontend_image'"
+  echo "::warning::секрета SELF_HOSTED_DISPATCH_TOKEN нет — событие в $TARGET не отправлено."
+  manual
   exit 0
 fi
 

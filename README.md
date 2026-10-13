@@ -272,17 +272,22 @@ gh release download --repo cadence-lab-tech/homebrew-tap \
   доступом только к `cadence-lab-tech/self-hosted`, право Contents: Read and
   write. Без секрета прогон зелёный, а шаг печатает команду для отправки
   руками;
-- пока пакеты GHCR приватные — чтение чужого пакета из прогона: в настройках
-  пакета `sdlc-pipeline-frontend` → Manage Actions access → репозиторий
-  `sdlc-pipeline-backend` с ролью Read, и наоборот. Иначе каждый выпуск
-  видит отказ реестра вместо второго образа и событие не уходит.
+- пакеты GHCR `sdlc-pipeline-backend` и `sdlc-pipeline-frontend` публичные
+  (CLAB-94): образ соседа прогон читает своим `GITHUB_TOKEN` без настроек.
+  Если пакет снова станет приватным, чтение чужого пакета выдаётся в
+  настройках пакета: `sdlc-pipeline-frontend` → Manage Actions access →
+  репозиторий `sdlc-pipeline-backend` с ролью Read, и наоборот.
 
 Пришла только половина выпуска — в логе шага «оповестить self-hosted»
 написано, какого образа нет, и ответ реестра. Поставить тег во втором
 репозитории или перезапустить упавший прогон (`gh run rerun <id> --failed`):
-событие отправит он. Отправить руками — команда из лога шага при прогоне без
-секрета: `gh api repos/cadence-lab-tech/self-hosted/dispatches -f
-event_type=cadence-release -f 'client_payload[version]=vX.Y.Z'`.
+событие отправит он. Шаг отличает «образа ещё нет» (404, прогон зелёный)
+от отказа реестра и молчания сети (401/403, таймаут): это поломка доступа,
+и такой прогон красный — иначе событие не отправил бы ни один из двух
+выпусков (CLAB-99). Отправить руками — команда из лога шага: `gh api
+repos/cadence-lab-tech/self-hosted/dispatches -f event_type=cadence-release
+-f 'client_payload[version]=vX.Y.Z'` плюс `backend_image` и
+`frontend_image`.
 
 ## Структура
 

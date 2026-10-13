@@ -72,6 +72,13 @@ services:
       # Кто заводит проекты (решение 0030): open — любой вошедший, teams —
       # администратор системы и лиды команд с правом на это.
       SDLC_PROJECT_CREATION: ${SDLC_PROJECT_CREATION:-open}
+      # Профиль поставки (решение 0040): shared — общий инстанс, single —
+      # выделенный инстанс компании без личных команд и тарифов; первую
+      # команду в single заводит SDLC_BOOTSTRAP_TEAM. Так стек задачи
+      # поднимается в профиле self-hosted: e2e/single.mjs и пакет поставки.
+      SDLC_TENANCY: ${SDLC_TENANCY:-shared}
+      SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}
+      SDLC_BOOTSTRAP_TEAM_NAME: ${SDLC_BOOTSTRAP_TEAM_NAME:-}
       # Вход через GitHub: OAuth-учётные данные того же GitHub App. Без них
       # страница входа показывает только провайдера и токен.
       SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}

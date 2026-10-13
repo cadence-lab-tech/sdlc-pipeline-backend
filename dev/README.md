@@ -440,7 +440,17 @@ GitHub (`principals.idp_subject = github:<id>`), хэндл — логин. То
 входил. `teams` возвращает правило фазы 6: администратор системы и лиды
 команд с правом на это. На выделенном инстансе (`SDLC_TENANCY=single`)
 личных команд нет: проект заводится только в команде, команды заводит
-администратор (`SDLC_BOOTSTRAP_TEAM` даёт первую).
+администратор (`SDLC_BOOTSTRAP_TEAM` даёт первую). Стек в профиле
+self-hosted поднимается теми же переменными — так проверяется
+`e2e/single.mjs` интерфейса и поведение пакета поставки:
+
+```bash
+SDLC_TENANCY=single SDLC_AUTH_MODE=token SDLC_ADMIN_TOKEN=sdlc_<секрет> \
+  SDLC_BOOTSTRAP_TEAM=acme SDLC_BOOTSTRAP_TEAM_NAME=Acme dev/stack.sh up <ключ>
+curl -s localhost:<порт api>/v1/instance   # "tenancy":"single"
+```
+
+Без переменных стек поднимается в `shared`, как раньше.
 
 **Арендатор — команда.** Личная команда заводится при первом входе;
 организацию заводит любой вошедший (`clab team create`) и зовёт в неё
