@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
@@ -279,19 +281,19 @@ func (s *Server) level(ctx context.Context) (domain.MemberRole, error) {
 // двух формулировок — иначе агент, запущенный раннером, ведёт себя иначе,
 // чем запущенный руками, и разница всплывает в артефактах.
 func (s *Server) registerWorkPrompt() {
-	s.mcp.AddPrompt(&sdk.Prompt{
+	prompt := &sdk.Prompt{
 		Name:        "work_on_task",
 		Description: "Взять задачу в работу: забрать этап, сделать работу роли, довести до перехода.",
 		Arguments: []*sdk.PromptArgument{
 			{Name: "task", Description: "ключ задачи, например SDLC-42", Required: true},
 			{Name: "role", Description: "ключ роли, если этап адресован конкретной"},
 		},
-	}, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
-		task, role := "", ""
-		if req.Params != nil {
-			task = req.Params.Arguments["task"]
-			role = req.Params.Arguments["role"]
+	}
+	s.mcp.AddPrompt(prompt, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
+		if err := requirePromptArguments(prompt, req); err != nil {
+			return nil, err
 		}
+		task, role := req.Params.Arguments["task"], req.Params.Arguments["role"]
 		text := workPromptText(task, role)
 		return &sdk.GetPromptResult{
 			Description: "работа над задачей " + task,
@@ -301,6 +303,29 @@ func (s *Server) registerWorkPrompt() {
 			}},
 		}, nil
 	})
+}
+
+// requirePromptArguments отбивает prompts/get без обязательного аргумента
+// ошибкой invalid params, как у тулов. SDK этого не делает, а промпт с пустым
+// ключом задачи агент принял бы за настоящий и пошёл бы забирать «ничего»
+// (CLAB-104).
+func requirePromptArguments(prompt *sdk.Prompt, req *sdk.GetPromptRequest) error {
+	var missing []string
+	for _, arg := range prompt.Arguments {
+		if !arg.Required {
+			continue
+		}
+		if req.Params == nil || strings.TrimSpace(req.Params.Arguments[arg.Name]) == "" {
+			missing = append(missing, arg.Name+" ("+arg.Description+")")
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return &jsonrpc.Error{
+		Code:    jsonrpc.CodeInvalidParams,
+		Message: "промпту " + prompt.Name + " нужны аргументы: " + strings.Join(missing, ", "),
+	}
 }
 
 func workPromptText(task, role string) string {
