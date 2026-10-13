@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
@@ -195,7 +196,10 @@ func (e *Engine) evalHumanApproval(ctx context.Context, q postgres.Querier, in E
 		return out, nil
 	}
 
-	got, err := e.store.CountApprovals(ctx, q, in.StageRun.ID, in.Gate.ID)
+	// Считаются только апрувы после последней сдачи на этапе: человек
+	// утверждает то, что видел, а не то, что сдадут потом (решение 0042).
+	since := latestSubmission(in.StageArtifacts)
+	got, err := e.store.CountApprovals(ctx, q, in.StageRun.ID, in.Gate.ID, since)
 	if err != nil {
 		return GateOutcome{}, err
 	}
@@ -205,8 +209,31 @@ func (e *Engine) evalHumanApproval(ctx context.Context, q postgres.Querier, in E
 	if got >= cfg.MinApprovals {
 		out = base(in.Gate, domain.GateResultPassed, "")
 	}
-	out.Details = map[string]any{"approvals": got, "min_approvals": cfg.MinApprovals}
+	details := map[string]any{"approvals": got, "min_approvals": cfg.MinApprovals}
+	if got < cfg.MinApprovals && !since.IsZero() {
+		ever, err := e.store.CountApprovals(ctx, q, in.StageRun.ID, in.Gate.ID, time.Time{})
+		if err != nil {
+			return GateOutcome{}, err
+		}
+		if stale := ever - got; stale > 0 {
+			out.Reason += fmt.Sprintf("; апрувов до последней сдачи артефактов: %d, они устарели", stale)
+			details["stale_approvals"] = stale
+		}
+	}
+	out.Details = details
 	return out, nil
+}
+
+// latestSubmission — момент последней сдачи на этапе; нулевое время, если
+// на этапе ничего не сдавали.
+func latestSubmission(artifacts []domain.Artifact) time.Time {
+	var latest time.Time
+	for _, a := range artifacts {
+		if a.CreatedAt.After(latest) {
+			latest = a.CreatedAt
+		}
+	}
+	return latest
 }
 
 // ── repo_ref_required ───────────────────────────────────────────────────────

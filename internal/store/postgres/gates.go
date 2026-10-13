@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -79,12 +80,15 @@ func (s *Store) ListGateResults(ctx context.Context, q Querier, stageRunID uuid.
 	return out, translate(rows.Err())
 }
 
-// CountApprovals считает независимые апрувы по гейту в рамках попытки этапа.
+// CountApprovals считает независимые апрувы по гейту в рамках попытки этапа,
+// поставленные после момента since (нулевое время — все).
 //
 // Источник — лента событий, а не gate_results: там строка одна на гейт, и
 // min_approvals больше единицы по ней не посчитать. Различаются именно акторы,
-// поэтому один человек, нажавший апрув дважды, второго апрува не даёт.
-func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateID uuid.UUID) (int, error) {
+// поэтому один человек, нажавший апрув дважды, второго апрува не даёт. Граница
+// since — последняя сдача артефакта на этапе: апрув, поставленный до неё,
+// утверждал не то, что лежит в задаче сейчас (решение 0042).
+func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateID uuid.UUID, since time.Time) (int, error) {
 	var n int
 	err := q.QueryRow(ctx, `
 		SELECT count(DISTINCT actor_id)
@@ -92,8 +96,9 @@ func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateI
 		WHERE stage_run_id = $1
 		  AND type = $2
 		  AND payload->>'gate_id' = $3::text
-		  AND payload->>'status' = 'passed'`,
-		stageRunID, domain.EventGateDecided, gateID.String()).Scan(&n)
+		  AND payload->>'status' = 'passed'
+		  AND created_at > $4`,
+		stageRunID, domain.EventGateDecided, gateID.String(), since).Scan(&n)
 	if err != nil {
 		return 0, translate(err)
 	}

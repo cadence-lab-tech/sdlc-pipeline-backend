@@ -317,13 +317,18 @@ func (e *Engine) completeReview(ctx context.Context, tx pgx.Tx, task domain.Task
 
 // resetReview снимает результат перепроверки, когда исполнитель сдал новую
 // версию результата: старый вердикт вынесен о том, чего уже нет.
+//
+// Вместе с вердиктом ревью снимается и решение человека по human_approval
+// (решение 0042): апрув ставился тому, что лежало в задаче до этой сдачи.
+// Счёт апрувов для min_approvals ведётся по ленте событий и сам отсекает
+// старые по времени сдачи (CountApprovals).
 func (e *Engine) resetReview(ctx context.Context, tx pgx.Tx, run domain.StageRun) error {
 	_, err := tx.Exec(ctx, `
 		DELETE FROM gate_results gr
 		USING gates g
 		WHERE gr.gate_id = g.id
 		  AND gr.stage_run_id = $1
-		  AND g.type = $2`, run.ID, domain.GateAgentReview)
+		  AND g.type = ANY($2)`, run.ID, []string{domain.GateAgentReview, domain.GateHumanApproval})
 	return translateExec(err)
 }
 

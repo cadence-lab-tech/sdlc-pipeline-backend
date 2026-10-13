@@ -378,3 +378,64 @@ func refID(t *testing.T, store *postgres.Store, taskKey string) uuid.UUID {
 	}
 	return refs[0].ID
 }
+
+// Апрув человека устаревает от новой сдачи артефактов (решение 0042,
+// CLAB-103): апрув, поставленный до того, как аналитик сдал результат,
+// переход не открывает; после повторного апрува — открывает.
+func TestHumanApprovalExpiresOnSubmission(t *testing.T) {
+	ctx := context.Background()
+	store, engine, _, _, system := setupPhase4(t, AuthHeader)
+	human, err := store.ResolveActor(ctx, store.DB(), "lead", domain.PrincipalUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := engine.Execute(ctx, "SDLC-1", "start", system.ID, "")
+	if err != nil || res.Blocked {
+		t.Fatalf("старт: %v %+v", err, res.Gates)
+	}
+	task := res.Task
+
+	// Апрув до сдачи — и сдача после него.
+	if _, err := engine.DecideGate(ctx, task.Key, "analysis_done", "human_approval",
+		human.ID, domain.GateResultPassed, nil); err != nil {
+		t.Fatal(err)
+	}
+	if g := gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval"); g.Status != domain.GateResultPassed {
+		t.Fatalf("апрув до сдачи должен быть виден, пока сдачи нет: %+v", g)
+	}
+	for _, kind := range []string{"analysis.brief", "analysis.acceptance_criteria"} {
+		if _, err := engine.SubmitArtifact(ctx, task.Key, system.ID, SubmitArtifactInput{
+			Kind: kind, Title: kind, Format: "markdown", Content: []byte("# " + kind),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g := gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval")
+	if g.Status != domain.GateResultPending || !strings.Contains(g.Reason, "устарели") {
+		t.Fatalf("апрув до сдачи обязан устареть: %+v", g)
+	}
+	if stale, _ := g.Details["stale_approvals"].(int); stale != 1 {
+		t.Fatalf("в деталях нет устаревшего апрува: %+v", g.Details)
+	}
+
+	// Повторный апрув после сдачи открывает гейт.
+	if _, err := engine.DecideGate(ctx, task.Key, "analysis_done", "human_approval",
+		human.ID, domain.GateResultPassed, nil); err != nil {
+		t.Fatal(err)
+	}
+	g = gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval")
+	if g.Status != domain.GateResultPassed {
+		t.Fatalf("апрув после сдачи: %+v", g)
+	}
+
+	// Пересдача после апрува снимает его снова.
+	if _, err := engine.SubmitArtifact(ctx, task.Key, system.ID, SubmitArtifactInput{
+		Kind: "analysis.brief", Title: "v2", Format: "markdown", Content: []byte("# v2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if g := gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval"); g.Status != domain.GateResultPending {
+		t.Fatalf("пересдача после апрува: %+v", g)
+	}
+}
