@@ -217,3 +217,35 @@ func TestClaimable(t *testing.T) {
 		})
 	}
 }
+
+// Сдача сверяется со схемой контракта сразу (CLAB-102): невалидный вердикт не
+// становится версией артефакта, а агент получает validation_failed с путём
+// ошибки; без схемы в контракте сдача ничего не проверяет.
+func TestCheckArtifactSchemaOnSubmit(t *testing.T) {
+	schema := json.RawMessage(verdictSchema)
+
+	if err := checkArtifactSchema("review.verdict", schema, []byte(`{"verdict":"pass","findings":[]}`)); err != nil {
+		t.Fatalf("валидный вердикт отбит: %v", err)
+	}
+	for _, empty := range []json.RawMessage{nil, json.RawMessage(``), json.RawMessage(` null `)} {
+		if err := checkArtifactSchema("analysis.brief", empty, []byte("# не JSON")); err != nil {
+			t.Fatalf("без схемы содержимое не проверяется: %v", err)
+		}
+	}
+
+	err := checkArtifactSchema("review.verdict", schema, []byte(`{"verdict":"maybe"}`))
+	e := apperr.As(err)
+	if e.Code != apperr.CodeValidationFailed {
+		t.Fatalf("вердикт вне enum: %v", err)
+	}
+	details, _ := e.Details.(map[string]any)
+	problems, _ := details["problems"].([]string)
+	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "findings") {
+		t.Fatalf("в деталях нет пути ошибки: %+v", e.Details)
+	}
+
+	err = checkArtifactSchema("review.verdict", schema, []byte("pass"))
+	if apperr.As(err).Code != apperr.CodeValidationFailed {
+		t.Fatalf("не-JSON под схемой: %v", err)
+	}
+}

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"sort"
@@ -51,7 +52,11 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 		if run.FinishedAt != nil {
 			return apperr.Conflict("этап уже завершён, артефакт прикреплять некуда")
 		}
-		if err := e.checkContract(ctx, tx, run, in.Kind); err != nil {
+		schema, err := e.checkContract(ctx, tx, run, in.Kind)
+		if err != nil {
+			return err
+		}
+		if err := checkArtifactSchema(in.Kind, schema, in.Content); err != nil {
 			return err
 		}
 		// Повторная сдача того же kind — это новая версия, а не второй
@@ -152,39 +157,68 @@ func (e *Engine) workRun(ctx context.Context, q postgres.Querier, task domain.Ta
 // Это то место, где контракт роли перестаёт быть просто текстом: гейт
 // artifacts_required проверяет наличие, а здесь проверяется, что роль вообще
 // имеет право сдавать такой kind.
-func (e *Engine) checkContract(ctx context.Context, q postgres.Querier, run domain.StageRun, kind string) error {
+// checkContract проверяет, что kind входит в контракт роли, и отдаёт схему
+// этого вида из контракта, если она объявлена.
+func (e *Engine) checkContract(ctx context.Context, q postgres.Querier, run domain.StageRun, kind string) (json.RawMessage, error) {
 	if run.RoleVersionID == nil {
-		return nil
+		return nil, nil
 	}
 	rv, err := e.store.GetRoleVersion(ctx, q, *run.RoleVersionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var contract []struct {
-		Kind string `json:"kind"`
+		Kind   string          `json:"kind"`
+		Schema json.RawMessage `json:"schema"`
 	}
 	if err := json.Unmarshal(rv.OutputContract, &contract); err != nil || len(contract) == 0 {
 		// Роль без объявленного контракта ничего не ограничивает: описать
 		// контракт — решение проекта, а не требование движка.
-		return nil
+		return nil, nil
 	}
 	allowed := make([]string, 0, len(contract))
 	for _, c := range contract {
 		if c.Kind == kind {
-			return nil
+			return c.Schema, nil
 		}
 		allowed = append(allowed, c.Kind)
 	}
 	// Описание проблемы сдаётся при откате назад и в контракт роли не входит:
 	// это не результат этапа, а объяснение, почему его не будет.
 	if isProblemReport(kind) {
-		return nil
+		return nil, nil
 	}
 
-	return apperr.New(apperr.CodeContractViolation,
+	return nil, apperr.New(apperr.CodeContractViolation,
 		"артефакт %q не входит в контракт роли", kind).
 		WithDetails(map[string]any{"allowed_kinds": allowed})
+}
+
+// checkArtifactSchema сверяет содержимое со схемой из контракта роли в момент
+// сдачи. Гейт schema_validation проверяет то же на переходе, но агент узнал бы
+// об ошибке только тогда и успел бы сдать несколько невалидных версий
+// (CLAB-102): контракт — проверка, и срабатывать она должна сразу.
+func checkArtifactSchema(kind string, schema json.RawMessage, content []byte) error {
+	if len(bytes.TrimSpace(schema)) == 0 || string(bytes.TrimSpace(schema)) == "null" {
+		return nil
+	}
+	var doc any
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return apperr.New(apperr.CodeValidationFailed,
+			"артефакт %q не разбирается как JSON, а контракт роли задаёт ему схему", kind).
+			WithDetails(map[string]any{"kind": kind, "parse_error": err.Error()})
+	}
+	problems, err := validateAgainstSchema(schema, doc)
+	if err != nil {
+		return err
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return apperr.New(apperr.CodeValidationFailed,
+		"артефакт %q не соответствует схеме из контракта роли", kind).
+		WithDetails(map[string]any{"kind": kind, "problems": problems})
 }
 
 type UpdateScopeInput struct {

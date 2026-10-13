@@ -26,6 +26,7 @@ const (
 	CodeLeaseHeldByOther        Code = "lease_held_by_other"
 	CodeLeaseExpired            Code = "lease_expired"
 	CodeContractViolation       Code = "contract_violation"
+	CodeValidationFailed        Code = "validation_failed"
 	CodeDriftUnresolved         Code = "drift_unresolved"
 	CodeUnknownRepository       Code = "unknown_repository"
 	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"

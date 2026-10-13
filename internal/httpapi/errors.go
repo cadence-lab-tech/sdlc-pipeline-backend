@@ -29,7 +29,7 @@ func statusFor(code apperr.Code) int {
 		return http.StatusBadRequest
 	case apperr.CodeUnknownRepository:
 		return http.StatusNotFound
-	case apperr.CodeContractViolation:
+	case apperr.CodeContractViolation, apperr.CodeValidationFailed:
 		return http.StatusBadRequest
 	case apperr.CodeUnauthenticated:
 		return http.StatusUnauthorized
