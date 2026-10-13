@@ -87,3 +87,57 @@ func TestExportWorkflowKeepsAnyStatusTransition(t *testing.T) {
 		t.Fatalf("from должен быть пустым, а не %q", out.Transitions[0].From)
 	}
 }
+
+// Повторный импорт того же цикла — unchanged (CLAB-108): сравнение
+// нормализовано по пробелам конфига, порядку типов задач и умолчанию
+// blocking; содержательное отличие — новый черновик.
+func TestSameWorkflow(t *testing.T) {
+	tr := func() bool { return true }
+	base := BundleWorkflow{
+		Name: "Starter", TaskTypes: []string{"task", "bug"},
+		Statuses: []BundleStatus{
+			{Key: "new", Name: "New", Category: "todo", IsInitial: true},
+			{Key: "analysis", Name: "Analysis", Category: "in_progress", Role: "analyst", Reviewers: []string{"reviewer"}},
+		},
+		Transitions: []BundleTransition{
+			{Key: "start", Name: "Start", From: "new", To: "analysis", Kind: "advance"},
+			{Key: "done", Name: "Done", From: "analysis", To: "new", Kind: "advance", Gates: []BundleGate{
+				{Key: "ok", Name: "OK", Type: "human_approval", Config: json.RawMessage(`{"min_approvals": 1}`)},
+			}},
+		},
+	}
+	clone := func(mutate func(w *BundleWorkflow)) BundleWorkflow {
+		raw, _ := json.Marshal(base)
+		var w BundleWorkflow
+		_ = json.Unmarshal(raw, &w)
+		mutate(&w)
+		return w
+	}
+	_ = tr
+
+	same := []BundleWorkflow{
+		clone(func(*BundleWorkflow) {}),
+		clone(func(w *BundleWorkflow) { w.TaskTypes = []string{"bug", "task"} }),
+		clone(func(w *BundleWorkflow) { w.Transitions[1].Gates[0].Config = json.RawMessage(`{ "min_approvals":1 }`) }),
+		clone(func(w *BundleWorkflow) { b := true; w.Transitions[1].Gates[0].Blocking = &b }),
+	}
+	for i, w := range same {
+		if !sameWorkflow(base, w) {
+			t.Errorf("вариант %d обязан совпадать", i)
+		}
+	}
+	different := []BundleWorkflow{
+		clone(func(w *BundleWorkflow) { w.Name = "Starter v2" }),
+		clone(func(w *BundleWorkflow) { w.TaskTypes = []string{"task"} }),
+		clone(func(w *BundleWorkflow) { w.Statuses[1].Role = "developer" }),
+		clone(func(w *BundleWorkflow) { w.Transitions[1].Gates[0].Config = json.RawMessage(`{"min_approvals":2}`) }),
+		clone(func(w *BundleWorkflow) { b := false; w.Transitions[1].Gates[0].Blocking = &b }),
+		clone(func(w *BundleWorkflow) { w.Transitions[1].Gates = nil }),
+		clone(func(w *BundleWorkflow) { w.Statuses = w.Statuses[:1] }),
+	}
+	for i, w := range different {
+		if sameWorkflow(base, w) {
+			t.Errorf("вариант %d обязан отличаться", i)
+		}
+	}
+}

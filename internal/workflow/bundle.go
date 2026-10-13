@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -307,6 +308,63 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 		Detail: fmt.Sprintf("версия %d", rv.Version)}, nil
 }
 
+// sameWorkflow — совпадает ли версия цикла (в виде связки) с тем, что
+// импортируется: статусы с ролями, переходы и гейты в том же порядке.
+// Конфиг гейта сравнивается нормализованно, отсутствующий blocking — это true.
+func sameWorkflow(have, want BundleWorkflow) bool {
+	if have.Name != want.Name || !eqStringSet(have.TaskTypes, want.TaskTypes) {
+		return false
+	}
+	if len(have.Statuses) != len(want.Statuses) || len(have.Transitions) != len(want.Transitions) {
+		return false
+	}
+	for i := range have.Statuses {
+		h, w := have.Statuses[i], want.Statuses[i]
+		if h.Key != w.Key || h.Name != w.Name || h.Description != w.Description ||
+			h.Category != w.Category || h.IsInitial != w.IsInitial || h.IsTerminal != w.IsTerminal ||
+			!eqIntPtr(h.WipLimit, w.WipLimit) || h.Color != w.Color ||
+			h.Role != w.Role || !eqStrings(h.Reviewers, w.Reviewers) {
+			return false
+		}
+	}
+	for i := range have.Transitions {
+		h, w := have.Transitions[i], want.Transitions[i]
+		if h.Key != w.Key || h.Name != w.Name || h.From != w.From || h.To != w.To ||
+			h.Kind != w.Kind || h.Auto != w.Auto || len(h.Gates) != len(w.Gates) {
+			return false
+		}
+		for j := range h.Gates {
+			hg, wg := h.Gates[j], w.Gates[j]
+			if hg.Key != wg.Key || hg.Name != wg.Name || hg.Type != wg.Type ||
+				!eqJSON(hg.Config, wg.Config, `{}`) || gateBlocking(hg) != gateBlocking(wg) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func gateBlocking(g BundleGate) bool { return g.Blocking == nil || *g.Blocking }
+
+func eqIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// eqStringSet — те же элементы без учёта порядка; пусто и nil равны.
+func eqStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := append([]string(nil), a...)
+	sb := append([]string(nil), b...)
+	sort.Strings(sa)
+	sort.Strings(sb)
+	return eqStrings(sa, sb)
+}
+
 // sameVersion — совпадает ли последняя версия роли с тем, что импортируется.
 // JSON сравнивается нормализованно: пробелы и порядок ключей не должны
 // заводить новую версию.
@@ -356,12 +414,38 @@ func (a *Authoring) importDocument(ctx context.Context, tx pgx.Tx, projectID, ac
 
 // importWorkflow заводит черновик новой версии цикла. Активный цикл
 // иммутабелен; активирует черновик человек, увидев результат проверки.
+//
+// Та же связка второй раз черновиков не плодит (CLAB-108): цикл, совпадающий
+// с действующей версией или уже лежащим черновиком, отчитывается unchanged —
+// как роли, у которых повтор инструкции не заводит версию.
 func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, actor uuid.UUID, w BundleWorkflow) (ImportEntry, Validation, error) {
 	if len(w.Statuses) == 0 {
 		return ImportEntry{}, Validation{}, apperr.InvalidInput("в цикле нет статусов")
 	}
 	if w.Name == "" {
 		w.Name = "Импортированный цикл"
+	}
+	existing, err := a.store.ListWorkflows(ctx, tx, projectID)
+	if err != nil {
+		return ImportEntry{}, Validation{}, err
+	}
+	for _, head := range existing {
+		if head.State != domain.WorkflowActive && head.State != domain.WorkflowDraft {
+			continue
+		}
+		if head.Name != w.Name || !eqStringSet(head.TaskTypes, w.TaskTypes) {
+			continue
+		}
+		full, err := a.store.GetWorkflow(ctx, tx, head.ID)
+		if err != nil {
+			return ImportEntry{}, Validation{}, err
+		}
+		if !sameWorkflow(*exportWorkflow(full), w) {
+			continue
+		}
+		entry := ImportEntry{Key: w.Name, Outcome: "unchanged", ID: head.ID.String(),
+			Detail: fmt.Sprintf("совпадает с версией %d (%s)", head.Version, head.State)}
+		return entry, validateWorkflow(full, a.engine.implemented, a.engine.strict), nil
 	}
 	wf, err := a.store.CreateWorkflow(ctx, tx, projectID, w.Name, w.TaskTypes, actor)
 	if err != nil {

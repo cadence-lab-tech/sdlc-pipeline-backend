@@ -158,6 +158,37 @@ func TestImportBundleIsIdempotentAndVersioned(t *testing.T) {
 	if err != nil || head.State != domain.WorkflowDraft {
 		t.Fatalf("импортированный цикл должен быть черновиком: %v %+v", err, head)
 	}
+
+	// Тот же цикл ещё раз — черновик не плодится (CLAB-108): совпадает с уже
+	// лежащим черновиком. Экспорт активного цикла в тот же проект — тоже
+	// unchanged, он совпадает с активной версией.
+	again, err := authoring.Import(ctx, "SDLC", system.ID, Bundle{Version: 1, Workflow: &wf}, false)
+	if err != nil {
+		t.Fatalf("повторный импорт цикла: %v", err)
+	}
+	if len(again.Workflows) != 1 || again.Workflows[0].Outcome != "unchanged" || again.Workflows[0].ID != id.String() {
+		t.Fatalf("повтор цикла: %+v", again.Workflows)
+	}
+	if len(again.Validations) != 1 || !again.Validations[0].Valid {
+		t.Fatalf("у unchanged цикла нет результата проверки: %+v", again.Validations)
+	}
+	roundTrip, err := authoring.Import(ctx, "SDLC", system.ID, Bundle{Version: BundleVersion, Workflows: exported.Workflows}, false)
+	if err != nil {
+		t.Fatalf("импорт экспорта: %v", err)
+	}
+	for _, w := range roundTrip.Workflows {
+		if w.Outcome != "unchanged" {
+			t.Fatalf("экспорт в тот же проект завёл черновик: %+v", roundTrip.Workflows)
+		}
+	}
+	// Изменённый гейт — новый черновик.
+	changed := wf
+	changed.Transitions = append([]BundleTransition(nil), wf.Transitions...)
+	changed.Transitions[0].Gates = append([]BundleGate{{Key: "extra", Name: "Ещё", Type: "human_approval"}}, changed.Transitions[0].Gates...)
+	diff, err := authoring.Import(ctx, "SDLC", system.ID, Bundle{Version: 1, Workflow: &changed}, false)
+	if err != nil || len(diff.Workflows) != 1 || diff.Workflows[0].Outcome != "draft_created" {
+		t.Fatalf("изменённый цикл: %v %+v", err, diff.Workflows)
+	}
 }
 
 func TestTokensAndPermissions(t *testing.T) {
