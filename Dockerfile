@@ -2,7 +2,14 @@
 # migrations/embed.go, поэтому образ поднимает базу сам — отдельный шаг с
 # миграциями в compose не нужен и не может разъехаться с версией сервиса.
 # Go 1.25: этой версии требует MCP SDK (github.com/modelcontextprotocol/go-sdk).
-FROM golang:1.25-alpine AS build
+#
+# Образ версии выходит под linux/amd64 и linux/arm64 (release.yml). Этап
+# сборки закреплён за платформой сборщика ($BUILDPLATFORM), а целевую
+# архитектуру получает кросс-компиляцией через GOOS/GOARCH: без этого
+# arm64-половина сборки на amd64-раннере шла бы через QEMU, которого в CI
+# нет, и падала. Обычный `docker build` (make image, deploy.yml) ничего не
+# замечает: BuildKit подставляет в TARGETOS/TARGETARCH платформу хоста.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 
 WORKDIR /src
 
@@ -14,15 +21,16 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o /out/api ./cmd/api && \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o /out/worker ./cmd/worker && \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o /out/clab ./cmd/clab && \
@@ -34,7 +42,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 RUN mkdir -p /out/license && if [ -f LICENSE ]; then cp LICENSE /out/license/; fi
 
 # distroless без shell: внутрь нечего эксплуатировать, а проба готовности
-# делается самим бинарником (api healthcheck).
+# делается самим бинарником (api healthcheck). В этом этапе только COPY —
+# никаких RUN: он выполняется под целевой платформой, и команда внутри него
+# потребовала бы эмуляции.
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /
