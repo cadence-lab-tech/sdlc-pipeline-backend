@@ -28,7 +28,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Выкладка — только проверенного коммита. Проверки живут в отдельном
+  # ci.yml без секретов (его имя требует защита main), поэтому здесь не
+  # needs, а опрос прогона ci для этого же SHA по API Actions. Не
+  # workflow_run: у него нет paths-ignore (правка docs/ перекатывала бы
+  # сервис), а github.sha в таком прогоне — HEAD main, а не коммит ci.
+  # При откате по tag ждать нечего: образ уже проверен и лежит в реестре.
+  ci:
+    name: ждать ci
+    if: ${{ !inputs.tag }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+    steps:
+      - name: дождаться ci для этого коммита
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Прогон ci создаётся тем же push'ем, но не обязательно раньше
+          # этого job'а — его отсутствие тоже ждём. На main ci не отменяется
+          # следующим push'ем (concurrency в ci.yml), поэтому дождёмся итога.
+          deadline=$((SECONDS + 25 * 60))
+          while :; do
+            if ! run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1" \
+                --jq '.workflow_runs[0] // empty | "\(.status) \(.conclusion // "-") \(.html_url)"'); then
+              echo "::warning::API Actions не ответил, повтор"
+              run=""
+            fi
+            if [ -z "$run" ]; then
+              echo "ci для $GITHUB_SHA ещё не создан, ждём"
+            else
+              read -r status conclusion url <<<"$run"
+              if [ "$status" = completed ]; then
+                case "$conclusion" in
+                  success) echo "ci для $GITHUB_SHA зелёный: $url"; exit 0 ;;
+                  *) echo "::error::ci для $GITHUB_SHA завершился как $conclusion: $url"; exit 1 ;;
+                esac
+              fi
+              echo "ci для $GITHUB_SHA: $status ($url)"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::ci для $GITHUB_SHA не завершился за 25 минут (последнее состояние: ${run:-прогона нет})"
+              echo "  после зелёного ci: Re-run failed jobs у этого прогона"
+              exit 1
+            fi
+            sleep 15
+          done
+
   build:
+    # Образ непроверенного коммита в реестр не попадает: сборка ждёт ci.
+    needs: [ci]
     # При откате собирать нечего: образ с этим тегом уже в реестре.
     if: ${{ !inputs.tag }}
     runs-on: ubuntu-latest
@@ -68,13 +118,13 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: [build]
+    needs: [ci, build]
     # Пока машина не настроена (нет переменной SDLC_DOMAIN — она ставится
     # вместе с секретами ssh), выкладки нет: образ собирается и лежит в GHCR,
     # прогон остаётся зелёным. Секреты в условии job'а недоступны, переменные
     # — да, поэтому гейт именно на ней.
     # Откат идёт мимо сборки, поэтому always() плюс явная проверка провала.
-    if: ${{ always() && vars.SDLC_DOMAIN != '' && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
+    if: ${{ always() && vars.SDLC_DOMAIN != '' && needs.ci.result != 'failure' && needs.ci.result != 'cancelled' && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-latest
     environment: production
     permissions:
