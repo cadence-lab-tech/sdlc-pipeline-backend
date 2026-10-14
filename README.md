@@ -265,6 +265,12 @@ gh release download --repo cadence-lab-tech/homebrew-tap \
 `self-hosted` идемпотентен. Проверка скрипта без сети —
 `bash .github/release/notify-self-hosted.test.sh`.
 
+В `self-hosted` событие открывает PR «Release vX.Y.Z»; его слияние ставит
+тег и публикует GitHub Release `vX.Y.Z` с пакетом поставки —
+`cadence-self-hosted-vX.Y.Z.tar.gz`, `checksums.txt` и `get-cadence.sh`.
+Из него клиенты ставят инстанс одной строкой и обновляются `./upgrade.sh`
+без git, поэтому выпуск закончен, когда у этого релиза есть все три ассета.
+
 Что нужно завести:
 
 - секрет `SELF_HOSTED_DISPATCH_TOKEN` в backend и frontend (или секрет
