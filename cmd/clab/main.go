@@ -82,8 +82,15 @@ func commands() []command {
 		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
 		{"version", "версия clab и сервера", "clab version", cmdVersion},
+
+		{"server", "self-hosted installation on this machine: upgrade, backup, restore, status", "clab server upgrade|backup|restore|status [--dir DIR] — clab server --help", cmdServer},
 	}
 }
+
+// localCommand — команда работает с этой машиной, а не с API: клиент не
+// строится, и вход не нужен (clab server управляет установкой, на которой
+// API может ещё не быть или уже не работать).
+func localCommand(name string) bool { return name == "server" }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -104,9 +111,12 @@ func main() {
 		if cmd.name != name {
 			continue
 		}
-		c, err := NewClient(g)
-		if err != nil {
-			exit(err)
+		var c *Client
+		if !localCommand(name) {
+			var err error
+			if c, err = NewClient(g); err != nil {
+				exit(err)
+			}
 		}
 		if err := cmd.run(ctx, c, args[1:]); err != nil {
 			exit(err)
