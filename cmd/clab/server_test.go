@@ -528,6 +528,7 @@ MULTI='line one
 line two'
   INDENTED=yes
 JOINED=a'b c'"d"
+DEF=${UNSET:-fallback}/${EMPTY:-x}/${EMPTY-y}/${CADENCE_MODE:-z}
 `, func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatal(err)
@@ -542,13 +543,14 @@ JOINED=a'b c'"d"
 		"MULTI":                    "line one\nline two",
 		"INDENTED":                 "yes",
 		"JOINED":                   "ab cd",
+		"DEF":                      "fallback/x//proxy",
 	}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %q, want %q", k, got[k], v)
 		}
 	}
-	for _, bad := range []string{"A=b c\n", "A='open\n", "A=`id`\n", "A=$(id)\n", "just text\n", `A="open` + "\n"} {
+	for _, bad := range []string{"A=b c\n", "A='open\n", "A=`id`\n", "A=$(id)\n", "A=${B:?x}\n", "just text\n", `A="open` + "\n"} {
 		if _, err := parseDotEnv(bad, nil); err == nil {
 			t.Errorf("%q must be refused", bad)
 		}

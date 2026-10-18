@@ -199,12 +199,37 @@ func (p *envParser) expand(b *strings.Builder) error {
 	if p.peek() == '{' {
 		p.next()
 		name := p.name()
-		if name == "" || p.eof() || p.peek() != '}' {
-			return p.errorf("only ${NAME} expansions are supported in .env")
+		if name == "" || p.eof() {
+			return p.errorf("only ${NAME}, ${NAME:-default} and ${NAME-default} expansions are supported in .env")
 		}
-		p.next()
-		b.WriteString(p.lookup(name))
-		return nil
+		value, set := p.lookupSet(name)
+		switch {
+		case p.peek() == '}':
+			p.next()
+			b.WriteString(value)
+			return nil
+		case p.peek() == '-' || p.peek() == ':':
+			// ${NAME:-default} — default, если пусто или не задано;
+			// ${NAME-default} — только если не задано. Default — буквально.
+			colon := p.next() == ':'
+			if colon && (p.eof() || p.next() != '-') {
+				return p.errorf("only ${NAME}, ${NAME:-default} and ${NAME-default} expansions are supported in .env")
+			}
+			var def strings.Builder
+			for !p.eof() && p.peek() != '}' && p.peek() != '\n' {
+				def.WriteRune(p.next())
+			}
+			if p.eof() || p.peek() != '}' {
+				return p.errorf("unterminated ${%s", name)
+			}
+			p.next()
+			if !set || (colon && value == "") {
+				value = def.String()
+			}
+			b.WriteString(value)
+			return nil
+		}
+		return p.errorf("only ${NAME}, ${NAME:-default} and ${NAME-default} expansions are supported in .env")
 	}
 	if p.peek() == '(' {
 		return p.errorf("command substitution is not supported in .env")
@@ -219,11 +244,20 @@ func (p *envParser) expand(b *strings.Builder) error {
 }
 
 func (p *envParser) lookup(name string) string {
+	v, _ := p.lookupSet(name)
+	return v
+}
+
+// lookupSet — значение и задано ли оно; окружение процесса отличает
+// «пусто» от «не задано» только по непустому значению.
+func (p *envParser) lookupSet(name string) (string, bool) {
 	if v, ok := p.vars[name]; ok {
-		return v
+		return v, true
 	}
 	if p.getenv != nil {
-		return p.getenv(name)
+		if v := p.getenv(name); v != "" {
+			return v, true
+		}
 	}
-	return ""
+	return "", false
 }
