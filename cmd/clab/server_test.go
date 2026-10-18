@@ -372,6 +372,26 @@ func TestServerWindows(t *testing.T) {
 	}
 }
 
+// stdin из /dev/null (cron, systemd) — символьное устройство, но не
+// терминал: restore без --yes должен отказать, а не спрашивать.
+func TestServerEnvDevNullIsNotTerminal(t *testing.T) {
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer null.Close()
+	stdin := os.Stdin
+	os.Stdin = null
+	defer func() { os.Stdin = stdin }()
+	e, err := newServerEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.terminal {
+		t.Error("stdin from /dev/null is taken for a terminal")
+	}
+}
+
 func TestServerUnknownCommandAndOption(t *testing.T) {
 	e, _, errw := testEnv(t, t.TempDir(), newFakeRunner(), nil)
 	if code := runServer(context.Background(), e, []string{"install"}); code != 2 {

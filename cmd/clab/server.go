@@ -57,7 +57,10 @@ func newServerEnv() (*serverEnv, error) {
 	}
 	terminal := false
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		terminal = true
+		// /dev/null — тоже символьное устройство, но не терминал: его дают
+		// stdin'ом cron и systemd. Как [ -t 0 ] у restore.sh.
+		null, err := os.Stat(os.DevNull)
+		terminal = err != nil || !os.SameFile(fi, null)
 	}
 	return &serverEnv{
 		out:      os.Stdout,
