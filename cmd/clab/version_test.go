@@ -9,30 +9,87 @@ import (
 	"testing"
 )
 
-// Критерий 10: когда предупреждать. CLI новее сервера на одну минорную —
-// нормальный случай; dev и SHA не сравниваются.
+// Когда предупреждать (CLAB-87, критерий 10; CLAB-148, критерий 1): сервер
+// новее CLI на любой выпуск — предупреждение; CLI новее сервера на одну
+// минорную — нормальный случай; dev и SHA не сравниваются.
 func TestVersionSkew(t *testing.T) {
 	cases := []struct {
 		cli, server string
-		warn        bool
+		want        skew
 	}{
-		{"v0.3.4", "v0.5.0", true},
-		{"v0.4.9", "v0.5.0", false},
-		{"v0.6.0", "v0.5.2", false},
-		{"v0.7.0", "v0.5.2", true},
-		{"v1.5.0", "v0.5.0", true},
-		{"dev", "v0.5.0", false},
-		{"v0.3.0", "dev", false},
-		{"v0.3.0", "8424c71", false},
+		// Сервер новее: на патч, на минорную, на несколько, на мажорную.
+		{"v0.5.1", "v0.5.2", skewCLIOlder},
+		{"v0.5.3", "v0.6.0", skewCLIOlder},
+		{"v0.3.4", "v0.5.0", skewCLIOlder},
+		{"v0.4.9", "v0.5.0", skewCLIOlder},
+		{"v0.9.9", "v1.0.0", skewCLIOlder},
+		// CLI новее: в пределах одной минорной тихо, дальше — как раньше.
+		{"v0.6.0", "v0.5.2", skewNone},
+		{"v0.5.3", "v0.5.2", skewNone},
+		{"v0.7.0", "v0.5.2", skewCLINewer},
+		{"v1.5.0", "v0.5.0", skewCLINewer},
+		{"v0.5.2", "v0.5.2", skewNone},
+		{"v0.5.0", "v0.5.0", skewNone},
+		{"dev", "v0.5.0", skewNone},
+		{"v0.3.0", "dev", skewNone},
+		{"v0.3.0", "8424c71", skewNone},
+		{"8424c71", "v0.5.0", skewNone},
 		// Суффикс после «-» отбрасывается, без «v» — не выпуск.
-		{"v0.3.0", "v0.5.0-rc.1", true},
-		{"0.3.0", "v0.5.0", false},
-		{"v0.5.0", "v0.5.0", false},
+		{"v0.3.0", "v0.5.0-rc.1", skewCLIOlder},
+		{"0.3.0", "v0.5.0", skewNone},
+		{"v0.5.0", "0.3.0", skewNone},
 	}
 	for _, tc := range cases {
-		if got := versionSkew(tc.cli, tc.server); got != tc.warn {
-			t.Errorf("CLI %s, сервер %s: предупреждение %v, ждали %v", tc.cli, tc.server, got, tc.warn)
+		if got := versionSkew(tc.cli, tc.server); got != tc.want {
+			t.Errorf("CLI %s, сервер %s: %v, ждали %v", tc.cli, tc.server, got, tc.want)
 		}
+	}
+}
+
+// withExecutable подменяет путь к бинарю clab (уже после EvalSymlinks).
+func withExecutable(t *testing.T, path string) {
+	t.Helper()
+	prev := executablePath
+	executablePath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { executablePath = prev })
+}
+
+// Критерий 4: подсказка по способу установки. Бинарь из Cellar — brew
+// upgrade clab и рядом строка с CLAB_VERSION; иначе — install.sh тапа с
+// версией сервера. CLI новее сервера — только install.sh: brew назад не
+// откатит.
+func TestSkewHintByInstall(t *testing.T) {
+	install := "curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.6.1 sh"
+	cases := []struct {
+		name, exe     string
+		brew, install bool
+	}{
+		{"brew на Apple Silicon", "/opt/homebrew/Cellar/clab/0.6.0/bin/clab", true, true},
+		{"brew на Linux", "/home/linuxbrew/.linuxbrew/Cellar/clab/0.6.0/bin/clab", true, true},
+		{"install.sh", "/usr/local/bin/clab", false, true},
+		{"рядом с Cellar, но не формула", "/opt/homebrew/Cellar/clabber/bin/clab", false, true},
+	}
+	for _, tc := range cases {
+		withExecutable(t, tc.exe)
+		got := skewWarning(skewCLIOlder, "v0.6.0", "v0.6.1", "https://cadence.example", installedByBrew())
+		if strings.Contains(got, "brew upgrade clab") != tc.brew {
+			t.Errorf("%s: brew upgrade clab ждали %v: %q", tc.name, tc.brew, got)
+		}
+		if strings.Contains(got, install) != tc.install {
+			t.Errorf("%s: команда с CLAB_VERSION ждали %v: %q", tc.name, tc.install, got)
+		}
+		first := strings.SplitN(got, "\n", 2)[0]
+		for _, w := range []string{"v0.6.0", "v0.6.1", "https://cadence.example", "старше сервера"} {
+			if !strings.Contains(first, w) {
+				t.Errorf("%s: в первой строке нет %q: %q", tc.name, w, first)
+			}
+		}
+	}
+
+	withExecutable(t, "/opt/homebrew/Cellar/clab/0.7.0/bin/clab")
+	newer := skewWarning(skewCLINewer, "v0.7.0", "v0.5.2", "https://cadence.example", false)
+	if strings.Contains(newer, "brew upgrade") || !strings.Contains(newer, "CLAB_VERSION=v0.5.2 sh") || !strings.Contains(newer, "новее сервера") {
+		t.Errorf("CLI новее сервера: %q", newer)
 	}
 }
 
@@ -146,9 +203,10 @@ func TestSkewWarnsOncePerCommand(t *testing.T) {
 		return out, errOut
 	}
 
+	withExecutable(t, "/usr/local/bin/clab")
 	out, errOut := run("v0.3.0")
 	want := "curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.5.0 sh"
-	if strings.Count(errOut, want) != 1 || strings.Count(errOut, "расходится") != 1 {
+	if strings.Count(errOut, want) != 1 || strings.Count(errOut, "старше сервера") != 1 {
 		t.Fatalf("предупреждение должно быть ровно одно, с командой установки: %q", errOut)
 	}
 	if !strings.Contains(errOut, "v0.3.0") {
@@ -174,4 +232,78 @@ func TestNoWarningAgainstSHABuild(t *testing.T) {
 	if err != nil || errOut != "" {
 		t.Fatalf("против сборки по SHA: %v, stderr %q", err, errOut)
 	}
+}
+
+// CLAB-148, критерии 2, 3 и 5: сервер новее CLI на патч. clab version и
+// команда чтения из нескольких запросов предупреждают в stderr ровно один
+// раз — с обеими версиями, адресом и командой обновления; stdout, --json и
+// ошибка те же, что у CLI той же версии, что сервер.
+func TestServerNewerWarns(t *testing.T) {
+	withExecutable(t, "/opt/homebrew/Cellar/clab/0.6.0/bin/clab")
+	run := func(cliVersion string, json bool, cmd func(*Client) error) (string, string, string) {
+		withVersion(t, cliVersion)
+		withJSON(t, json)
+		c, _ := instanceStub(t, "v0.6.1")
+		out, errOut, err := capture(t, func() error { return cmd(c) })
+		if err != nil {
+			t.Fatalf("CLI %s: %v", cliVersion, err)
+		}
+		return out, errOut, c.origin
+	}
+	version := func(c *Client) error { return cmdVersion(context.Background(), c, nil) }
+	// Два запроса к серверу, один JSON в stdout.
+	show := func(c *Client) error {
+		if _, err := c.getRaw(context.Background(), "/tasks/SDLC-1/state"); err != nil {
+			return err
+		}
+		return cmdShow(context.Background(), c, []string{"SDLC-1"})
+	}
+
+	for _, tc := range []struct {
+		name string
+		json bool
+		cmd  func(*Client) error
+	}{
+		{"clab version", false, version},
+		{"clab version --json", true, version},
+		{"clab show --json, два запроса", true, show},
+	} {
+		out, errOut, origin := run("v0.6.0", tc.json, tc.cmd)
+		if strings.Count(errOut, "старше сервера") != 1 || strings.Count(errOut, "brew upgrade clab") != 1 ||
+			strings.Count(errOut, "CLAB_VERSION=v0.6.1 sh") != 1 {
+			t.Fatalf("%s: предупреждение должно быть ровно одно, с brew upgrade и CLAB_VERSION: %q", tc.name, errOut)
+		}
+		first := strings.SplitN(errOut, "\n", 2)[0]
+		if !strings.Contains(first, "v0.6.0") || !strings.Contains(first, "v0.6.1") || !strings.Contains(first, origin) {
+			t.Fatalf("%s: в строке предупреждения нет версий или адреса: %q", tc.name, first)
+		}
+		if strings.Contains(out, "старше сервера") {
+			t.Fatalf("%s: предупреждение попало в stdout: %q", tc.name, out)
+		}
+		if tc.json && !jsonValid(out) {
+			t.Fatalf("%s: stdout не JSON: %q", tc.name, out)
+		}
+
+		if strings.Contains(tc.name, "version") {
+			// clab version печатает обе версии, как без предупреждения.
+			if !strings.Contains(out, "v0.6.0") || !strings.Contains(out, "v0.6.1") {
+				t.Fatalf("%s: в stdout нет обеих версий: %q", tc.name, out)
+			}
+			continue
+		}
+		// Команда чтения: stdout тот же, что у CLI версии сервера, где
+		// предупреждения нет.
+		same, quiet, _ := run("v0.6.1", tc.json, tc.cmd)
+		if quiet != "" {
+			t.Fatalf("%s: версии совпадают, а stderr %q", tc.name, quiet)
+		}
+		if out != same {
+			t.Fatalf("%s: stdout зависит от предупреждения:\n%q\n%q", tc.name, out, same)
+		}
+	}
+}
+
+func jsonValid(s string) bool {
+	var v any
+	return json.Unmarshal([]byte(s), &v) == nil
 }

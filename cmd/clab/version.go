@@ -6,18 +6,20 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Сверка версии CLI с сервером (CLAB-87).
+// Сверка версии CLI с сервером (CLAB-87, CLAB-148).
 //
 // Сервер кладёт версию сборки в заголовок каждого ответа, и CLI сверяет её
 // на первом же ответе: отдельного запроса на каждую команду нет, а «одно
 // предупреждение за команду» держит sync.Once клиента. Предупреждение уходит
 // в stderr — stdout, --json и код выхода остаются прежними, скрипты не
-// ломаются.
+// ломаются. Переменной, которая его глушит, нет: CLI старше сервера надо
+// обновить, а не замолчать.
 
 // headerServerVersion — тот же заголовок, что httpapi.HeaderVersion.
 const headerServerVersion = "X-Clab-Version"
@@ -57,30 +59,89 @@ func parseRelease(v string) (semver, bool) {
 	return semver{n[0], n[1], n[2]}, true
 }
 
-// versionSkew — расходятся ли CLI и сервер настолько, что стоит предупредить:
-// другая мажорная или больше одной минорной в любую сторону. CLI новее
-// сервера на одну минорную — обычный случай: brew ставит последний CLI, а
-// компания обновляет сервер не сразу.
-func versionSkew(cli, server string) bool {
+// less — a старше b.
+func (a semver) less(b semver) bool {
+	if a.major != b.major {
+		return a.major < b.major
+	}
+	if a.minor != b.minor {
+		return a.minor < b.minor
+	}
+	return a.patch < b.patch
+}
+
+// skew — в какую сторону CLI разошёлся с сервером так, что стоит
+// предупредить.
+type skew int
+
+const (
+	skewNone     skew = iota
+	skewCLIOlder      // сервер новее CLI на любой выпуск
+	skewCLINewer      // CLI новее сервера больше чем на одну минорную
+)
+
+// versionSkew — о чём предупреждать (CLAB-148). Сервер новее CLI на любой
+// выпуск, хоть на патч, — CLI пора обновить: после upgrade.sh клиентский clab
+// остаётся старым, и молчать об этом нельзя. CLI новее сервера в пределах
+// одной минорной — обычный случай: brew ставит последний CLI, а компания
+// обновляет сервер не сразу; дальше — предупреждение, как раньше. dev, SHA и
+// прочее не сравниваются.
+func versionSkew(cli, server string) skew {
 	c, ok := parseRelease(cli)
 	if !ok {
-		return false
+		return skewNone
 	}
 	s, ok := parseRelease(server)
 	if !ok {
-		return false
+		return skewNone
 	}
-	if c.major != s.major {
-		return true
+	if c.less(s) {
+		return skewCLIOlder
 	}
-	d := c.minor - s.minor
-	return d > 1 || d < -1
+	if c.major != s.major || c.minor-s.minor > 1 {
+		return skewCLINewer
+	}
+	return skewNone
 }
 
-func skewWarning(cli, server, host string) string {
-	return fmt.Sprintf("clab: версия CLI %s расходится с сервером %s (%s) больше чем на одну минорную.\n"+
-		"Поставить CLI версии сервера:\n  curl -fsSL %s | CLAB_VERSION=%s sh\n",
-		cli, host, server, installScript, server)
+// executablePath — путь к бинарю clab после разрешения симлинков; в тестах
+// подменяется. Brew кладёт в PATH симлинк на .../Cellar/clab/<версия>/bin/clab.
+var executablePath = func() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(p)
+}
+
+// installedByBrew — clab стоит из формулы тапа.
+func installedByBrew() bool {
+	p, err := executablePath()
+	return err == nil && strings.Contains(filepath.ToSlash(p), "/Cellar/clab/")
+}
+
+// installCommand — поставить CLI ровно версии v из тапа.
+func installCommand(v string) string {
+	return fmt.Sprintf("curl -fsSL %s | CLAB_VERSION=%s sh", installScript, v)
+}
+
+// skewWarning — одна строка предупреждения и под ней команды. CLI старше:
+// из brew — brew upgrade clab (brew ставит последний выпуск, CLI новее
+// сервера — допустимо), рядом команда на ровно версию сервера; иначе —
+// install.sh тапа с CLAB_VERSION. CLI новее: brew назад не откатит, поэтому
+// только install.sh с версией сервера.
+func skewWarning(k skew, cli, server, host string, brew bool) string {
+	if k == skewCLIOlder {
+		if brew {
+			return fmt.Sprintf("clab: CLI %s старше сервера %s (%s), обновите CLI:\n"+
+				"  brew upgrade clab\n"+
+				"  # или ровно версию сервера: %s\n", cli, server, host, installCommand(server))
+		}
+		return fmt.Sprintf("clab: CLI %s старше сервера %s (%s), обновите CLI до версии сервера:\n  %s\n",
+			cli, server, host, installCommand(server))
+	}
+	return fmt.Sprintf("clab: CLI %s новее сервера %s (%s) больше чем на одну минорную; поставить CLI версии сервера:\n  %s\n",
+		cli, server, host, installCommand(server))
 }
 
 // checkServerVersion сверяет версию по первому ответу с заголовком.
@@ -90,8 +151,8 @@ func (c *Client) checkServerVersion(resp *http.Response) {
 		return
 	}
 	c.versionOnce.Do(func() {
-		if versionSkew(version, server) {
-			fmt.Fprint(os.Stderr, skewWarning(version, server, c.origin))
+		if k := versionSkew(version, server); k != skewNone {
+			fmt.Fprint(os.Stderr, skewWarning(k, version, server, c.origin, k == skewCLIOlder && installedByBrew()))
 		}
 	})
 }
