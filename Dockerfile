@@ -1,7 +1,8 @@
 # Сборка статического бинарника. Схема и сиды встроены в него через
 # migrations/embed.go, поэтому образ поднимает базу сам — отдельный шаг с
 # миграциями в compose не нужен и не может разъехаться с версией сервиса.
-# Go 1.25: этой версии требует MCP SDK (github.com/modelcontextprotocol/go-sdk).
+# Go 1.26: не ниже 1.25 требует MCP SDK (github.com/modelcontextprotocol/go-sdk),
+# 1.26 — golang.org/x/net и x/crypto с исправлениями безопасности (CLAB-169).
 #
 # Образ версии выходит под linux/amd64 и linux/arm64 (release.yml). Этап
 # сборки закреплён за платформой сборщика ($BUILDPLATFORM), а целевую
@@ -9,7 +10,7 @@
 # arm64-половина сборки на amd64-раннере шла бы через QEMU, которого в CI
 # нет, и падала. Обычный `docker build` (make image, deploy.yml) ничего не
 # замечает: BuildKit подставляет в TARGETOS/TARGETARCH платформу хоста.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
 WORKDIR /src
 

@@ -17,9 +17,10 @@ Go-сервис Cadence Lab (Clab): REST для UI, MCP-сервер для ло
 
 ## Стек
 
-Go 1.25 (этой версии требует MCP SDK), Gin, pgx (без ORM), PostgreSQL 17 +
-pgvector, эмбеддинги размерности 1024: Voyage `voyage-code-3` или любой
-OpenAI-совместимый эндпоинт, провайдер выбирает инстанс
+Go 1.26 (не ниже 1.25 требует MCP SDK, 1.26 — исправления x/net и
+x/crypto), Gin, pgx (без ORM), PostgreSQL 17 + pgvector, эмбеддинги
+размерности 1024: Voyage `voyage-code-3` или любой OpenAI-совместимый
+эндпоинт, провайдер выбирает инстанс
 ([решение 0008](../docs/decisions/0008-voyage-embeddings.md)).
 MCP — официальный `github.com/modelcontextprotocol/go-sdk`, схемы артефактов —
 `github.com/santhosh-tekuri/jsonschema/v6`. Чтение GitHub и вызовы Voyage — на
@@ -519,7 +520,7 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
 
 Файлы задачи правятся в рабочей копии `.worktrees/<ключ>/backend` на хосте,
 а собираются и проверяются в верстаке её стека — контейнере
-`golang:1.25-bookworm` с примонтированной копией
+`golang:1.26-bookworm` с примонтированной копией
 ([решение 0041](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0041-task-toolbox-in-compose.md)).
 Порядок целиком — `../docs/PROCESS.md`, раздел «Верстак задачи»; устройство —
 `dev/README.md`, «Верстаки задачи».

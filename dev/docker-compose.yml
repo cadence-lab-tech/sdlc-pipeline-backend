@@ -254,7 +254,7 @@ services:
   # кэша Go рассчитаны на параллельный доступ. node_modules — том стека: на
   # хосте в копии лежат свои, под macOS, в контейнере нужны линуксовые.
   dev-backend:
-    image: golang:1.25-bookworm
+    image: golang:1.26-bookworm
     container_name: ${DEV_STACK_PREFIX:-sdlc}-dev-backend
     profiles: ["dev-backend"]
     init: true
