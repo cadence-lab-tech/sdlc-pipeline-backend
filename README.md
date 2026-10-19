@@ -252,20 +252,41 @@ gh release download --repo cadence-lab-tech/homebrew-tap \
 только по push в `main`. Архивы CLI и событие `clab-release` в тап — как
 раньше.
 
-Когда в реестре есть оба образа версии, в
+Цепочка поставки ([решение 0046](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0046-supply-chain-signatures-pins.md),
+с v0.9.0): у каждого образа в индексе SBOM (SPDX) и provenance (SLSA v1,
+`mode=max`) обеих платформ; digest индекса подписан cosign без ключей —
+сертификатом на OIDC-токен прогона, identity
+`https://github.com/cadence-lab-tech/<repo>/.github/workflows/release.yml@refs/tags/vX.Y.Z`;
+к образу backend приложен подписанный OpenVEX из
+`.github/release/openvex.json` (известные ложные находки сканеров, правится
+PR). Там же `govulncheck -mode=binary` по `/api`, `/worker`, `/clab`
+опубликованного образа: находка вне VEX — предупреждение в сводке прогона,
+релиз не падает (`.github/release/govulncheck-binaries.sh`, проверка без
+сети — `bash .github/release/govulncheck-binaries.test.sh`). `checksums.txt`
+архивов CLI подписан так же, бандл `checksums.txt.sigstore.json` уходит в
+релиз тапа. Секретов для этого не нужно — только `id-token: write` у
+заданий `image` и `release`. Команды проверки для клиента —
+[«Verifying a release»](https://github.com/cadence-lab-tech/self-hosted/blob/main/docs/admin.md#verifying-a-release)
+в admin.md пакета.
+
+Когда в реестре есть оба образа версии и оба подписаны, в
 [`cadence-lab-tech/self-hosted`](https://github.com/cadence-lab-tech/self-hosted)
-уходит `repository_dispatch`:
+уходит `repository_dispatch`, образы — по тегу и digest индекса:
 
 ```json
 {"event_type": "cadence-release",
  "client_payload": {"version": "vX.Y.Z",
-                    "backend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:vX.Y.Z",
-                    "frontend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:vX.Y.Z"}}
+                    "backend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:vX.Y.Z@sha256:…",
+                    "frontend_image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:vX.Y.Z@sha256:…"}}
 ```
 
-Шлёт его тот выпуск, который опубликовал свой образ вторым: после push шаг
-«оповестить self-hosted» (`.github/release/notify-self-hosted.sh`, такой же
-во frontend) смотрит в реестр, есть ли образ второй половины. Если оба
+Шлёт его тот выпуск, который опубликовал и подписал свой образ вторым:
+после подписи шаг «оповестить self-hosted»
+(`.github/release/notify-self-hosted.sh`, такой же во frontend) смотрит в
+реестр, есть ли образ второй половины, и проверяет его подпись (`cosign
+verify` с identity `release.yml` соседа на теге). Образ есть, а подписи ещё
+нет — событие не уходит, прогон зелёный: сосед подпишет свой образ и
+отправит событие сам. Если оба
 выпуска закончат одновременно, событие может прийти дважды — обработчик в
 `self-hosted` идемпотентен. Проверка скрипта без сети —
 `bash .github/release/notify-self-hosted.test.sh`.
