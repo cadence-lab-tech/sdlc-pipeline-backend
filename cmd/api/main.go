@@ -40,6 +40,10 @@ func main() {
 		}
 		return
 	}
+	// Предпроверка базы перед установкой и апгрейдом (CLAB-127).
+	if len(os.Args) > 1 && os.Args[1] == "dbcheck" {
+		os.Exit(dbcheck(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	if err := run(); err != nil {
 		slog.Error("сервис остановлен с ошибкой", "error", err)

@@ -30,7 +30,11 @@ Options:
   --ignore-version   restore a backup of another version than VERSION
 
 EVERYTHING written after the backup is lost: the database is dropped and
-recreated from the dump.
+recreated from the dump. With an external database (CADENCE_DB=external)
+nothing is dropped but the objects of Cadence Lab in the schema public: they
+go and the dump is loaded in one transaction, by the role of
+SDLC_DATABASE_URL - no superuser, no DROP DATABASE; a failed load leaves the
+database as it was.
 
 The backup must match the version in VERSION: migrations only go forward,
 and a dump of one schema under images of another version is not a state
@@ -153,13 +157,58 @@ func gzipValid(p string) error {
 // архива, старт и ожидание готовности.
 func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 	e := i.e
-	db := i.getDefault("POSTGRES_DB", "sdlc")
-	user := i.getDefault("POSTGRES_USER", "sdlc")
-
+	if i.externalDB() {
+		// До остановки: недоступная база оставляет стек работать.
+		e.info("checking the external database %s", dbTarget(i.get("SDLC_DATABASE_URL")))
+		if err := i.dbClientCheck(ctx); err != nil {
+			return errors.New("the backup client cannot connect to the external database (see above); nothing was changed")
+		}
+	}
 	e.info("stopping api and worker")
 	if err := i.composeRun(ctx, true, "stop", "api", "worker"); err != nil {
 		return fmt.Errorf("docker compose stop api worker failed: %v", err)
 	}
+	if i.externalDB() {
+		if err := i.loadExternal(ctx, dump); err != nil {
+			return err
+		}
+	} else if err := i.loadBundled(ctx, dump); err != nil {
+		return err
+	}
+	return i.restoreBlobsAndStart(ctx, dump, blobs)
+}
+
+// loadExternal — дамп во внешнюю базу одной транзакцией: сначала
+// dbResetSQL, затем сам дамп.
+func (i *installation) loadExternal(ctx context.Context, dump string) error {
+	e := i.e
+	e.info("loading %s into %s (one transaction)", filepath.Base(dump), dbTarget(i.get("SDLC_DATABASE_URL")))
+	f, err := os.Open(dump)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	safe, _ := dbURLParts(i.get("SDLC_DATABASE_URL"))
+	c := i.dbClient("psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-d", safe)
+	c.stdin = io.MultiReader(strings.NewReader(dbResetSQL), filterTransactionTimeout(gz))
+	c.stdout, c.stderr = io.Discard, e.errw
+	if err := e.run.run(ctx, c); err != nil {
+		return fmt.Errorf("loading %s failed (see above); the transaction is rolled back and the database is as it was.\n"+
+			"  Start the stack again: export CADENCE_VERSION=$(cat VERSION) && docker compose up -d", filepath.Base(dump))
+	}
+	return nil
+}
+
+// loadBundled — restore.sh для контейнера postgres: база заново, расширения,
+// дамп.
+func (i *installation) loadBundled(ctx context.Context, dump string) error {
+	e := i.e
+	db := i.getDefault("POSTGRES_DB", "sdlc")
+	user := i.getDefault("POSTGRES_USER", "sdlc")
 	e.info("starting postgres")
 	if err := i.composeRun(ctx, true, "up", "-d", "postgres"); err != nil {
 		return fmt.Errorf("docker compose up -d postgres failed: %v", err)
@@ -187,6 +236,14 @@ func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 	if err := e.run.run(ctx, c); err != nil {
 		return fmt.Errorf("recreating database %s failed: %v", db, err)
 	}
+	// Дампы без расширений (dumpOptions): они создаются до загрузки. Дамп
+	// прежних версий их несёт и пересоздаёт сам.
+	c = i.compose("exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-q", "-U", user, "-d", db,
+		"-c", "CREATE EXTENSION IF NOT EXISTS vector", "-c", "CREATE EXTENSION IF NOT EXISTS pgcrypto")
+	c.stdout, c.stderr = io.Discard, e.errw
+	if err := e.run.run(ctx, c); err != nil {
+		return fmt.Errorf("creating the extensions in %s failed: %v", db, err)
+	}
 
 	e.info("loading %s", filepath.Base(dump))
 	f, err := os.Open(dump)
@@ -203,7 +260,12 @@ func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 	if err := e.run.run(ctx, c); err != nil {
 		return fmt.Errorf("loading %s failed: %v", filepath.Base(dump), err)
 	}
+	return nil
+}
 
+// restoreBlobsAndStart — том blobs из архива, старт и ожидание готовности.
+func (i *installation) restoreBlobsAndStart(ctx context.Context, dump, blobs string) error {
+	e := i.e
 	if blobs != "" {
 		api := i.containerOf(ctx, "api")
 		if api == "" {

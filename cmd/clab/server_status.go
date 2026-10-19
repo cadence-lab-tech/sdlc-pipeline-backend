@@ -9,7 +9,9 @@ import (
 
 const statusHelp = `clab server status — the installation directory, how it was installed, its
 name on this machine, the version of the stack (VERSION) and of this clab,
-whether they go together, the mode and address, and the services.
+whether they go together, the mode and address, the database (bundled, or
+external host:port/database with its sslmode - never the password), and the
+services.
 
 Usage: clab server status [--dir DIR] [--json]
 
@@ -59,6 +61,7 @@ func serverStatus(ctx context.Context, e *serverEnv, args []string) error {
 	if inst.hasEnv {
 		view["mode"] = inst.getDefault("CADENCE_MODE", "tls")
 		view["url"] = inst.publicURL()
+		view["database"] = inst.dbLabel()
 	}
 	// Имя установки (CLAB-164): status только читает, поэтому расхождение с
 	// окружением — предупреждение, а не отказ; сервисы — по имени из .env.
@@ -121,16 +124,16 @@ func serverStatus(ctx context.Context, e *serverEnv, args []string) error {
 	case !inst.hasEnv:
 		pairs = append(pairs, ".env:", "missing - not installed yet: ./install.sh")
 	case nameErr != nil:
-		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(),
+		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(), "Database:", inst.dbLabel(),
 			"Services:", "unknown - the name in .env is invalid, see below")
 	case dockerErr != nil:
-		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(),
+		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(), "Database:", inst.dbLabel(),
 			"Services:", "unknown - "+dockerErr.Error())
 	case services == "":
-		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(),
+		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(), "Database:", inst.dbLabel(),
 			"Services:", "none - the stack is not started")
 	default:
-		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL())
+		pairs = append(pairs, "Mode:", inst.getDefault("CADENCE_MODE", "tls"), "Address:", inst.publicURL(), "Database:", inst.dbLabel())
 	}
 	e.kv(pairs...)
 	if inst.hasEnv && dockerErr == nil && services != "" {

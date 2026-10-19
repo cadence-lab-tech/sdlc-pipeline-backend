@@ -34,6 +34,11 @@ list: keep settings in .env and compose changes in compose.override.yml.
 .env, compose.override.yml, backups/, secrets/ and other files of the
 directory are never touched.
 
+With an external database (CADENCE_DB=external) the postgres container is
+not needed: before the backup the images of the new version check the
+database (/api dbcheck), and a database they cannot use stops the upgrade
+while nothing has changed.
+
 Skipping versions is fine: migrations of every version in between are built
 into the new image. Going down is refused - migrations only go forward; to
 return to an older version restore its backup (clab server restore).
@@ -212,7 +217,21 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	}
 
 	// --- 3. бэкап ---------------------------------------------------------------
-	if !i.running(ctx, "postgres") {
+	if i.externalDB() {
+		// Внешнюю базу проверяют образы новой версии с файлами compose её
+		// пакета до бэкапа: база, с которой новая версия не работает,
+		// останавливает апгрейд, пока ничего не изменилось.
+		e.info("checking the external database %s with the images of %s", dbTarget(i.get("SDLC_DATABASE_URL")), target)
+		if !isFile(filepath.Join(newDir, externalDBFile)) {
+			return fmt.Errorf("the package of %s has no %s: it cannot run on an external database. Nothing has changed.", target, externalDBFile)
+		}
+		c := i.compose("--project-directory", i.dir, "-f", filepath.Join(newDir, "docker-compose.yml"),
+			"-f", filepath.Join(newDir, externalDBFile), "run", "--rm", "--no-deps", "-T", "api", "dbcheck")
+		c.env = append(c.env, "CADENCE_VERSION="+target)
+		if err := i.dbCheck(ctx, c); err != nil {
+			return fmt.Errorf("the external database is not ready for %s (see above). Nothing has changed.", target)
+		}
+	} else if !i.running(ctx, "postgres") {
 		return errors.New("the stack is not running; start it before upgrading so that a backup can be taken:\n" +
 			"  export CADENCE_VERSION=$(cat VERSION) && docker compose up -d")
 	}

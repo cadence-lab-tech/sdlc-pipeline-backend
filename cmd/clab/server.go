@@ -474,7 +474,7 @@ func (i *installation) checkMode() error {
 	if !strings.Contains(cf, "compose."+mode+".yml") {
 		return fmt.Errorf("COMPOSE_FILE in .env ('%s') does not include compose.%s.yml for CADENCE_MODE=%s", cf, mode, mode)
 	}
-	return nil
+	return i.checkDBMode()
 }
 
 // publicURL — lib.sh public_url.
