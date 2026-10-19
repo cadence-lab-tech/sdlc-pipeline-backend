@@ -367,8 +367,9 @@ func (i *installation) getDefault(key, def string) string {
 
 // composeEnv — окружение дочерних docker и docker compose: окружение
 // процесса, поверх него .env (как set -a; . ./.env), поверх — CADENCE_VERSION
-// из VERSION. COMPOSE_PROJECT_NAME из окружения поэтому доходит до compose,
-// как и у скриптов.
+// из VERSION и COMPOSE_PROJECT_NAME — действующее имя установки (CLAB-164).
+// Имя ставится всегда, и cadence по умолчанию тоже: иначе переменная
+// окружения увела бы compose к другой установке на той же машине.
 func (i *installation) composeEnv() []string {
 	merged := map[string]string{}
 	var order []string
@@ -392,6 +393,8 @@ func (i *installation) composeEnv() []string {
 		set(k, i.env[k])
 	}
 	set("CADENCE_VERSION", i.version)
+	name, _, _ := i.name()
+	set("COMPOSE_PROJECT_NAME", name)
 	out := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, k+"="+merged[k])
@@ -476,14 +479,19 @@ func (i *installation) kind() string {
 	}
 }
 
-// open — проверки, общие для backup, restore и upgrade: Docker, .env и
-// правило версий.
+// open — проверки, общие для backup, restore и upgrade: правило версий,
+// .env и имя установки, затем Docker. Имя — до Docker, как load_env у
+// скриптов: COMPOSE_PROJECT_NAME другой установки останавливает команду,
+// прежде чем она что-то спросит у Docker.
 func (i *installation) open(ctx context.Context) error {
 	if err := i.compatible(); err != nil {
 		return err
 	}
-	if err := requireDocker(ctx, i.e); err != nil {
+	if err := i.requireEnv(); err != nil {
 		return err
 	}
-	return i.requireEnv()
+	if err := i.checkName(); err != nil {
+		return err
+	}
+	return requireDocker(ctx, i.e)
 }

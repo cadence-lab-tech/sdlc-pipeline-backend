@@ -30,7 +30,8 @@ import (
 type fakeRunner struct {
 	mu    sync.Mutex
 	calls []string
-	stdin map[string]string // вызов → то, что пришло на stdin
+	stdin map[string]string   // вызов → то, что пришло на stdin
+	envs  map[string][]string // вызов → его окружение (последний такой)
 
 	postgresRunning bool
 	apiContainer    string
@@ -42,7 +43,8 @@ type fakeRunner struct {
 }
 
 func newFakeRunner() *fakeRunner {
-	return &fakeRunner{postgresRunning: true, apiContainer: "api123", healthy: true, dumpBytes: 4096, stdin: map[string]string{}}
+	return &fakeRunner{postgresRunning: true, apiContainer: "api123", healthy: true, dumpBytes: 4096,
+		stdin: map[string]string{}, envs: map[string][]string{}}
 }
 
 var errExit1 = errors.New("exit status 1")
@@ -51,6 +53,7 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 	line := c.String()
 	f.mu.Lock()
 	f.calls = append(f.calls, line)
+	f.envs[line] = c.env
 	f.mu.Unlock()
 	if c.stdin != nil {
 		body, _ := io.ReadAll(c.stdin)
@@ -577,18 +580,21 @@ DEF=${UNSET:-fallback}/${EMPTY:-x}/${EMPTY-y}/${CADENCE_MODE:-z}
 	}
 }
 
-// .env перекрывает окружение, VERSION — .env; COMPOSE_PROJECT_NAME из
-// окружения доходит до compose.
+// .env перекрывает окружение, VERSION — .env; имя установки — из .env, а
+// COMPOSE_PROJECT_NAME окружения до compose не доходит (CLAB-164).
 func TestComposeEnv(t *testing.T) {
 	dir := installed(t, "v0.6.1", nil)
-	mustWrite(t, filepath.Join(dir, ".env"), "CADENCE_MODE=proxy\nCADENCE_VERSION=v0.1.0\nKEEP_DAYS=3\n", 0o600)
-	e, _, _ := testEnv(t, dir, newFakeRunner(), map[string]string{"COMPOSE_PROJECT_NAME": "check-clab-125", "KEEP_DAYS": "9", "CADENCE_MODE": "tls"})
+	mustWrite(t, filepath.Join(dir, ".env"), "COMPOSE_PROJECT_NAME=check-clab-164\nCADENCE_MODE=proxy\nCADENCE_VERSION=v0.1.0\nKEEP_DAYS=3\n", 0o600)
+	e, _, _ := testEnv(t, dir, newFakeRunner(), map[string]string{"COMPOSE_PROJECT_NAME": "cadence", "KEEP_DAYS": "9", "CADENCE_MODE": "tls"})
 	inst, err := openInstallation(e, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := strings.Join(inst.composeEnv(), "\n")
-	for _, want := range []string{"COMPOSE_PROJECT_NAME=check-clab-125", "CADENCE_VERSION=v0.6.1", "CADENCE_MODE=proxy", "KEEP_DAYS=3"} {
+	if strings.Count(env, "COMPOSE_PROJECT_NAME=") != 1 {
+		t.Errorf("COMPOSE_PROJECT_NAME must be set once:\n%s", env)
+	}
+	for _, want := range []string{"COMPOSE_PROJECT_NAME=check-clab-164", "CADENCE_VERSION=v0.6.1", "CADENCE_MODE=proxy", "KEEP_DAYS=3"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("compose env lacks %s:\n%s", want, env)
 		}
