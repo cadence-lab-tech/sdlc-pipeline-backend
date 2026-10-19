@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -188,6 +189,12 @@ type Config struct {
 	// ссылаются базовые линии задач, вычистка не распространяется.
 	IndexRetainRuns int
 
+	// Адрес слушателя /metrics в формате Prometheus (CLAB-126), общий для
+	// api и воркера. Пусто — метрики выключены и порт не открывается.
+	// Отдельный порт, а не путь основного: основной смотрит в интернет через
+	// Caddy, а метрики отдаются без токена.
+	MetricsAddr string
+
 	LogLevel string
 	LogJSON  bool
 	Env      string
@@ -274,6 +281,7 @@ func Load() (Config, error) {
 		IndexPollInterval:        15 * time.Second,
 		IndexRetainRuns:          5,
 		LogLevel:                 env("SDLC_LOG_LEVEL", "info"),
+		MetricsAddr:              env("SDLC_METRICS_ADDR", ""),
 		Env:                      env("SDLC_ENV", "development"),
 	}
 
@@ -459,6 +467,10 @@ func Load() (Config, error) {
 		return c, err
 	}
 
+	if err := checkListenAddr("SDLC_METRICS_ADDR", c.MetricsAddr); err != nil {
+		return c, err
+	}
+
 	if c.LogJSON, err = envBool("SDLC_LOG_JSON", c.Env != "development"); err != nil {
 		return c, err
 	}
@@ -580,6 +592,24 @@ func checkIndexBlobLimit(indexMax, blobMax int, external bool) error {
 	if !external && indexMax > blobstore.InlineMaxBytes {
 		return fmt.Errorf("SDLC_INDEX_MAX_FILE_BYTES (%d) больше потолка %d (4 МиБ) без внешнего хранилища: "+
 			"уменьшите предел или задайте SDLC_BLOB_DIR или SDLC_BLOB_S3_BUCKET", indexMax, blobstore.InlineMaxBytes)
+	}
+	return nil
+}
+
+// checkListenAddr проверяет адрес слушателя вида host:port или :port.
+// Ошибка здесь останавливает старт: опечатка в адресе метрик иначе
+// превратилась бы в процесс, который молча работает без них.
+func checkListenAddr(key, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s: %q не адрес слушателя, нужно :9090 или host:9090", key, addr)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%s: порт %q вне 1-65535", key, port)
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/httpapi"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/mcp"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
@@ -64,6 +65,21 @@ func run() error {
 	}
 	defer pool.Close()
 	log.Info("база подключена", "max_conns", cfg.MaxConns)
+
+	// Метрики эксплуатации — на своём порту (SDLC_METRICS_ADDR), не на
+	// основном: основной смотрит в интернет, а /metrics отдаётся без токена.
+	// Состояния базы api не отдаёт — реплик может быть несколько, его
+	// считает воркер.
+	var apiMetrics *metrics.API
+	var metricsSrv *metrics.Server
+	if cfg.MetricsAddr != "" {
+		reg := metrics.New("api", version)
+		reg.Pool(pool)
+		apiMetrics = metrics.NewAPI(reg)
+		if metricsSrv, err = metrics.Start(cfg.MetricsAddr, reg, log); err != nil {
+			return err
+		}
+	}
 
 	if cfg.AutoMigrate {
 		if err := postgres.Migrate(ctx, pool, log); err != nil {
@@ -153,9 +169,11 @@ func run() error {
 		log.Info("MCP-сервер поднят", "path", "/mcp/projects/{PROJECT}")
 	}
 
+	handler := httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).
+		WithVersion(version).WithMetrics(apiMetrics).Handler()
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).WithVersion(version).Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,
@@ -183,6 +201,11 @@ func run() error {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	// Метрики гасятся последними: до конца остановки Prometheus видит, что
+	// процесс ещё жив и доигрывает запросы.
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
 	log.Info("остановлено штатно")

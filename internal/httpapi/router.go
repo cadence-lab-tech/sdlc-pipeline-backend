@@ -17,6 +17,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/mcp"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
@@ -34,6 +35,8 @@ type Server struct {
 	mcp *mcp.Server
 	// Версия сборки (-X main.version в cmd/api); пусто — dev.
 	version string
+	// Метрики эксплуатации (CLAB-126); nil — выключены, методы nil-безопасны.
+	ops *metrics.API
 }
 
 func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
@@ -49,7 +52,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	r := gin.New()
-	r.Use(requestID(), requestLog(s.log), recovery(s.log))
+	r.Use(requestID(), requestLog(s.log), requestMetrics(s.ops), recovery(s.log))
 	r.Use(serverVersion(s.buildVersion()))
 
 	// Пробы вне группы с резолвом актора: kubelet не присылает заголовков и не

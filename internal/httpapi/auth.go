@@ -12,6 +12,7 @@ import (
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -542,27 +543,47 @@ func parsePeriod(raw string) (time.Duration, error) {
 // прогоны в очередь.
 func (s *Server) githubWebhook(c *gin.Context) {
 	if s.cfg.GitHubWebhookSecret == "" {
+		s.ops.WebhookDelivery("github", metrics.WebhookDisabled)
 		fail(c, s.log, apperr.New(apperr.CodeConflict, "вебхуки выключены: не задан SDLC_GITHUB_WEBHOOK_SECRET"))
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 4<<20))
 	if err != nil {
+		s.ops.WebhookDelivery("github", metrics.WebhookError)
 		badRequest(c, s.log, err)
 		return
 	}
 	if !workflow.VerifyGitHubSignature(s.cfg.GitHubWebhookSecret, body, c.GetHeader("X-Hub-Signature-256")) {
+		s.ops.WebhookDelivery("github", metrics.WebhookBadSignature)
 		fail(c, s.log, apperr.Unauthenticated("подпись вебхука не сошлась"))
 		return
 	}
 	out, err := s.engine.HandleGitHubEvent(c.Request.Context(),
 		c.GetHeader("X-GitHub-Event"), c.GetHeader("X-GitHub-Delivery"), body)
 	if err != nil {
+		s.ops.WebhookDelivery("github", metrics.WebhookError)
 		fail(c, s.log, err)
 		return
 	}
+	s.ops.WebhookDelivery("github", webhookOutcome(out))
 	s.log.Info("вебхук GitHub обработан", "event", out.Event, "repository", out.Repository,
 		"queued", out.Queued, "touched", out.Touched, "duplicate", out.Duplicate, "ignored", out.Ignored)
 	c.JSON(http.StatusOK, out)
+}
+
+// webhookOutcome сводит ответ обработчика к исходу для метрики. queued —
+// событие принято и применено: push поставил прогоны в очередь, событие PR
+// пометило привязанные PR к пересинхронизации, установка обновилась, ping
+// дошёл. Проигнорированное обработчиком — ignored.
+func webhookOutcome(out workflow.WebhookOutcome) string {
+	switch {
+	case out.Duplicate:
+		return metrics.WebhookDuplicate
+	case out.Ignored != "":
+		return metrics.WebhookIgnored
+	default:
+		return metrics.WebhookQueued
+	}
 }
 
 // ── вход CLI через браузер ──────────────────────────────────────────────────
