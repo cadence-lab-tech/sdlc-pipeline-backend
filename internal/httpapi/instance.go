@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 )
 
 // HeaderVersion — версия сборки сервера в каждом ответе. По ней CLI сверяет
@@ -14,6 +16,14 @@ const HeaderVersion = "X-Clab-Version"
 // WithVersion задаёт версию сборки: её подставляет cmd/api из -X main.version.
 func (s *Server) WithVersion(v string) *Server {
 	s.version = v
+	return s
+}
+
+// WithMetrics подключает метрики запросов и вебхуков. Сами метрики отдаёт
+// отдельный слушатель (metrics.Start), а не этот роутер: основной порт
+// смотрит в интернет.
+func (s *Server) WithMetrics(m *metrics.API) *Server {
+	s.ops = m
 	return s
 }
 

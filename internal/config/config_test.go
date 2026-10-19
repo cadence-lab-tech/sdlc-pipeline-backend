@@ -830,3 +830,35 @@ func TestEmbeddingsVoyageFallbackVars(t *testing.T) {
 		t.Fatalf("voyage без ключа: %v", err)
 	}
 }
+
+// Метрики выключены по умолчанию (CLAB-126): порт без токена открывается
+// только по явной настройке.
+func TestMetricsAddrDefaultsOff(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MetricsAddr != "" {
+		t.Fatalf("метрики включены по умолчанию: %q", c.MetricsAddr)
+	}
+}
+
+// AC-5: опечатка в адресе метрик останавливает старт, а не оставляет
+// процесс молча без метрик.
+func TestMetricsAddrValidated(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+	for _, ok := range []string{":9090", "0.0.0.0:9090", "127.0.0.1:9100", "[::]:9090"} {
+		t.Setenv("SDLC_METRICS_ADDR", ok)
+		c, err := Load()
+		if err != nil || c.MetricsAddr != ok {
+			t.Fatalf("%q: %v (%q)", ok, err, c.MetricsAddr)
+		}
+	}
+	for _, bad := range []string{"9090", ":metrics", ":0", ":70000", "localhost"} {
+		t.Setenv("SDLC_METRICS_ADDR", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SDLC_METRICS_ADDR") {
+			t.Fatalf("%q принят: %v", bad, err)
+		}
+	}
+}
