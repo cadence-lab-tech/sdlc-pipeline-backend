@@ -41,11 +41,16 @@ type fakeRunner struct {
 	gitAvailable    bool
 	gitTags         map[string]bool
 	takenBy         string // каталог установки, чьи контейнеры носят проверяемое имя (install)
+
+	// Внешняя база (CLAB-127).
+	composeVersion string // docker compose version --short
+	dbcheckFails   bool   // /api dbcheck отвечает «не готова»
+	dbClientFails  bool   // клиент бэкапа (db-client) не подключается
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{postgresRunning: true, apiContainer: "api123", healthy: true, dumpBytes: 4096,
-		stdin: map[string]string{}, envs: map[string][]string{}}
+		composeVersion: "2.29.1", stdin: map[string]string{}, envs: map[string][]string{}}
 }
 
 var errExit1 = errors.New("exit status 1")
@@ -91,8 +96,36 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 	default:
 		return fmt.Errorf("unexpected command %s", line)
 	}
+	dump := func() {
+		// Несжимаемое содержимое: проверка размера смотрит на сжатый дамп.
+		var b strings.Builder
+		for n := 0; b.Len() < f.dumpBytes; n++ {
+			b.WriteString(sha(fmt.Sprint(n)))
+		}
+		write("-- PostgreSQL database dump\n" + b.String())
+	}
 	switch {
 	case args == "compose version", args == "info":
+		return nil
+	case args == "compose version --short":
+		write(f.composeVersion + "\n")
+		return nil
+	case strings.Contains(args, "run --rm --no-deps -T api dbcheck"):
+		if f.dbcheckFails {
+			write("✗ vector: ...\n")
+			return errExit1
+		}
+		write("✓ the database is ready\n")
+		return nil
+	case strings.HasPrefix(args, "compose run --rm --no-deps -T -e PGPASSWORD db-client"):
+		if f.dbClientFails {
+			return errExit1
+		}
+		if strings.Contains(args, " pg_dump ") {
+			dump()
+		}
+		return nil
+	case args == "compose down -v --remove-orphans":
 		return nil
 	case args == "compose ps -q --status running postgres":
 		if f.postgresRunning {
@@ -127,12 +160,7 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		}
 		return errExit1
 	case strings.HasPrefix(args, "compose exec -T postgres pg_dump"):
-		// Несжимаемое содержимое: проверка размера смотрит на сжатый дамп.
-		var b strings.Builder
-		for n := 0; b.Len() < f.dumpBytes; n++ {
-			b.WriteString(sha(fmt.Sprint(n)))
-		}
-		write("-- PostgreSQL database dump\n" + b.String())
+		dump()
 		return nil
 	case args == "compose pull --quiet":
 		if f.pullFails {

@@ -30,7 +30,8 @@ MCP — официальный `github.com/modelcontextprotocol/go-sdk`, схе�
 ## Структура
 
 ```
-cmd/api/            HTTP-сервер: REST и MCP на одних сервисах
+cmd/api/            HTTP-сервер: REST и MCP на одних сервисах; подкоманды образа
+                    healthcheck и dbcheck — предпроверка базы self-hosted
 cmd/worker/         аренды, индексация, детектор дрейфа, состояние PR
 cmd/clab/           CLI: вход через браузер, конфиг по хостам, проект из git remote;
                     server*.go — clab server, управление установкой self-hosted

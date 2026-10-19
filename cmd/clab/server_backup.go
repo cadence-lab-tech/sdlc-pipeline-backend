@@ -23,7 +23,13 @@ Options:
 
 Files: backups/cadence-<version>-<YYYYmmdd-HHMMSS>.sql.gz (mode 600) and, next
 to it, the same name with .blobs.tar.gz. The version in the name is what
-restore checks. A dump smaller than 1 KB is a failure.
+restore checks. A dump smaller than 1 KB is a failure. The dump is the same in
+both database modes: plain SQL without owners, privileges and extensions, so a
+backup of the bundled database restores into an external one and back.
+
+With an external database (CADENCE_DB=external) pg_dump runs in the backup
+client db-client of compose.external-db.yml against SDLC_DATABASE_URL; the
+postgres container is not needed.
 
 Environment (from the environment or .env):
   BACKUP_DIR  where to write, default backups/ of the installation
@@ -74,18 +80,29 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	if !i.running(ctx, "postgres") {
+	if err := i.checkDBMode(); err != nil {
+		return "", err
+	}
+	if !i.externalDB() && !i.running(ctx, "postgres") {
 		return "", errors.New("the postgres container is not running: nothing to back up")
 	}
 
 	stem := filepath.Join(dir, "cadence-"+i.version+"-"+i.e.now().Format("20060102-150405"))
 	dump := stem + ".sql.gz"
 
-	// pg_dump идёт ВНУТРИ контейнера базы: у машины нет клиента Postgres, а
-	// клиент другой версии ломает дамп.
-	i.e.info("dumping the database to %s", dump)
+	// pg_dump идёт ВНУТРИ контейнера: у машины нет клиента Postgres, а
+	// клиент другой версии ломает дамп. Встроенная база — её же контейнер,
+	// внешняя — клиент бэкапа с pg_dump старшей поддерживаемой версии.
+	if i.externalDB() {
+		i.e.info("dumping the external database %s to %s", dbTarget(i.get("SDLC_DATABASE_URL")), dump)
+	} else {
+		i.e.info("dumping the database to %s", dump)
+	}
 	if err := i.dumpTo(ctx, dump); err != nil {
 		os.Remove(dump)
+		if i.externalDB() {
+			return "", fmt.Errorf("pg_dump of the external database failed (see above): %v", err)
+		}
 		return "", fmt.Errorf("pg_dump failed: %v", err)
 	}
 	fi, err := os.Stat(dump)
@@ -93,6 +110,7 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if fi.Size() < minDumpBytes {
+		os.Remove(dump)
 		return "", fmt.Errorf("the dump is suspiciously small (%d bytes): %s", fi.Size(), dump)
 	}
 
@@ -122,16 +140,22 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 	return dump, nil
 }
 
-// dumpTo — pg_dump в контейнере postgres, сжатый в файл с правами 600.
+// dumpTo — pg_dump в контейнере postgres или в клиенте бэкапа внешней базы,
+// сжатый в файл с правами 600.
 func (i *installation) dumpTo(ctx context.Context, dump string) error {
 	f, err := os.OpenFile(dump, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	gz := gzip.NewWriter(f)
-	c := i.compose("exec", "-T", "postgres", "pg_dump",
-		"-U", i.getDefault("POSTGRES_USER", "sdlc"), "-d", i.getDefault("POSTGRES_DB", "sdlc"),
-		"--clean", "--if-exists", "--no-owner")
+	var c cmdSpec
+	if i.externalDB() {
+		safe, _ := dbURLParts(i.get("SDLC_DATABASE_URL"))
+		c = i.dbClient(append([]string{"pg_dump", "-d", safe}, dumpOptions...)...)
+	} else {
+		c = i.compose(append([]string{"exec", "-T", "postgres", "pg_dump",
+			"-U", i.getDefault("POSTGRES_USER", "sdlc"), "-d", i.getDefault("POSTGRES_DB", "sdlc")}, dumpOptions...)...)
+	}
 	c.stdout, c.stderr = gz, i.e.errw
 	runErr := i.e.run.run(ctx, c)
 	gzErr := gz.Close()

@@ -36,7 +36,8 @@ administrator token. git, curl, tar and openssl are not needed.
 Usage: clab server install [--version vX.Y.Z] [--dir DIR] [--name NAME]
                            [--mode tls|proxy] [--domain HOST] [--email ADDR]
                            [--http-addr [IP:]PORT] [--team KEY]
-                           [--team-name NAME] [--yes]
+                           [--team-name NAME] [--external-db URL]
+                           [--external-db-ca FILE] [--yes]
 
   clab server install --domain cadence.example.com --email ops@example.com
   clab server install --mode proxy --http-addr 127.0.0.1:8080 --yes
@@ -62,13 +63,23 @@ Options:
   --team KEY         the key of the first team (default none: create teams
                      later with clab team create)
   --team-name NAME   the display name of the first team (default its key)
+  --external-db URL  keep the data in your own PostgreSQL 15-18 instead of the
+                     postgres container: postgres://USER:PASSWORD@HOST:PORT/
+                     DATABASE?sslmode=verify-full (docs/admin.md, "External
+                     PostgreSQL"); the database is checked before .env is
+                     written
+  --external-db-ca FILE
+                     the CA of the database server: copied to secrets/db-ca.pem
+                     and named in the URL (sslrootcert), sslmode=verify-full
+                     unless the URL sets another
   -y, --yes, --non-interactive
                      ask nothing: every answer comes from flags or the
                      environment (also without a terminal)
 
 The answers may come from the environment as with install.sh: CADENCE_MODE,
 SDLC_DOMAIN, ACME_EMAIL, CADENCE_HTTP_ADDR, SDLC_BOOTSTRAP_TEAM,
-SDLC_BOOTSTRAP_TEAM_NAME. SDLC_ADMIN_TOKEN supplies the administrator token
+SDLC_BOOTSTRAP_TEAM_NAME, CADENCE_EXTERNAL_DB, CADENCE_EXTERNAL_DB_CA.
+SDLC_ADMIN_TOKEN supplies the administrator token
 (at least 16 characters); otherwise one is generated and shown once.
 
 It runs once: a directory with .env is refused, and nothing is changed there
@@ -85,6 +96,7 @@ type installOptions struct {
 	version, dir, name            string
 	mode, domain, email, httpAddr string
 	team, teamName                string
+	externalDB, externalDBCA      string
 	yes                           bool
 }
 
@@ -96,6 +108,7 @@ func serverInstall(ctx context.Context, e *serverEnv, args []string) error {
 			"--version": &o.version, "--dir": &o.dir, "--name": &o.name,
 			"--mode": &o.mode, "--domain": &o.domain, "--email": &o.email, "--http-addr": &o.httpAddr,
 			"--team": &o.team, "--team-name": &o.teamName,
+			"--external-db": &o.externalDB, "--external-db-ca": &o.externalDBCA,
 		})
 	if err != nil {
 		return err
@@ -182,6 +195,11 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 			return fmt.Errorf("the value of %s must not contain a single quote or a line break", p.key)
 		}
 	}
+	if a.external {
+		if err := requireComposeForExternalDB(ctx, e); err != nil {
+			return err
+		}
+	}
 
 	// --- 5. файлы: распаковка, .env, override, каталоги ---------------------------
 	if !inPlace {
@@ -192,6 +210,11 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 			return err
 		}
 		e.info("unpacked Cadence Lab %s into %s", version, dir)
+	}
+	if a.external {
+		if err := externalPrecheck(ctx, e, dir, version, name, a); err != nil {
+			return err
+		}
 	}
 	e.info("writing .env")
 	if err := writeInstallFiles(dir, pairs); err != nil {
@@ -238,7 +261,11 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	if a.tokenGenerated {
 		token = a.token
 	}
-	e.kv("  Installation:", fmt.Sprintf("%s (%s)", dir, name), "  Address:", inst.publicURL(), "  Administrator token:", token)
+	rows := []string{"  Installation:", fmt.Sprintf("%s (%s)", dir, name), "  Address:", inst.publicURL()}
+	if inst.externalDB() {
+		rows = append(rows, "  Database:", "external "+dbTarget(inst.get("SDLC_DATABASE_URL")))
+	}
+	e.kv(append(rows, "  Administrator token:", token)...)
 	if a.tokenGenerated {
 		e.say("                        (shown once; it is also in .env - keep both private)")
 	}
@@ -412,6 +439,8 @@ type installAnswersT struct {
 	mode, domain, email, httpAddr string
 	team, teamName                string
 	composeFile                   string
+	external                      bool
+	dbURL, dbCA                   string // dbCA — абсолютный путь к файлу CA
 	token                         string
 	tokenGenerated                bool
 	postgresPassword, webhook     string
@@ -482,6 +511,10 @@ func installAnswers(e *serverEnv, o installOptions) (*installAnswersT, error) {
 		}
 	}
 
+	if err := a.externalDB(e, pick(o.externalDB, "CADENCE_EXTERNAL_DB"), pick(o.externalDBCA, "CADENCE_EXTERNAL_DB_CA")); err != nil {
+		return nil, err
+	}
+
 	if a.token = e.getenv("SDLC_ADMIN_TOKEN"); a.token != "" {
 		if len(a.token) < 16 {
 			return nil, errors.New("SDLC_ADMIN_TOKEN must be at least 16 characters")
@@ -492,8 +525,10 @@ func installAnswers(e *serverEnv, o installOptions) (*installAnswersT, error) {
 		}
 		a.token, a.tokenGenerated = "sdlc_"+a.token, true
 	}
-	if a.postgresPassword, err = randomHex(24); err != nil {
-		return nil, err
+	if !a.external {
+		if a.postgresPassword, err = randomHex(24); err != nil {
+			return nil, err
+		}
 	}
 	if a.webhook, err = randomHex(24); err != nil {
 		return nil, err
@@ -513,6 +548,11 @@ func (a *installAnswersT) pairs(name string) []envPair {
 		p = append(p, envPair{"SDLC_DOMAIN", a.domain}, envPair{"ACME_EMAIL", a.email})
 	} else {
 		p = append(p, envPair{"SDLC_DOMAIN", ""}, envPair{"ACME_EMAIL", ""}, envPair{"CADENCE_HTTP_ADDR", a.httpAddr})
+	}
+	if a.external {
+		p = append(p, envPair{"CADENCE_DB", "external"}, envPair{"SDLC_DATABASE_URL", a.dbURL})
+	} else {
+		p = append(p, envPair{"CADENCE_DB", "bundled"})
 	}
 	return append(p,
 		envPair{"POSTGRES_PASSWORD", a.postgresPassword},
@@ -762,5 +802,108 @@ func writeInstallFiles(dir string, pairs []envPair) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// ── внешняя база ────────────────────────────────────────────────────────────
+
+// externalDB — --external-db и --external-db-ca, как их разбирает install.sh:
+// адрес postgres://, CA — PEM-файл, который ляжет в secrets/db-ca.pem и
+// попадёт в адрес как sslrootcert с sslmode=verify-full, если адрес не
+// задаёт свой. Ничего не пишет: файлы — после распаковки, перед .env.
+func (a *installAnswersT) externalDB(e *serverEnv, rawURL, ca string) error {
+	if ca != "" && rawURL == "" {
+		return errors.New("--external-db-ca needs --external-db URL")
+	}
+	if rawURL == "" {
+		return nil
+	}
+	if !strings.HasPrefix(rawURL, "postgres://") && !strings.HasPrefix(rawURL, "postgresql://") {
+		return errors.New("--external-db must be a URL: postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full (the key=value form is not supported)")
+	}
+	if strings.ContainsAny(rawURL, "'\n") {
+		return errors.New("--external-db must not contain a single quote or a line break: percent-encode it (%27)")
+	}
+	if ca != "" {
+		if !filepath.IsAbs(ca) {
+			ca = filepath.Join(e.cwd, ca)
+		}
+		body, err := os.ReadFile(ca)
+		if err != nil {
+			return fmt.Errorf("--external-db-ca: no readable file %s", ca)
+		}
+		if !strings.Contains(string(body), "BEGIN CERTIFICATE") {
+			return fmt.Errorf("--external-db-ca: %s is not a PEM certificate", ca)
+		}
+		if strings.Contains(rawURL, "?sslrootcert=") || strings.Contains(rawURL, "&sslrootcert=") {
+			return errors.New("the CA is given twice: --external-db-ca and sslrootcert in --external-db; keep one")
+		}
+		rawURL = urlWithParam(rawURL, "sslrootcert", "/secrets/"+externalDBCAFile)
+		if !strings.Contains(rawURL, "?sslmode=") && !strings.Contains(rawURL, "&sslmode=") {
+			rawURL = urlWithParam(rawURL, "sslmode", "verify-full")
+		}
+	}
+	a.external, a.dbURL, a.dbCA = true, rawURL, ca
+	a.composeFile = "docker-compose.yml:compose." + a.mode + ".yml:" + externalDBFile + ":compose.override.yml"
+	return nil
+}
+
+// urlWithParam — url_with_param install.sh: KEY=VALUE в конец запроса.
+func urlWithParam(raw, key, value string) string {
+	if strings.Contains(raw, "?") {
+		return raw + "&" + key + "=" + value
+	}
+	return raw + "?" + key + "=" + value
+}
+
+// externalPrecheck — external_precheck install.sh: CA в secrets/, затем база
+// глазами сервиса (/api dbcheck --install образа версии) и клиента бэкапа
+// (psql db-client). .env ещё нет, поэтому настройки — окружением; сеть и
+// тома, которые compose заводит под запуск, после него убираются.
+func externalPrecheck(ctx context.Context, e *serverEnv, dir, version, name string, a *installAnswersT) error {
+	secrets := filepath.Join(dir, "secrets")
+	if err := os.MkdirAll(secrets, 0o711); err != nil {
+		return err
+	}
+	if err := os.Chmod(secrets, 0o711); err != nil {
+		return err
+	}
+	if a.dbCA != "" {
+		body, err := os.ReadFile(a.dbCA)
+		if err != nil {
+			return err
+		}
+		// Сервис работает от uid 65532: CA должен читаться им.
+		target := filepath.Join(secrets, externalDBCAFile)
+		if err := os.WriteFile(target, body, 0o644); err != nil {
+			return err
+		}
+		if err := os.Chmod(target, 0o644); err != nil {
+			return err
+		}
+	}
+	probe := &installation{e: e, dir: dir, version: version, hasEnv: true, env: map[string]string{
+		"COMPOSE_PROJECT_NAME": name,
+		"COMPOSE_FILE":         "docker-compose.yml:" + externalDBFile,
+		"CADENCE_DB":           "external",
+		"SDLC_DATABASE_URL":    a.dbURL,
+		"POSTGRES_PASSWORD":    "",
+	}}
+	// Запуск завёл сеть и тома api под именем этой установки, свободным
+	// мгновение назад: отказ не должен оставить их и сделать имя занятым.
+	defer func() { _, _ = output(ctx, e.run, probe.compose("down", "-v", "--remove-orphans")) }()
+
+	e.info("checking the external database %s", dbTarget(a.dbURL))
+	notReady := fmt.Errorf("the external database is not ready (see above). .env was not written:\n"+
+		"  fix the database or the URL and run clab server install --dir %s again with the same flags (docs/admin.md, \"External PostgreSQL\")", shellQuote(dir))
+	if err := probe.dbCheck(ctx, probe.compose("run", "--rm", "--no-deps", "-T", "api", "dbcheck", "--install")); err != nil {
+		return notReady
+	}
+	e.info("checking the backup client (pg_dump and psql of db-client) with the same URL")
+	if err := probe.dbClientCheck(ctx); err != nil {
+		e.warn("the backup client (libpq) cannot connect with SDLC_DATABASE_URL, though the service can: see its error above")
+		return notReady
+	}
+	e.ok("the backup client connects")
 	return nil
 }
