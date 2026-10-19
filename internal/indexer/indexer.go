@@ -89,6 +89,11 @@ type Options struct {
 	MaxAttempts     int
 	RetryBackoff    time.Duration
 	StuckAfter      time.Duration
+	// OnRunDone зовётся на каждый исполненный прогон: failed — прогон
+	// провалился (и ушёл на повтор или в failed), took — от захвата до
+	// записи результата. Нужен метрикам воркера: провалившийся прогон
+	// RunNext не возвращает, и снаружи его не отличить от пустой очереди.
+	OnRunDone func(failed bool, took time.Duration)
 }
 
 const (
@@ -276,12 +281,14 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 			err.Error(), ix.opts.RetryBackoff, attempts); failErr != nil {
 			return nil, failErr
 		}
+		ix.runDone(true, time.Since(started))
 		return nil, nil
 	}
 
 	if err := ix.store.FinishIndexRun(ctx, ix.store.DB(), run.ID, counters); err != nil {
 		return nil, err
 	}
+	ix.runDone(false, time.Since(started))
 	done, err := ix.store.GetIndexRun(ctx, ix.store.DB(), run.ID)
 	if err != nil {
 		return nil, err
@@ -299,6 +306,12 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 		"cache_lookups", cache.lookups, "cache_hits", cache.hits,
 		"took", time.Since(started).Round(time.Millisecond))
 	return &done, nil
+}
+
+func (ix *Indexer) runDone(failed bool, took time.Duration) {
+	if ix.opts.OnRunDone != nil {
+		ix.opts.OnRunDone(failed, took)
+	}
 }
 
 func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, cacheCounters, error) {

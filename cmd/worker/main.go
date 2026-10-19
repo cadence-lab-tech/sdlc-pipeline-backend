@@ -24,6 +24,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/indexer"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
@@ -59,6 +60,25 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// Метрики эксплуатации (CLAB-126): у воркера это первый и единственный
+	// слушатель, и только при заданном SDLC_METRICS_ADDR. Без него m == nil,
+	// и учёт в заданиях ничего не делает.
+	var m *metrics.Worker
+	if cfg.MetricsAddr != "" {
+		reg := metrics.New("worker", version)
+		reg.Pool(pool)
+		m = metrics.NewWorker(reg, workerJobs...)
+		srv, err := metrics.Start(cfg.MetricsAddr, reg, log)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+		}()
+	}
 
 	store := postgres.New(pool)
 	// То же хранилище, что у api: документы и артефакты, вынесенные сервисом,
@@ -112,6 +132,7 @@ func run() error {
 			EmbedBatch:      cfg.EmbeddingBatch,
 			CacheTouchAfter: cfg.EmbeddingCacheTouchAfter,
 			StuckAfter:      cfg.IndexStuckAfter,
+			OnRunDone:       m.IndexRunFinished,
 		})
 
 	log.Info("воркер запущен", "version", version,
@@ -153,9 +174,10 @@ func run() error {
 		embedGC = embedGCTicker.C
 	}
 
-	sweepLeases(ctx, engine, log, system.ID)
+	sweepLeases(ctx, engine, log, system.ID, m)
+	refreshState(ctx, store, log, m)
 	if cfg.IndexEnabled {
-		indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns)
+		indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns, m)
 	}
 
 	for {
@@ -164,44 +186,58 @@ func run() error {
 			log.Info("получен сигнал, останавливаемся")
 			return nil
 		case <-leaseTicker.C:
-			sweepLeases(ctx, engine, log, system.ID)
+			sweepLeases(ctx, engine, log, system.ID, m)
+			refreshState(ctx, store, log, m)
 		case <-indexTicker.C:
 			if cfg.IndexEnabled {
-				indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns)
+				indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns, m)
 			}
 		case <-queueTicker.C:
 			if cfg.IndexEnabled {
-				drainQueue(ctx, ix, engine, log, system.ID)
+				drainQueue(ctx, ix, engine, log, system.ID, m)
 			}
 		case <-blobGC:
-			collectBlobs(ctx, store, log, cfg)
+			collectBlobs(ctx, store, log, cfg, m)
 		case <-embedGC:
-			evictEmbeddings(ctx, store, log, cfg)
+			evictEmbeddings(ctx, store, log, cfg, m)
 		}
 	}
 }
 
 // drainQueue исполняет то, что уже стоит в очереди, не опрашивая провайдера:
 // это путь вебхука к индексу и детектору дрейфа между полными проходами.
-func drainQueue(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) {
-	if runIndexRuns(ctx, ix, engine, log, system) > 0 {
-		if n, err := ix.SyncRepoRefs(ctx, 50); err != nil {
-			logJobError(ctx, log, "синхронизация PR", err)
-		} else if n > 0 {
-			log.Info("состояние PR обновлено", "count", n)
-		}
+func drainQueue(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, m *metrics.Worker) {
+	if runIndexRuns(ctx, ix, engine, log, system, m) > 0 {
+		syncRepoRefs(ctx, ix, log, m)
+	}
+}
+
+func syncRepoRefs(ctx context.Context, ix *indexer.Indexer, log *slog.Logger, m *metrics.Worker) {
+	var n int
+	err := m.Job(ctx, jobRepoRefSync, func() (err error) {
+		n, err = ix.SyncRepoRefs(ctx, 50)
+		return err
+	})
+	if err != nil {
+		logJobError(ctx, log, "синхронизация PR", err)
+	} else if n > 0 {
+		log.Info("состояние PR обновлено", "count", n)
 	}
 }
 
 // runIndexRuns исполняет прогоны из очереди и сразу за каждым гоняет
 // детектор дрейфа: задача, проехавшая мимо расхождения, узнает о нём на
 // следующем этапе, когда чинить дороже.
-func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) int {
+func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, m *metrics.Worker) int {
 	done := 0
 	// Предел прогонов за проход: репозиториев может быть много, а следующий
 	// тик всё равно наступит — лучше вернуться к арендам, чем зависнуть.
 	for i := 0; i < maxRunsPerPass; i++ {
-		run, err := ix.RunNext(ctx)
+		var run *postgres.IndexRun
+		err := m.Job(ctx, jobIndexRun, func() (err error) {
+			run, err = ix.RunNext(ctx)
+			return err
+		})
 		if err != nil {
 			logJobError(ctx, log, "прогон индексации", err)
 			break
@@ -210,7 +246,11 @@ func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Eng
 			break
 		}
 		done++
-		signals, err := engine.DetectDrift(ctx, *run, system)
+		var signals []postgres.NewDriftSignal
+		err = m.Job(ctx, jobDrift, func() (err error) {
+			signals, err = engine.DetectDrift(ctx, *run, system)
+			return err
+		})
 		if err != nil {
 			logJobError(ctx, log, "детектор дрейфа", err)
 			continue
@@ -230,17 +270,21 @@ func runIndexRuns(ctx context.Context, ix *indexer.Indexer, engine *workflow.Eng
 // освобождение места не срочно, а сразу после выкладки лучше дать инстансу
 // подняться. Ошибка прохода воркер не роняет — база могла быть недоступна
 // секунду, а следующий тик всё равно наступит.
-func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config) {
-	stats, err := store.CollectBlobs(ctx, postgres.BlobGCOptions{
-		Limit:  cfg.BlobGCLimit,
-		MinAge: cfg.BlobGCMinAge,
-		DryRun: cfg.BlobGCDryRun,
-	}, func(sha string, err error) {
-		// Строка уже удалена, а объект остался: это утечка места, но не
-		// потеря данных — ссылок на него нет. В логе sha, чтобы было по чему
-		// разбирать хранилище руками.
-		log.Warn("объект остался в хранилище после удаления строки блоба",
-			"sha256", sha, "error", err)
+func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config, m *metrics.Worker) {
+	var stats postgres.BlobGCStats
+	err := m.Job(ctx, jobBlobGC, func() (err error) {
+		stats, err = store.CollectBlobs(ctx, postgres.BlobGCOptions{
+			Limit:  cfg.BlobGCLimit,
+			MinAge: cfg.BlobGCMinAge,
+			DryRun: cfg.BlobGCDryRun,
+		}, func(sha string, err error) {
+			// Строка уже удалена, а объект остался: это утечка места, но не
+			// потеря данных — ссылок на него нет. В логе sha, чтобы было по
+			// чему разбирать хранилище руками.
+			log.Warn("объект остался в хранилище после удаления строки блоба",
+				"sha256", sha, "error", err)
+		})
+		return err
 	})
 	if err != nil {
 		logJobError(ctx, log, "сборка мусора в блобах", err)
@@ -263,12 +307,16 @@ func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, 
 // проекта, ни отвязка репозитория его не уменьшают, и без этого прохода он
 // растёт монотонно. Первого прохода на старте нет — тот же довод, что у
 // блобов: место освобождается не срочно. Ошибка прохода воркер не роняет.
-func evictEmbeddings(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config) {
-	stats, err := store.EvictEmbeddingCache(ctx, postgres.EmbeddingCacheGCOptions{
-		TTL:     cfg.EmbeddingCacheTTL,
-		MaxRows: cfg.EmbeddingCacheMaxRows,
-		Limit:   cfg.EmbeddingCacheGCLimit,
-		DryRun:  cfg.EmbeddingCacheGCDryRun,
+func evictEmbeddings(ctx context.Context, store *postgres.Store, log *slog.Logger, cfg config.Config, m *metrics.Worker) {
+	var stats postgres.EmbeddingCacheGCStats
+	err := m.Job(ctx, jobEmbedCacheGC, func() (err error) {
+		stats, err = store.EvictEmbeddingCache(ctx, postgres.EmbeddingCacheGCOptions{
+			TTL:     cfg.EmbeddingCacheTTL,
+			MaxRows: cfg.EmbeddingCacheMaxRows,
+			Limit:   cfg.EmbeddingCacheGCLimit,
+			DryRun:  cfg.EmbeddingCacheGCDryRun,
+		})
+		return err
 	})
 	if err != nil {
 		logJobError(ctx, log, "вытеснение кэша эмбеддингов", err)
@@ -307,28 +355,35 @@ func embeddingModel(e embed.Embedder) string {
 // прогоны и сразу за каждым гоняем детектор дрейфа (задача, проехавшая мимо
 // расхождения, узнает о нём на следующем этапе, когда чинить дороже), затем
 // состояние PR для гейта external_check и в конце — векторизация артефактов.
-func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, retain int) {
-	if _, err := ix.Enqueue(ctx); err != nil {
+func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, retain int, m *metrics.Worker) {
+	if err := m.Job(ctx, jobIndexEnqueue, func() error {
+		_, err := ix.Enqueue(ctx)
+		return err
+	}); err != nil {
 		logJobError(ctx, log, "постановка прогонов индексации", err)
 	}
 
-	runIndexRuns(ctx, ix, engine, log, system)
+	runIndexRuns(ctx, ix, engine, log, system, m)
 
 	// Индекс на коммит неизменяем и растёт линейно по коммитам; старые
 	// прогоны без ссылающихся базовых линий вычищаются.
-	if n, err := ix.Prune(ctx, retain); err != nil {
+	var pruned int
+	if err := m.Job(ctx, jobIndexPrune, func() (err error) {
+		pruned, err = ix.Prune(ctx, retain)
+		return err
+	}); err != nil {
 		logJobError(ctx, log, "вычистка старых прогонов", err)
-	} else if n > 0 {
-		log.Info("старые прогоны индексации удалены", "count", n, "retain_per_branch", retain)
+	} else if pruned > 0 {
+		log.Info("старые прогоны индексации удалены", "count", pruned, "retain_per_branch", retain)
 	}
 
-	if n, err := ix.SyncRepoRefs(ctx, 50); err != nil {
-		logJobError(ctx, log, "синхронизация PR", err)
-	} else if n > 0 {
-		log.Info("состояние PR обновлено", "count", n)
-	}
+	syncRepoRefs(ctx, ix, log, m)
 
-	if artifacts, documents, err := ix.IndexKnowledge(ctx, 50); err != nil {
+	var artifacts, documents int
+	if err := m.Job(ctx, jobKnowledge, func() (err error) {
+		artifacts, documents, err = ix.IndexKnowledge(ctx, 50)
+		return err
+	}); err != nil {
 		logJobError(ctx, log, "векторизация артефактов", err)
 	} else if artifacts+documents > 0 {
 		log.Info("артефакты и документы разложены на куски",
@@ -338,8 +393,11 @@ func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine
 	// Досчёт и пересчёт на текущую модель идут пачками, пока есть кандидаты,
 	// но не дольше бюджета: после смены модели кусков десятки тысяч, а
 	// детектор пересечений и следующий прогон ждать их не должны.
-	stats, err := ix.RefreshEmbeddings(ctx, embedRefreshBatch, embedRefreshBudget)
-	if err != nil {
+	var stats indexer.RefreshStats
+	if err := m.Job(ctx, jobEmbedRefresh, func() (err error) {
+		stats, err = ix.RefreshEmbeddings(ctx, embedRefreshBatch, embedRefreshBudget)
+		return err
+	}); err != nil {
 		logJobError(ctx, log, "досчёт эмбеддингов", err)
 	}
 	if stats.Embedded > 0 || stats.Cleared > 0 {
@@ -349,10 +407,14 @@ func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine
 
 	// Пересечение задач возникает не от движения main, а от того, что вторая
 	// задача объявила ту же зону: ждать индексации для него незачем.
-	if signals, err := engine.DetectOverlaps(ctx, system); err != nil {
+	var overlaps []postgres.NewDriftSignal
+	if err := m.Job(ctx, jobOverlaps, func() (err error) {
+		overlaps, err = engine.DetectOverlaps(ctx, system)
+		return err
+	}); err != nil {
 		logJobError(ctx, log, "поиск пересечений задач", err)
-	} else if len(signals) > 0 {
-		log.Info("найдены пересечения зон задач", "count", len(signals))
+	} else if len(overlaps) > 0 {
+		log.Info("найдены пересечения зон задач", "count", len(overlaps))
 	}
 }
 
@@ -372,8 +434,12 @@ func logJobError(ctx context.Context, log *slog.Logger, job string, err error) {
 //
 // Ошибка прохода не роняет воркер: база могла быть недоступна секунду, а
 // следующий тик всё равно наступит.
-func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger, system uuid.UUID) {
-	n, err := engine.ExpireLeases(ctx, system, 100)
+func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, m *metrics.Worker) {
+	var n int
+	err := m.Job(ctx, jobLeaseSweep, func() (err error) {
+		n, err = engine.ExpireLeases(ctx, system, 100)
+		return err
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -381,10 +447,59 @@ func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger,
 		log.Error("проход по протухшим арендам не удался", "error", err)
 		return
 	}
+	// Считаем только после удачного прохода: при ошибке транзакция откатилась,
+	// и n не значит ничего.
+	m.LeasesExpired(n)
 	if n > 0 {
 		log.Info("аренды истекли, задачи возвращены в общий доступ", "count", n)
 	}
 }
+
+// refreshState снимает состояние базы для метрик: очередь индексации,
+// аренды, нечитаемые головы веток. Идёт на тике аренд, а не на scrape:
+// сколько бы раз Prometheus ни опрашивал воркер, база получает один запрос
+// за период. Без метрик в базу не ходит вовсе.
+func refreshState(ctx context.Context, store *postgres.Store, log *slog.Logger, m *metrics.Worker) {
+	if m == nil {
+		return
+	}
+	var st postgres.OpsState
+	err := m.Job(ctx, jobOpsState, func() (err error) {
+		st, err = store.OpsState(ctx, store.DB())
+		return err
+	})
+	if err != nil {
+		logJobError(ctx, log, "снимок состояния для метрик", err)
+		return
+	}
+	m.SetState(metrics.State{
+		QueuedRuns: st.QueuedRuns, RunningRuns: st.RunningRuns,
+		OldestQueued: st.OldestQueued,
+		LiveLeases:   st.LiveLeases, ExpiredLeases: st.ExpiredLeases,
+		HeadFailures: st.HeadFailures,
+	}, time.Now())
+}
+
+// Имена заданий цикла — значения метки job в метриках воркера. Меняются
+// только вместе с правилами оповещения в docs/admin.md пакета self-hosted.
+const (
+	jobLeaseSweep   = "lease_sweep"
+	jobIndexEnqueue = "index_enqueue"
+	jobIndexRun     = "index_run"
+	jobDrift        = "drift"
+	jobIndexPrune   = "index_prune"
+	jobRepoRefSync  = "repo_ref_sync"
+	jobKnowledge    = "knowledge"
+	jobEmbedRefresh = "embed_refresh"
+	jobOverlaps     = "overlaps"
+	jobBlobGC       = "blob_gc"
+	jobEmbedCacheGC = "embed_cache_gc"
+	jobOpsState     = "ops_state"
+)
+
+var workerJobs = []string{jobLeaseSweep, jobIndexEnqueue, jobIndexRun, jobDrift,
+	jobIndexPrune, jobRepoRefSync, jobKnowledge, jobEmbedRefresh, jobOverlaps,
+	jobBlobGC, jobEmbedCacheGC, jobOpsState}
 
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo

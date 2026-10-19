@@ -10,6 +10,7 @@ import (
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -50,6 +51,21 @@ func requestLog(log *slog.Logger) gin.HandlerFunc {
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"request_id", c.GetString(ctxRequestID))
+	}
+}
+
+// requestMetrics учитывает запрос по шаблону маршрута (c.FullPath), а не по
+// пути: в пути ключи проектов и задач, им не место в метках. Стоит до
+// recovery, чтобы паника, превращённая в 500, тоже попала в счёт.
+func requestMetrics(m *metrics.API) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if m == nil {
+			c.Next()
+			return
+		}
+		start := time.Now()
+		c.Next()
+		m.Request(c.Request.Method, c.FullPath(), c.Writer.Status(), time.Since(start))
 	}
 }
 

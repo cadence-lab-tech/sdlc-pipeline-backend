@@ -27,9 +27,9 @@ type EmbeddingCacheGCOptions struct {
 	DryRun bool
 }
 
-// EmbeddingCacheGCStats — что дал проход. Отдельного слоя метрик в сервисе
-// нет, поэтому цифры возвращаются вызывающему и уходят полями
-// структурированного лога.
+// EmbeddingCacheGCStats — что дал проход. Цифры возвращаются вызывающему и
+// уходят полями структурированного лога; метрики воркера (CLAB-126) видят
+// только длительность и ошибки прохода.
 type EmbeddingCacheGCStats struct {
 	// RowsBefore и BytesBefore — размер кэша до прохода. Байты считаются с
 	// TOAST и индексами (pg_total_relation_size): оператору важно место на
