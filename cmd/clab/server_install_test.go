@@ -251,6 +251,7 @@ func TestServerInstallVersionRule(t *testing.T) {
 		{"dev", nil, 0, "v0.7.0", ""},
 		{"v0.7.0", []string{"--version", "v0.6.1"}, 0, "v0.6.1", ""},
 		{"v0.7.0", []string{"--version", "v0.5.3"}, 1, "", "v0.5.3 comes from before release packages"},
+		{"v0.7.0", []string{"--version", "v0.5.3"}, 1, "", "git clone --branch v0.5.3 " + cadenceRepoURL + ".git cadence && cd cadence && ./install.sh"},
 		{"v0.6.1", []string{"--version", "v0.7.0"}, 1, "", "clab v0.6.1 is older than v0.7.0"},
 		{"dev", []string{"--version", "v9.9.9"}, 1, "", "there is no release v9.9.9 with a package at file://"},
 		{"v0.7.0", []string{"--version", "0.7"}, 2, "", "'0.7' is not a version"},
