@@ -578,6 +578,10 @@ install`, таблицы для команд чтения и `--json`, рели�
 опубликовал образ вторым, шлёт `cadence-release` с `client_payload.version`
 в `cadence-lab-tech/self-hosted` (`.github/release/notify-self-hosted.sh`,
 одинаковый в обоих репозиториях, секрет `SELF_HOSTED_DISPATCH_TOKEN`).
+С v0.9.0 образ несёт SBOM и provenance BuildKit, digest индекса подписан
+cosign без ключей, к нему приложен VEX (`.github/release/openvex.json`), а
+`checksums.txt` CLI — бандл подписи; событие несёт образы по digest и уходит,
+когда подписаны оба ([решение 0046](https://github.com/cadence-lab-tech/sdlc-pipeline-docs/blob/main/decisions/0046-supply-chain-signatures-pins.md)).
 Порядок выпуска и что делать с половиной — раздел «Выпуск версии» в
 README.
 

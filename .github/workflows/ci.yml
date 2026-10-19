@@ -78,3 +78,6 @@ jobs:
       # Скрипт оповещения self-hosted о релизе (release.yml) проверяется без
       # сети: docker и gh подменены заглушками.
       - run: bash .github/release/notify-self-hosted.test.sh
+      # Разбор govulncheck по бинарям образа (release.yml, CLAB-130) и VEX —
+      # тоже без сети: govulncheck подменён заглушкой.
+      - run: bash .github/release/govulncheck-binaries.test.sh

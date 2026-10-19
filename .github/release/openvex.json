@@ -1,0 +1,40 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/cadence-lab-tech/sdlc-pipeline-backend/blob/main/.github/release/openvex.json",
+  "author": "Cadence Lab <https://github.com/cadence-lab-tech>",
+  "role": "Document Creator",
+  "timestamp": "2026-10-19T00:00:00Z",
+  "version": 1,
+  "tooling": "hand-written; attached to every release image by .github/workflows/release.yml (cosign attest --type openvex)",
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://pkg.go.dev/vuln/GO-2026-5932",
+        "name": "GO-2026-5932",
+        "description": "golang.org/x/crypto/openpgp is unmaintained, unsafe by design, and has known security issues"
+      },
+      "timestamp": "2026-10-19T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/sdlc-pipeline-backend?repository_url=ghcr.io/cadence-lab-tech/sdlc-pipeline-backend",
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/golang.org/x/crypto"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:golang/github.com/cadence-lab-tech/sdlc-pipeline-backend",
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/golang.org/x/crypto"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The advisory covers only the golang.org/x/crypto/openpgp packages. No binary of the image (/api, /worker, /clab) or of the clab CLI imports them: govulncheck in source mode finds no reachable or imported symbol, and none of the openpgp packages is linked into the binaries. Scanners that match by module version (govulncheck -mode=binary, Trivy, Grype) report it because the module golang.org/x/crypto is present for other packages."
+    }
+  ]
+}

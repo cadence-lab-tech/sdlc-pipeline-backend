@@ -7,6 +7,15 @@
 # cadence-lab-tech/homebrew-tap, откуда их качают brew, install.sh и просто
 # curl — без токена и без участия в организации. Здесь у релиза только
 # заметки о том, что изменилось: архивы CLI живут в тапе.
+#
+# Цепочка поставки (CLAB-130, решение 0046): образ подписан cosign без
+# ключей — сертификатом на OIDC-токен этого прогона, identity
+# .../.github/workflows/release.yml@refs/tags/vX.Y.Z, — к нему приложены
+# SBOM (SPDX), provenance (SLSA v1, mode=max) и VEX (openvex.json); подписан
+# digest индекса, а с ним и манифесты аттестаций в индексе. checksums.txt
+# архивов CLI подписан так же, бандл checksums.txt.sigstore.json уходит в
+# релиз тапа рядом с архивами. Команды проверки для клиента — docs/admin.md
+# в self-hosted, «Verifying a release».
 name: release
 
 on:
@@ -70,6 +79,10 @@ jobs:
   release:
     needs: [build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # OIDC-токен прогона — для подписи checksums.txt без ключей.
+      id-token: write
     env:
       # Секреты в условии шага недоступны, поэтому флаг считается здесь.
       # Без токена заметки всё равно выходят — только архивы до тапа не
@@ -87,6 +100,19 @@ jobs:
         run: |
           cd dist
           sha256sum * > checksums.txt
+
+      # Версия cosign закреплена: смена — отдельная правка, как у govulncheck.
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # Подпись сумм, а не каждого архива: архивы проверяются по
+      # checksums.txt, как и раньше (формула, install.sh тапа). Бандл
+      # (сертификат, подпись, запись прозрачности) — отдельный файл рядом:
+      # dist/* уходит в релиз тапа целиком, а в payload события остаётся
+      # только checksums.txt — тапу правка не нужна.
+      - name: подписать checksums.txt
+        run: cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt
 
       # Здесь — только заметки: архивы CLI живут в публичном релизе тапа,
       # и качают их оттуда.
@@ -114,7 +140,17 @@ jobs:
           ```
 
           Суммы — в `checksums.txt`: `shasum -a 256 -c checksums.txt`.
+          Подпись сумм — `checksums.txt.sigstore.json` (cosign 3):
+
+          ```bash
+          cosign verify-blob --bundle checksums.txt.sigstore.json \
+            --certificate-identity https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/@TAG@ \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            checksums.txt
+          ```
           MD
+          # Тег — в тексте заметок: heredoc в кавычках ничего не подставляет.
+          sed -i "s/@TAG@/${GITHUB_REF_NAME}/" notes.md
           if gh release view "$GITHUB_REF_NAME" --repo "$TAP" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" --repo "$TAP" --clobber dist/*
           else
@@ -149,6 +185,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # OIDC-токен прогона — для подписи образа и VEX без ключей.
+      id-token: write
     env:
       HAS_SELF_HOSTED_TOKEN: ${{ secrets.SELF_HOSTED_DISPATCH_TOKEN != '' }}
     steps:
@@ -183,10 +221,18 @@ jobs:
       # кросс-компилируется на раннере (Dockerfile, GOARCH=$TARGETARCH), QEMU
       # намеренно не подключён: RUN под целевой платформой должен ронять
       # сборку, а не тихо уходить в эмуляцию.
-      - uses: docker/build-push-action@v6
+      #
+      # SBOM (SPDX, сканер BuildKit) и provenance (SLSA v1) — манифесты
+      # аттестаций внутри индекса, по одному на платформу. Режим и версия
+      # provenance заданы явно: по умолчанию action даёт max только
+      # публичному репозиторию, а версию предиката выбирает BuildKit.
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          sbom: true
+          provenance: mode=max,version=v1
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend:${{ github.ref_name }}
           build-args: VERSION=${{ github.ref_name }}
@@ -197,14 +243,59 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Событие cadence-release шлёт тот выпуск, который опубликовал свой
-      # образ вторым (см. скрипт). Без секрета шаг не падает, а печатает
-      # команду для отправки руками.
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # Подписывается digest индекса, не тег: тег в реестре переписываем,
+      # digest — нет. Индекс перечисляет манифесты платформ и аттестаций,
+      # поэтому подпись покрывает и SBOM с provenance. Клиент проверяет:
+      #   cosign verify --certificate-identity <этот release.yml на теге>
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com <образ>
+      - name: подписать образ
+        env:
+          IMAGE: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+      # Известные ложные находки сканеров (GO-2026-5932 и т. п.) —
+      # подписанным OpenVEX рядом с образом. Исходник утверждений правится
+      # PR в .github/release/openvex.json, не здесь.
+      - name: VEX к образу
+        env:
+          IMAGE: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend@${{ steps.build.outputs.digest }}
+        run: cosign attest --yes --type openvex --predicate .github/release/openvex.json "$IMAGE"
+
+      # То, что увидит клиент со сканером по модулям: govulncheck в
+      # бинарном режиме по /api, /worker, /clab из опубликованного образа.
+      # Находка вне VEX — предупреждение с ID в сводке прогона, релиз не
+      # падает: образ уже опубликован и подписан, а разбор находки — PR
+      # (исправление или запись в openvex.json).
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: govulncheck по бинарям образа
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.meta.outputs.registry }}/sdlc-pipeline-backend@${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p image-bin
+          id=$(docker create --platform linux/amd64 "$IMAGE")
+          for b in api worker clab; do docker cp "$id:/$b" "image-bin/$b"; done
+          docker rm "$id" >/dev/null
+          .github/release/govulncheck-binaries.sh .github/release/openvex.json image-bin/api image-bin/worker image-bin/clab
+
+      # Событие cadence-release шлёт тот выпуск, который опубликовал и
+      # подписал свой образ вторым (см. скрипт): релиз-PR self-hosted пишет
+      # digest обоих образов в compose и проверяет их подписи. Без секрета
+      # шаг не падает, а печатает команду для отправки руками.
       - name: оповестить self-hosted
         env:
           VERSION: ${{ github.ref_name }}
           REGISTRY: ${{ steps.meta.outputs.registry }}
           SELF: backend
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SIGNED: "true"
           HAS_TOKEN: ${{ env.HAS_SELF_HOSTED_TOKEN }}
           GH_TOKEN: ${{ secrets.SELF_HOSTED_DISPATCH_TOKEN }}
         run: .github/release/notify-self-hosted.sh
