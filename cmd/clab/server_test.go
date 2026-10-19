@@ -40,6 +40,7 @@ type fakeRunner struct {
 	dumpBytes       int
 	gitAvailable    bool
 	gitTags         map[string]bool
+	takenBy         string // каталог установки, чьи контейнеры носят проверяемое имя (install)
 }
 
 func newFakeRunner() *fakeRunner {
@@ -102,6 +103,16 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		if f.apiContainer != "" {
 			write(f.apiContainer + "\n")
 		}
+		return nil
+	case strings.HasPrefix(args, "ps -a -q --filter label=com.docker.compose.project="):
+		if f.takenBy != "" {
+			write("c1\n")
+		}
+		return nil
+	case strings.HasPrefix(args, "volume ls -q --filter"):
+		return nil
+	case strings.HasPrefix(args, "inspect -f {{index .Config.Labels"):
+		write(f.takenBy + "\n")
 		return nil
 	case strings.HasPrefix(args, "inspect -f"):
 		if f.healthy {
@@ -182,6 +193,12 @@ func testEnv(t *testing.T, cwd string, r *fakeRunner, vars map[string]string) (*
 		uid:     1000,
 		gid:     1000,
 		cli:     "v0.7.0",
+		self:    "/usr/local/bin/clab",
+
+		arch:       "amd64",
+		portBusy:   func(string, int) bool { return false },
+		lookupHost: func(string) ([]string, error) { return []string{"203.0.113.7"}, nil },
+		localAddrs: func() []string { return []string{"203.0.113.7"} },
 	}, &out, &errw
 }
 
@@ -347,7 +364,7 @@ func TestServerHelp(t *testing.T) {
 	if code := runServer(context.Background(), e, []string{"--help"}); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	for _, sub := range []string{"upgrade", "backup", "restore", "status", "--dir"} {
+	for _, sub := range []string{"install", "upgrade", "backup", "restore", "status", "--dir"} {
 		if !strings.Contains(out.String(), sub) {
 			t.Errorf("help lacks %q:\n%s", sub, out)
 		}
@@ -397,7 +414,7 @@ func TestServerEnvDevNullIsNotTerminal(t *testing.T) {
 
 func TestServerUnknownCommandAndOption(t *testing.T) {
 	e, _, errw := testEnv(t, t.TempDir(), newFakeRunner(), nil)
-	if code := runServer(context.Background(), e, []string{"install"}); code != 2 {
+	if code := runServer(context.Background(), e, []string{"uninstall"}); code != 2 {
 		t.Errorf("unknown command: code %d", code)
 	}
 	dir := installed(t, "v0.6.1", nil)
