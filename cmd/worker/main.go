@@ -440,7 +440,6 @@ func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger,
 		n, err = engine.ExpireLeases(ctx, system, 100)
 		return err
 	})
-	m.LeasesExpired(n)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -448,6 +447,9 @@ func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger,
 		log.Error("проход по протухшим арендам не удался", "error", err)
 		return
 	}
+	// Считаем только после удачного прохода: при ошибке транзакция откатилась,
+	// и n не значит ничего.
+	m.LeasesExpired(n)
 	if n > 0 {
 		log.Info("аренды истекли, задачи возвращены в общий доступ", "count", n)
 	}
