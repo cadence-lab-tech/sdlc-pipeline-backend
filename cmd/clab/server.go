@@ -1,8 +1,9 @@
 package main
 
 // clab server — управление установкой self-hosted на этой машине (CLAB-125,
-// решение 0045): upgrade, backup, restore и status с теми же гарантиями,
-// что у скриптов пакета (upgrade.sh, backup.sh, restore.sh, lib.sh).
+// решение 0045): install (CLAB-160), upgrade, backup, restore и status с теми
+// же гарантиями, что у скриптов пакета (get-cadence.sh, install.sh,
+// upgrade.sh, backup.sh, restore.sh, lib.sh).
 //
 // Команда не ходит в API Cadence Lab и не требует входа: она работает с
 // каталогом установки и Docker на этой машине. Docker — через CLI
@@ -19,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,6 +50,14 @@ type serverEnv struct {
 	uid, gid  int
 	cli       string // версия этого clab
 	brew      bool   // этот clab стоит из формулы тапа
+	self      string // путь этого clab для напечатанных команд (cron)
+
+	// Проверки машины для clab server install: в тестах подменяются, чтобы
+	// не зависеть от портов и DNS верстака.
+	arch       string // runtime.GOARCH
+	portBusy   func(host string, port int) bool
+	lookupHost func(host string) ([]string, error)
+	localAddrs func() []string
 }
 
 func newServerEnv() (*serverEnv, error) {
@@ -79,6 +89,12 @@ func newServerEnv() (*serverEnv, error) {
 		gid:      os.Getgid(),
 		cli:      version,
 		brew:     installedByBrew(),
+		self:     clabPath(),
+
+		arch:       runtime.GOARCH,
+		portBusy:   realPortBusy,
+		lookupHost: net.LookupHost,
+		localAddrs: realLocalAddrs,
 	}, nil
 }
 
@@ -111,6 +127,7 @@ const serverUsage = `clab server — manage the self-hosted Cadence Lab installa
 Usage: clab server <command> [--dir DIR] [options]
 
 Commands:
+  install   install Cadence Lab from a release package into a new directory
   upgrade   upgrade the stack to the latest or a given release, with a backup first
   backup    back up the database and the blobs volume, rotate old backups
   restore   restore the database and the blobs volume from a backup
@@ -118,10 +135,9 @@ Commands:
 
 The installation directory is --dir DIR, else $CADENCE_DIR, else the current
 directory or the nearest one above it with VERSION and package.sha256 (or
-VERSION and docker-compose.yml). No sign-in is needed: clab server works with
-the files and Docker of this machine, not with the API.
-
-Installing is ./install.sh or get-cadence.sh of the package for now.
+VERSION and docker-compose.yml); install creates it, default ./cadence. No
+sign-in is needed: clab server works with the files and Docker of this
+machine, not with the API.
 
 clab server <command> --help — the options of a command.`
 
@@ -134,6 +150,7 @@ type serverCommand struct {
 
 func serverCommands() []serverCommand {
 	return []serverCommand{
+		{"install", installHelp, serverInstall},
 		{"upgrade", upgradeHelp, serverUpgrade},
 		{"backup", backupHelp, serverBackup},
 		{"restore", restoreHelp, serverRestore},
@@ -395,6 +412,12 @@ func (i *installation) composeEnv() []string {
 	set("CADENCE_VERSION", i.version)
 	name, _, _ := i.name()
 	set("COMPOSE_PROJECT_NAME", name)
+	// PWD — каталог установки, как у скриптов после cd: compose пишет его в
+	// метку working_dir контейнеров, а по ней «имя занято» называет
+	// установку. С PWD вызывающего Go-шный getcwd compose отдал бы путь без
+	// симлинков (/private/var вместо /var на macOS), и та же установка
+	// называлась бы по-разному у clab и у скриптов.
+	set("PWD", i.dir)
 	out := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, k+"="+merged[k])

@@ -48,6 +48,26 @@ func stackCompat(cli, stack string, brew bool) error {
 	return nil
 }
 
+// installCompat — правило версий clab server install (решение q2 CLAB-160,
+// уточнение п. 5 решения 0045): ставится пакет не старше v0.6.0 и не новее
+// clab. В отличие от upgrade, новее clab — отказ, а не предупреждение:
+// данных ещё нет, отказ ничего не ломает, а старый clab не знает шагов
+// установки поздних пакетов (новый ключ в .env). Без --version выбор «не
+// новее clab» делает installVersion сам.
+func installCompat(cli, v string, brew bool) error {
+	if versionLess(v, firstPackageVersion) {
+		return fmt.Errorf("%s comes from before release packages: clab server install installs %s and later.\n"+
+			"  %s is installed the old way, from a clone of its tag with its own install.sh:\n"+
+			"    git clone --branch %s %s.git cadence && cd cadence && ./install.sh",
+			v, firstPackageVersion, v, v, cadenceRepoURL)
+	}
+	if versionLess(cli, v) {
+		return fmt.Errorf("clab %s is older than %s: it does not know how to install a package newer than itself.\n"+
+			"  Update clab to %s or later, then run the command again:\n%s", cli, v, v, updateCLICommands(v, brew))
+	}
+	return nil
+}
+
 func (i *installation) compatible() error {
 	return stackCompat(i.e.cli, i.version, i.e.brew)
 }
