@@ -92,7 +92,7 @@ SDLC_API_URL=http://localhost:18080 SDLC_UI_PORT=5180 npm run dev
 
 Вместе со стеком поднимаются два контейнера-верстака
 (решение 0041):
-`dev-backend` на `golang:1.25-bookworm` и `dev-frontend` на
+`dev-backend` на `golang:1.26-bookworm` и `dev-frontend` на
 `node:24-bookworm`. В каждый примонтирована рабочая копия задачи
 (`/src`): файлы агент правит на хосте, как обычно, а собирает и тестирует
 внутри — на хосте не нужны ни Go, ни Node, а соседние задачи не делят ни
