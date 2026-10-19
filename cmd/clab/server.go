@@ -412,6 +412,12 @@ func (i *installation) composeEnv() []string {
 	set("CADENCE_VERSION", i.version)
 	name, _, _ := i.name()
 	set("COMPOSE_PROJECT_NAME", name)
+	// PWD — каталог установки, как у скриптов после cd: compose пишет его в
+	// метку working_dir контейнеров, а по ней «имя занято» называет
+	// установку. С PWD вызывающего Go-шный getcwd compose отдал бы путь без
+	// симлинков (/private/var вместо /var на macOS), и та же установка
+	// называлась бы по-разному у clab и у скриптов.
+	set("PWD", i.dir)
 	out := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, k+"="+merged[k])

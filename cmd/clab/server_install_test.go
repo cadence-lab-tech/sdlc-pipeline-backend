@@ -210,6 +210,9 @@ func TestServerInstall(t *testing.T) {
 		if got := envValue(f.r.envs[call], "CADENCE_VERSION"); got != "v0.7.0" {
 			t.Errorf("%s ran with CADENCE_VERSION=%q", call, got)
 		}
+		if got := envValue(f.r.envs[call], "PWD"); got != d {
+			t.Errorf("%s ran with PWD=%q, want the installation directory", call, got)
+		}
 	}
 
 	out := f.out.String()

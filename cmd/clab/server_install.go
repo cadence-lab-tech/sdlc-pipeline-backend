@@ -232,12 +232,15 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 
 	e.ok("Cadence Lab %s is up", version)
 	e.say("")
-	e.kv("  Installation:", fmt.Sprintf("%s (%s)", dir, name), "  Address:", inst.publicURL())
+	// Одна таблица: колонка значений начинается с 24-го символа, под ней —
+	// пометка о токене, как у install.sh.
+	token := "the one supplied in SDLC_ADMIN_TOKEN"
 	if a.tokenGenerated {
-		e.kv("  Administrator token:", a.token)
+		token = a.token
+	}
+	e.kv("  Installation:", fmt.Sprintf("%s (%s)", dir, name), "  Address:", inst.publicURL(), "  Administrator token:", token)
+	if a.tokenGenerated {
 		e.say("                        (shown once; it is also in .env - keep both private)")
-	} else {
-		e.kv("  Administrator token:", "the one supplied in SDLC_ADMIN_TOKEN")
 	}
 	e.say("")
 	e.say("Next: sign in with the token and follow docs/admin.md (teams, GitHub App, OIDC, CLI):")
