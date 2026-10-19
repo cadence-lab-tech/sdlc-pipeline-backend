@@ -47,8 +47,18 @@ var (
 	errChecksum  = errors.New("checksum does not match")
 )
 
+// releasesFrom — адрес релизов: значение CADENCE_RELEASES_URL или GitHub.
+// У установки оно берётся с учётом .env, у clab server install — только из
+// окружения: .env ещё нет.
+func releasesFrom(v string) string {
+	if v == "" {
+		v = releasesDefault
+	}
+	return strings.TrimRight(v, "/")
+}
+
 func (i *installation) releasesURL() string {
-	return strings.TrimRight(i.getDefault("CADENCE_RELEASES_URL", releasesDefault), "/")
+	return releasesFrom(i.get("CADENCE_RELEASES_URL"))
 }
 
 func packageName(v string) string { return "cadence-self-hosted-" + v + ".tar.gz" }
@@ -137,8 +147,13 @@ var checksumsPackage = regexp.MustCompile(`^[0-9a-f]{64}  cadence-self-hosted-(v
 // (GitHub отправляет latest/download/ на последний релиз, зеркало держит там
 // копию).
 func (i *installation) latestVersion(ctx context.Context, work string) (string, error) {
+	return latestRelease(ctx, i.e, i.releasesURL(), work)
+}
+
+// latestRelease — то же без установки: по адресу релизов.
+func latestRelease(ctx context.Context, e *serverEnv, releases, work string) (string, error) {
 	dst := filepath.Join(work, "latest-checksums.txt")
-	if err := i.e.fetch(ctx, i.releasesURL()+"/latest/download/checksums.txt", dst); err != nil {
+	if err := e.fetch(ctx, releases+"/latest/download/checksums.txt", dst); err != nil {
 		return "", err
 	}
 	defer os.Remove(dst)
@@ -160,14 +175,19 @@ func (i *installation) latestVersion(ctx context.Context, work string) (string, 
 // сверяет сумму. errNoRelease — релиза или пакета в нём нет, errChecksum —
 // сумма не сходится. Возвращает путь к тарболу.
 func (i *installation) downloadPackage(ctx context.Context, v, dir string) (string, error) {
-	base := i.releasesURL() + "/download/" + v
+	return downloadRelease(ctx, i.e, i.releasesURL(), v, dir)
+}
+
+// downloadRelease — то же без установки: по адресу релизов.
+func downloadRelease(ctx context.Context, e *serverEnv, releases, v, dir string) (string, error) {
+	base := releases + "/download/" + v
 	name := packageName(v)
 	sums := filepath.Join(dir, "checksums.txt")
-	if err := i.e.fetch(ctx, base+"/checksums.txt", sums); err != nil {
+	if err := e.fetch(ctx, base+"/checksums.txt", sums); err != nil {
 		return "", err
 	}
 	tarball := filepath.Join(dir, name)
-	if err := i.e.fetch(ctx, base+"/"+name, tarball); err != nil {
+	if err := e.fetch(ctx, base+"/"+name, tarball); err != nil {
 		return "", err
 	}
 	raw, err := os.ReadFile(sums)
