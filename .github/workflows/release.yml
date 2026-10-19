@@ -29,7 +29,10 @@ jobs:
           - {goos: windows, goarch: amd64}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      # v7, как в ci.yml: v5 читает из go.mod только строку go (ставил бы
+      # 1.25.0 и докачивал тулчейн сам), v7 берёт строку toolchain и ставит
+      # GOTOOLCHAIN=local — сборка идёт ровно на go1.25.x из go.mod.
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
