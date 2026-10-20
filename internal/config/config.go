@@ -716,5 +716,3 @@ func envNonNegativeDuration(key string, def time.Duration, zero string) (time.Du
 	}
 	return d, nil
 }
-
-var  _ = 1
