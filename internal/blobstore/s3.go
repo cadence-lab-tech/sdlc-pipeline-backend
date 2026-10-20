@@ -223,6 +223,14 @@ func s3Error(what string, resp *http.Response) error {
 
 // request собирает запрос и подписывает его по SigV4.
 func (s *S3) request(ctx context.Context, method, key string, body []byte) (*http.Request, error) {
+	return s.requestQuery(ctx, method, key, nil, body)
+}
+
+// requestQuery — request с параметрами строки запроса (листинг, multipart).
+// Строка собирается сразу в каноническом виде SigV4: ключи по порядку,
+// кодирование RFC 3986 — и она же уходит по сети, так что подписано ровно
+// то, что отправлено.
+func (s *S3) requestQuery(ctx context.Context, method, key string, query url.Values, body []byte) (*http.Request, error) {
 	endpoint, err := url.Parse(s.cfg.Endpoint)
 	if err != nil {
 		return nil, err
@@ -234,6 +242,7 @@ func (s *S3) request(ctx context.Context, method, key string, body []byte) (*htt
 		endpoint.Host = s.cfg.Bucket + "." + endpoint.Host
 	}
 	endpoint.Path = strings.TrimSuffix(endpoint.Path, "/") + path
+	endpoint.RawQuery = canonicalQuery(query)
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
@@ -302,6 +311,32 @@ func headersToSign(req *http.Request) (signed, canonical string) {
 		b.WriteString(name + ":" + values[name] + "\n")
 	}
 	return strings.Join(names, ";"), b.String()
+}
+
+// canonicalQuery — параметры в каноническом виде SigV4: ключи по порядку,
+// пробел — %20, а не «+», у параметра без значения — «=».
+func canonicalQuery(q url.Values) string {
+	if len(q) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(q))
+	for k := range q {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		values := append([]string(nil), q[k]...)
+		sort.Strings(values)
+		for _, v := range values {
+			parts = append(parts, uriEncode(k)+"="+uriEncode(v))
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+func uriEncode(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 // canonicalPath кодирует каждый сегмент отдельно: слэши остаются слэшами.

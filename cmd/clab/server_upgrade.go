@@ -39,6 +39,10 @@ not needed: before the backup the images of the new version check the
 database (/api dbcheck), and a database they cannot use stops the upgrade
 while nothing has changed.
 
+With BACKUP_S3_BUCKET set the backup is also copied to the bucket (clab
+server backup --help); a failed copy is only a warning here - the rollback
+uses the local backup.
+
 Skipping versions is fine: migrations of every version in between are built
 into the new image. Going down is refused - migrations only go forward; to
 return to an older version restore its backup (clab server restore).
@@ -239,6 +243,14 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	backup, err := i.backup(ctx)
 	if err != nil {
 		return err
+	}
+	// Копия вне машины здесь — не условие апгрейда: откат опирается на
+	// локальный файл (CLAB-132, q2).
+	if i.offsiteConfigured() {
+		if err := i.upload(ctx, backup); err != nil {
+			e.warn("%v", err)
+			e.warn("the upgrade goes on: its rollback uses the local backup")
+		}
 	}
 
 	// Файлы пакета как они есть сейчас — старого манифеста и все, которые

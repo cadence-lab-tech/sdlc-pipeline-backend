@@ -275,6 +275,9 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	e.say("Manage the installation with clab server upgrade, backup, restore and status --dir %s.", shellQuote(dir))
 	e.say("Set up nightly backups: 0 3 * * * %s server backup --dir %s >> %s 2>&1",
 		shellQuote(e.self), shellQuote(dir), shellQuote(filepath.Join(dir, "backups", "backup.log")))
+	e.say("and a weekly restore check: 0 5 * * 0 %s server backup verify --dir %s >> %s 2>&1",
+		shellQuote(e.self), shellQuote(dir), shellQuote(filepath.Join(dir, "backups", "backup.log")))
+	e.say("Copy the backups off this machine: BACKUP_S3_* in .env (docs/admin.md, \"Off-machine copy\").")
 	return nil
 }
 
