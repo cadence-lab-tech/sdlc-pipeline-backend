@@ -40,9 +40,18 @@ test-integration:
 	echo "интеграционные тесты идут в $$url"; \
 	SDLC_TEST_DATABASE_URL="$$url" go test ./... -count=1 -p 1
 
+# gofmt -l печатает неформатированные файлы, но выходит с 0; код ненулевой
+# у него только при ошибке разбора. Поэтому вывод проверяется явно, а
+# `|| exit 1` не даёт подстановке проглотить код самого gofmt.
 lint:
 	go vet ./...
-	gofmt -l cmd internal migrations
+	@echo 'gofmt -l cmd internal migrations'; \
+	out=$$(gofmt -l cmd internal migrations) || exit 1; \
+	if [ -n "$$out" ]; then \
+		echo 'неформатированные файлы, исправить: gofmt -w <файл>' >&2; \
+		echo "$$out" >&2; \
+		exit 1; \
+	fi
 
 tidy:
 	go mod tidy
