@@ -4,14 +4,18 @@
 # статуса. Проверяет ровно то, что нельзя проверить юнит-тестом, — что
 # движок, аренды, гейты и транспорт складываются в рабочий цикл.
 #
-#   make reset up && dev/e2e.sh
+#   make up && dev/e2e.sh            # общий dev-стек
+#   dev/stack.sh e2e <ключ>          # стек задачи
 #
-# Требует чистую базу: демо-задача SDLC-1 должна стоять на статусе new.
+# Каждый прогон заводит в проекте SDLC свою задачу с областью backend, поэтому
+# сценарий повторяется на той же базе без сброса. TASK=<ключ> берёт
+# существующую задачу: она должна стоять на new, с backend в области и без
+# frontend — шаг 10 привязывает PR к backend и показывает отказ на frontend.
 set -euo pipefail
 
 API=${SDLC_API_URL:-http://localhost:8088/v1}
 CLI=${SDLC_CLI:-./bin/clab}
-TASK=${TASK:-SDLC-1}
+TASK=${TASK:-}
 export SDLC_API_URL=$API SDLC_PROJECT=${SDLC_PROJECT:-SDLC}
 
 work=$(mktemp -d)
@@ -24,14 +28,32 @@ file() { printf '%s\n' "$2" > "$work/$1"; echo "$work/$1"; }
 
 [ -x "$CLI" ] || { echo "нет $CLI — соберите: make build"; exit 1; }
 
-start=$(status)
-[ "$start" = new ] || {
-    echo "$TASK стоит на статусе $start, а сценарий начинается с new."
-    echo "Сиды не идемпотентны — пересоберите демо: make reset up"
-    exit 1
-}
+if [ -n "$TASK" ]; then
+    # Явная задача проверяется до шага 1: сценарий на ней либо пройдёт
+    # целиком, либо не начнётся, а не оборвётся на середине.
+    origin="задана TASK"
+    as human:ci show "$TASK" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+hints={r.get("role_hint") for r in d["context"]["repositories"]}
+problems=[]
+if d["task"]["status"] != "new": problems.append("статус %s, а сценарий начинается с new" % d["task"]["status"])
+if "backend" not in hints: problems.append("в области нет backend — шаг 10 привязывает к нему PR")
+if "frontend" in hints: problems.append("в области есть frontend — шаг 10 показывает на нём отказ привязки")
+for p in problems: print(sys.argv[1] + ":", p)
+sys.exit(1 if problems else 0)' "$TASK" || {
+        echo "Без TASK сценарий заводит свою задачу и повторяется на той же базе."
+        exit 1
+    }
+else
+    origin="заведена сценарием"
+    TASK=$(as human:ci create --title "e2e: сквозной проход цикла" \
+        --description "Заведена dev/e2e.sh." --repos backend | python3 -c '
+import json,sys; print(json.load(sys.stdin)["key"])')
+fi
 
-step "0. Задача в начале цикла: $start"
+start=$(status)
+step "0. Задача $TASK ($origin) в начале цикла: $start"
 
 step "1. Человек запускает задачу в цикл"
 as human:ci transition "$TASK" --to start >/dev/null
@@ -135,13 +157,34 @@ as human:ci decide "$TASK" --transition dev_done --gate ci --status waived \
 as agent:dev-bot transition "$TASK" --to dev_done --summary "Реализовано" >/dev/null
 echo "статус: $(status)"
 
-step "11. Ревью изменений: гейт schema_validation проверяет вердикт по схеме роли"
+step "11. Ревью изменений: схема контракта роли отбивает вердикт при сдаче, гейт schema_validation сверяет его значение"
 as agent:reviewer-bot claim "$TASK" >/dev/null
+# Содержимое вердикта проверяется дважды. Схема из контракта роли — при сдаче
+# (CLAB-102): {"verdict":"maybe"} без findings не ложится в задачу вовсе.
+# Ожидаемое значение — гейтом на переходе: вердикт fail валиден по схеме,
+# сдаётся, но review_passed не пускает.
+if as agent:reviewer-bot submit "$TASK" --kind review.verdict --title "Вердикт ревью" \
+    --file "$(file bad.json '{"verdict":"maybe"}')" >/dev/null 2>"$work/bad.err"; then
+    echo "ОШИБКА: невалидный вердикт принят — сдача не сверилась со схемой контракта роли"
+    exit 1
+fi
+[ "$(head -1 "$work/bad.err" | cut -d: -f1)" = validation_failed ] || {
+    echo "ОШИБКА: сдача невалидного вердикта отбита не проверкой схемы:"
+    cat "$work/bad.err"
+    exit 1
+}
+echo "  сдача отбита: $(head -1 "$work/bad.err")"
+tail -n +2 "$work/bad.err" | python3 -c '
+import json,sys
+for p in json.loads(sys.stdin.read() or "{}").get("problems", []): print("   ", p)'
 as agent:reviewer-bot submit "$TASK" --kind review.verdict --title "Вердикт ревью" \
-    --file "$(file bad.json '{"verdict":"maybe"}')" >/dev/null
+    --file "$work/fail.json" >/dev/null
 as agent:reviewer-bot gates "$TASK" --transition review_passed | python3 -c '
 import json,sys
-for g in json.load(sys.stdin)["gates"]: print(" ", g["type"], "->", g["status"], "|", g["reason"])'
+gates=json.load(sys.stdin)["gates"]
+for g in gates: print(" ", g["type"], "->", g["status"], "|", g.get("reason", ""))
+if [g["status"] for g in gates if g["type"] == "schema_validation"] != ["failed"]:
+    print("ОШИБКА: гейт schema_validation пропустил вердикт fail"); sys.exit(1)'
 as agent:reviewer-bot submit "$TASK" --kind review.verdict --title "Вердикт ревью" \
     --file "$work/pass.json" >/dev/null
 as agent:reviewer-bot transition "$TASK" --to review_passed --summary "Изменения проверены" >/dev/null
