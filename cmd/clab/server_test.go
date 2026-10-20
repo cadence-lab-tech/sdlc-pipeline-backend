@@ -46,11 +46,37 @@ type fakeRunner struct {
 	composeVersion string // docker compose version --short
 	dbcheckFails   bool   // /api dbcheck отвечает «не готова»
 	dbClientFails  bool   // клиент бэкапа (db-client) не подключается
+
+	// Копия вне машины и verify (CLAB-132).
+	s3PutFails      bool   // /api backup-s3 put отвечает сбоем
+	s3GetCode       int    // код выхода backup-s3 get; 0 — скачал s3GetName
+	s3GetName       string // дамп, который «скачивает» get, в смонтированный каталог
+	verifyLoadFails bool   // psql одноразовой базы не загружает дамп
+	dbcheckJSON     string // ответ /api dbcheck --json одноразовой базе
+	verifyCounts    string // проекты, задачи, артефакты
+}
+
+// exitErr — код выхода внешней команды, как у *exec.ExitError.
+type exitErr int
+
+func (e exitErr) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitErr) ExitCode() int { return int(e) }
+
+// mountOf — каталог хоста, смонтированный как /backups.
+func mountOf(args []string) string {
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) && strings.HasSuffix(args[i+1], ":/backups") {
+			return strings.TrimSuffix(args[i+1], ":/backups")
+		}
+	}
+	return ""
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{postgresRunning: true, apiContainer: "api123", healthy: true, dumpBytes: 4096,
-		composeVersion: "2.29.1", stdin: map[string]string{}, envs: map[string][]string{}}
+		composeVersion: "2.29.1", stdin: map[string]string{}, envs: map[string][]string{},
+		dbcheckJSON:  `{"ok": true, "schema": "cadence", "schema_version": 51, "image_schema_version": 51}`,
+		verifyCounts: "2 5 9"}
 }
 
 var errExit1 = errors.New("exit status 1")
@@ -105,6 +131,54 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		write("-- PostgreSQL database dump\n" + b.String())
 	}
 	switch {
+	case strings.Contains(args, " api backup-s3 put "):
+		if f.s3PutFails {
+			io.WriteString(c.stderr, "✗ upload to s3://bk/ failed: PUT x: 403 Forbidden AccessDenied\n")
+			return exitErr(1)
+		}
+		write("✓ uploaded\n")
+		return nil
+	case strings.Contains(args, " api backup-s3 get "):
+		if f.s3GetCode != 0 {
+			return exitErr(f.s3GetCode)
+		}
+		gzipFile(filepath.Join(mountOf(c.args), f.s3GetName), "-- dump from the bucket\n")
+		write(f.s3GetName + "\n")
+		return nil
+	case strings.HasPrefix(args, "compose config --images "):
+		switch strings.TrimPrefix(args, "compose config --images ") {
+		case "postgres":
+			write("pgvector/pgvector:pg17\n")
+		case "db-client":
+			write("pgvector/pgvector:pg18\n")
+		case "api":
+			write("ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0\n")
+		}
+		return nil
+	case strings.HasPrefix(args, "network create"), strings.HasPrefix(args, "run -d --name"),
+		strings.HasPrefix(args, "rm -f -v"), strings.HasPrefix(args, "network rm"):
+		return nil
+	case strings.HasPrefix(args, "exec -i ") && strings.Contains(args, " psql "):
+		if f.verifyLoadFails {
+			return errExit1
+		}
+		return nil
+	case strings.HasPrefix(args, "exec ") && strings.Contains(args, " pg_isready "):
+		return nil
+	case strings.HasPrefix(args, "exec ") && strings.Contains(args, " psql -X -q -At "):
+		write(f.verifyCounts + "\n")
+		return nil
+	case strings.HasPrefix(args, "exec ") && strings.Contains(args, " psql "):
+		return nil
+	case strings.HasPrefix(args, "run --rm --network ") && strings.HasSuffix(args, " dbcheck --json"):
+		write(f.dbcheckJSON + "\n")
+		if !strings.Contains(f.dbcheckJSON, `"ok": true`) {
+			return errExit1
+		}
+		return nil
+	case strings.HasPrefix(args, "run --rm --network ") && strings.HasSuffix(args, " dbcheck"):
+		write("✗ schema: ...\n")
+		return errExit1
 	case args == "compose version", args == "info":
 		return nil
 	case args == "compose version --short":

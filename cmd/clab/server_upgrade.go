@@ -240,6 +240,14 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	if err != nil {
 		return err
 	}
+	// Копия вне машины здесь — не условие апгрейда: откат опирается на
+	// локальный файл (CLAB-132, q2).
+	if i.offsiteConfigured() {
+		if err := i.upload(ctx, backup); err != nil {
+			e.warn("%v", err)
+			e.warn("the upgrade goes on: its rollback uses the local backup")
+		}
+	}
 
 	// Файлы пакета как они есть сейчас — старого манифеста и все, которые
 	// перезапишет новый пакет, — для отката.

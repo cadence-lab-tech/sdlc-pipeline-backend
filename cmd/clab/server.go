@@ -129,7 +129,8 @@ Usage: clab server <command> [--dir DIR] [options]
 Commands:
   install   install Cadence Lab from a release package into a new directory
   upgrade   upgrade the stack to the latest or a given release, with a backup first
-  backup    back up the database and the blobs volume, rotate old backups
+  backup    back up the database and the blobs volume, rotate old backups, copy
+            them to an S3 bucket; backup verify checks that a backup restores
   restore   restore the database and the blobs volume from a backup
   status    the installation, its version, the version of clab and the services
 

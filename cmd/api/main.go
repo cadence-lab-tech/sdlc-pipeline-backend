@@ -44,6 +44,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dbcheck" {
 		os.Exit(dbcheck(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	// Копия бэкапов вне машины, в S3 (CLAB-132).
+	if len(os.Args) > 1 && os.Args[1] == "backup-s3" {
+		os.Exit(backupS3(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	if err := run(); err != nil {
 		slog.Error("сервис остановлен с ошибкой", "error", err)
