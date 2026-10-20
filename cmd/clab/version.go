@@ -166,8 +166,17 @@ type instanceInfo struct {
 
 // cmdVersion печатает версию CLI и сервера текущего хоста. Сервер
 // недоступен — версия CLI всё равно печатается, и команда не падает: её
-// спрашивают как раз тогда, когда что-то не работает.
+// спрашивают как раз тогда, когда что-то не работает. Хост не настроен —
+// сервера нет вовсе: запроса нет, вместо адреса подсказка, код выхода 0 (на
+// это опирается тест формулы тапа).
 func cmdVersion(ctx context.Context, c *Client, _ []string) error {
+	if noHost := c.requireHost(); noHost != nil {
+		return emit(map[string]any{"version": version, "server": nil}, func() error {
+			fmt.Println("clab", version)
+			fmt.Println(noHost)
+			return nil
+		})
+	}
 	server := map[string]any{"url": c.origin}
 	var info instanceInfo
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)

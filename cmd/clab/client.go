@@ -27,8 +27,10 @@ type Client struct {
 	token   string
 	http    *http.Client
 	globals globals
-	// Откуда взялись адрес и токен — для подсказок в ошибках.
-	source string
+	// Хост, который имелся в виду: --host, SDLC_API_URL или хост по
+	// умолчанию из конфига. Адреса у него может не быть — тогда подсказка
+	// «хост не настроен» называет его.
+	host string
 	// Версию сервера сверяем по первому ответу: одно предупреждение на
 	// команду, сколько бы запросов она ни сделала.
 	versionOnce sync.Once
@@ -36,7 +38,10 @@ type Client struct {
 
 // NewClient собирает клиент из окружения и конфига (решение 0032):
 // SDLC_API_URL и SDLC_TOKEN перекрывают конфиг; без них — хост из --host
-// или хост по умолчанию с его токеном; совсем без всего — локальная сборка.
+// или хост по умолчанию с его токеном. Совсем без всего клиент остаётся без
+// адреса и не падает: auth и version с ним работают, а запрос к серверу
+// возвращает «хост не настроен» (CLAB-147). Подставлять адрес по умолчанию
+// нельзя: у клиента self-hosted им оказался бы dev-стек разработчика.
 func NewClient(g globals) (*Client, error) {
 	c := &Client{
 		actor:   env("SDLC_ACTOR", "agent:"+env("USER", "sdlc-cli")),
@@ -52,19 +57,28 @@ func NewClient(g globals) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case origin != "":
+	c.host = host
+	if origin != "" {
 		c.origin = origin
-		c.source = host
-	default:
-		c.origin = "http://localhost:8088"
-		c.source = "localhost (адрес не задан)"
+		c.base = origin + "/v1"
 	}
-	c.base = c.origin + "/v1"
 	if c.token == "" && found {
 		c.token = hc.Token
 	}
 	return c, nil
+}
+
+// requireHost — есть ли куда ходить. Без адреса — подсказка, как его
+// задать; запроса при этом нет, и адрес из пустого origin не собирается.
+func (c *Client) requireHost() error {
+	if c.base != "" {
+		return nil
+	}
+	if c.host != "" {
+		// default_host остался в конфиге без записи в hosts — поправили руками.
+		return fmt.Errorf("хост не настроен: clab auth login --host %s (хоста по умолчанию %s нет в %s)", c.host, c.host, configPath())
+	}
+	return fmt.Errorf("хост не настроен: clab auth login --host https://sdlc.example.com")
 }
 
 // APIError — ошибка домена, пришедшая с сервера. Код совпадает с таблицей
@@ -85,6 +99,9 @@ func (e *APIError) Error() string {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	if err := c.requireHost(); err != nil {
+		return err
+	}
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -153,6 +170,9 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 
 // getRaw читает ответ как есть: содержимое документа приезжает сырым телом.
 func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
+	if err := c.requireHost(); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return nil, err
@@ -175,8 +195,14 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 }
 
 // project — какой проект имеется в виду: флаг, SDLC_PROJECT, иначе проект,
-// к которому привязан репозиторий текущего каталога.
+// к которому привязан репозиторий текущего каталога. Проект нужен только
+// командам с сервером, поэтому без хоста первой говорится подсказка про
+// хост: иначе вне репозитория человек услышал бы «не указан проект», а с
+// SDLC_PROJECT mcp собрал бы адрес из пустого origin.
 func (c *Client) project(ctx context.Context, explicit string) (string, error) {
+	if err := c.requireHost(); err != nil {
+		return "", err
+	}
 	if explicit != "" {
 		return explicit, nil
 	}
