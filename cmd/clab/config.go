@@ -85,7 +85,7 @@ func saveConfig(cfg Config) error {
 }
 
 // normalizeHost принимает «sdlc.example.com», «https://sdlc.example.com» или
-// «http://localhost:8088/v1» и возвращает ключ хоста и адрес интерфейса без
+// «http://127.0.0.1:8080/v1» и возвращает ключ хоста и адрес интерфейса без
 // хвоста /v1.
 func normalizeHost(raw string) (host, origin string, err error) {
 	raw = strings.TrimSpace(raw)

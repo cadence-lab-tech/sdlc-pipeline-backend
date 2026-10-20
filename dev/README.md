@@ -389,8 +389,10 @@ clab invite revoke <id>               # полный ID из списка
 invite create …` отдаёт ответ сервера и поле `url`. Выдаёт и принимает
 приглашение только человек, в любом режиме: в режиме заголовка актор по
 умолчанию `agent:$USER`, поэтому локально — `SDLC_ACTOR=user:<хэндл>`.
-Ссылка строится от адреса хоста clab, а на `make up` это API `:8088`, не
-интерфейс. Чтобы ссылка открывалась в интерфейсе на vite, выдавайте с
+Ссылка строится от адреса хоста clab: адреса по умолчанию у clab нет, и на
+`make up` хост задаётся явно. С `--host localhost:8088` (или
+`SDLC_API_URL=http://localhost:8088/v1`) ссылка ведёт на API, а не в
+интерфейс; чтобы она открывалась в интерфейсе на vite, выдавайте с
 `--host localhost:5173`: dev-сервер проксирует `/v1`, и запрос уходит туда же.
 
 **Вход CLI через браузер** (решение 0032).
@@ -399,7 +401,12 @@ invite create …` отдаёт ответ сервера и поле `url`. В�
 кладёт долгоживущий токен в `~/.config/clab/config.json` (`CLAB_CONFIG_DIR`
 переопределяет каталог). Дальше `clab auth status`, `clab auth logout`,
 `clab auth token` для скриптов рядом; `--host` выбирает хост из конфига,
-`SDLC_API_URL` и `SDLC_TOKEN` перекрывают конфиг. Проект без `--project` и
+`SDLC_API_URL` и `SDLC_TOKEN` перекрывают конфиг. Без всех трёх хост не
+настроен: `clab version` печатает только свою версию и подсказку, остальные
+команды падают с `хост не настроен: clab auth login --host …` и в сеть не
+ходят (CLAB-147). Для dev-стека — `clab auth login --host localhost:8088`
+один раз или `SDLC_API_URL=http://localhost:8088/v1`; `dev/e2e.sh` и
+`stack.sh smoke` задают `SDLC_API_URL` сами. Проект без `--project` и
 `SDLC_PROJECT` берётся по `origin` текущего каталога
 (`GET /v1/projects?repo=owner/name`). Агента к MCP проекта подключает
 `clab mcp install` — это `claude mcp add` с тем же токеном; `clab mcp config`
