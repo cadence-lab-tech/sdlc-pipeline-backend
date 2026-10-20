@@ -548,7 +548,9 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
 - Стек из копии задачи: `dev/stack.sh up <ключ>`. Поднят оркестратором или
   соседней ролью — повторный `up` безвреден.
 - Сборка и модульные тесты: `dev/stack.sh exec <ключ> backend go build ./...`,
-  так же `go vet ./...`, `go test ./...`, `make lint`.
+  так же `go vet ./...`, `go test ./...`, `make lint` (`go vet` и
+  `gofmt -l`; неформатированный файл роняет цель с перечнем — исправить
+  `gofmt -w <файл>`).
 - Интеграционные тесты: `dev/stack.sh exec <ключ> backend make test-integration`
   — в `sdlc_test` Postgres этого стека, соседям не мешают.
 - Внутри верстака нет Docker и не работает git: `make up`, `dev/e2e.sh`,
