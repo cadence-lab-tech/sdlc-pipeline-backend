@@ -341,13 +341,19 @@ func (i *installation) verify(ctx context.Context, file string, ignoreVersion bo
 	return nil
 }
 
-// imageOf — образ сервиса compose установки (docker compose config --images).
+// imageOf — образ сервиса compose установки. Не `config --images SERVICE`:
+// он добавляет сервисы, от которых SERVICE зависит, в случайном порядке.
 func (i *installation) imageOf(ctx context.Context, service string) (string, error) {
-	out, err := output(ctx, i.e.run, withStderr(i.compose("config", "--images", service), i.e.errw))
-	if err != nil || firstLine(out) == "" {
-		return "", fmt.Errorf("cannot tell the image of %s: docker compose config --images %s failed (see above)", service, service)
+	out, err := output(ctx, i.e.run, withStderr(i.compose("config", "--format", "json", service), i.e.errw))
+	var cfg struct {
+		Services map[string]struct {
+			Image string `json:"image"`
+		} `json:"services"`
 	}
-	return firstLine(out), nil
+	if err != nil || json.Unmarshal([]byte(out), &cfg) != nil || cfg.Services[service].Image == "" {
+		return "", fmt.Errorf("cannot tell the image of %s: docker compose config %s failed (see above)", service, service)
+	}
+	return cfg.Services[service].Image, nil
 }
 
 // tarFiles — число обычных файлов в архиве; архив читается до конца, как

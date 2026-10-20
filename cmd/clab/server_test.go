@@ -145,15 +145,14 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		gzipFile(filepath.Join(mountOf(c.args), f.s3GetName), "-- dump from the bucket\n")
 		write(f.s3GetName + "\n")
 		return nil
-	case strings.HasPrefix(args, "compose config --images "):
-		switch strings.TrimPrefix(args, "compose config --images ") {
-		case "postgres":
-			write("pgvector/pgvector:pg17\n")
-		case "db-client":
-			write("pgvector/pgvector:pg18\n")
+	case strings.HasPrefix(args, "compose config --format json "):
+		// Как настоящий compose: с сервисами, от которых этот зависит.
+		services := `"postgres": {"image": "pgvector/pgvector:pg17"}, "db-client": {"image": "pgvector/pgvector:pg18"}`
+		switch strings.TrimPrefix(args, "compose config --format json ") {
 		case "api":
-			write("ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0\n")
+			services = `"postgres": {"image": "pgvector/pgvector:pg17"}, "api": {"image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0"}`
 		}
+		write(`{"name": "cadence", "services": {` + services + `}}`)
 		return nil
 	case strings.HasPrefix(args, "network create"), strings.HasPrefix(args, "run -d --name"),
 		strings.HasPrefix(args, "rm -f -v"), strings.HasPrefix(args, "network rm"):

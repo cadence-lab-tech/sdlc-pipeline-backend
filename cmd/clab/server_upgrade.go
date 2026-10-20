@@ -39,6 +39,10 @@ not needed: before the backup the images of the new version check the
 database (/api dbcheck), and a database they cannot use stops the upgrade
 while nothing has changed.
 
+With BACKUP_S3_BUCKET set the backup is also copied to the bucket (clab
+server backup --help); a failed copy is only a warning here - the rollback
+uses the local backup.
+
 Skipping versions is fine: migrations of every version in between are built
 into the new image. Going down is refused - migrations only go forward; to
 return to an older version restore its backup (clab server restore).
