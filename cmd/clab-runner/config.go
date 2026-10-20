@@ -46,7 +46,7 @@ const defaultCommand = `claude -p --output-format json --mcp-config {mcp_config}
 
 func loadConfig() (Config, error) {
 	c := Config{
-		APIURL:   strings.TrimRight(env("SDLC_API_URL", "http://localhost:8088/v1"), "/"),
+		APIURL:   strings.TrimRight(env("SDLC_API_URL", ""), "/"),
 		Token:    env("SDLC_TOKEN", ""),
 		Actor:    env("SDLC_ACTOR", "agent:"+env("USER", "sdlc-runner")),
 		Project:  env("SDLC_PROJECT", ""),
@@ -56,6 +56,12 @@ func loadConfig() (Config, error) {
 		Command:  env("SDLC_RUNNER_COMMAND", defaultCommand),
 		Once:     env("SDLC_RUNNER_ONCE", "") != "",
 		DryRun:   env("SDLC_RUNNER_DRY_RUN", "") != "",
+	}
+	// Адреса по умолчанию нет, как и у clab (CLAB-147): подставленный адрес
+	// dev-стека у клиента self-hosted оказался бы стеком разработчика, и
+	// раннер молча забирал бы задачи чужой базы. Dev-стек — только явно.
+	if c.APIURL == "" {
+		return c, fmt.Errorf("не задан SDLC_API_URL: адрес API инстанса, например https://cadence.example.com/v1")
 	}
 	if c.Project == "" {
 		return c, fmt.Errorf("не задан SDLC_PROJECT: раннер следит за очередью одного проекта")

@@ -28,11 +28,27 @@ file() { printf '%s\n' "$2" > "$work/$1"; echo "$work/$1"; }
 
 [ -x "$CLI" ] || { echo "нет $CLI — соберите: make build"; exit 1; }
 
+# show_or_die печатает JSON задачи, а при отказе clab — одну строку
+# «КЛЮЧ: ошибка clab» в stderr и код 1: опечатка в ключе или недоступный
+# сервер — не повод для трейсбека python3 на пустом stdout.
+show_or_die() {
+    local out
+    if ! out=$(as human:ci show "$1" 2>"$work/show.err"); then
+        echo "$1: $(grep -m1 . "$work/show.err" || echo "clab show завершился с ошибкой")" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
 if [ -n "$TASK" ]; then
     # Явная задача проверяется до шага 1: сценарий на ней либо пройдёт
     # целиком, либо не начнётся, а не оборвётся на середине.
     origin="задана TASK"
-    as human:ci show "$TASK" | python3 -c '
+    shown=$(show_or_die "$TASK") || {
+        echo "Без TASK сценарий заводит свою задачу и повторяется на той же базе."
+        exit 1
+    }
+    printf '%s\n' "$shown" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 hints={r.get("role_hint") for r in d["context"]["repositories"]}

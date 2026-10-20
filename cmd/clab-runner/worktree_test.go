@@ -435,6 +435,7 @@ func TestParallelPrepareInOneClone(t *testing.T) {
 }
 
 func TestConfigWorkspaces(t *testing.T) {
+	t.Setenv("SDLC_API_URL", "http://example.invalid/v1")
 	t.Setenv("SDLC_PROJECT", "SDLC")
 	t.Setenv("SDLC_RUNNER_WORKTREES", "")
 
@@ -529,5 +530,31 @@ func TestWorkRunsAgentInCopy(t *testing.T) {
 	}
 	if len(released) != 1 || !strings.Contains(released[0], "acme/tap") {
 		t.Fatalf("задача обязана вернуться в очередь с причиной: %v", released)
+	}
+}
+
+// Без адреса раннер не стартует: подставлять dev-стек нельзя (CLAB-187).
+func TestConfigRequiresAPIURL(t *testing.T) {
+	t.Setenv("SDLC_PROJECT", "SDLC")
+	t.Setenv("SDLC_RUNNER_REPOS", "")
+	t.Setenv("SDLC_RUNNER_SLOTS", "")
+	for _, v := range []string{"", "   "} {
+		t.Setenv("SDLC_API_URL", v)
+		_, err := loadConfig()
+		if err == nil || !strings.Contains(err.Error(), "SDLC_API_URL") || !strings.Contains(err.Error(), "/v1") {
+			t.Fatalf("SDLC_API_URL=%q: нужен отказ с именем переменной и форматом адреса, а не %v", v, err)
+		}
+		if strings.Contains(err.Error(), "SDLC_PROJECT") {
+			t.Fatalf("SDLC_API_URL=%q: проверка адреса не та: %v", v, err)
+		}
+	}
+
+	t.Setenv("SDLC_API_URL", "https://cadence.example.com/v1/")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIURL != "https://cadence.example.com/v1" {
+		t.Fatalf("адрес взят не из окружения: %q", cfg.APIURL)
 	}
 }
