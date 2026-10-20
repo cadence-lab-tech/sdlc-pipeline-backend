@@ -200,6 +200,20 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 // хост: иначе вне репозитория человек услышал бы «не указан проект», а с
 // SDLC_PROJECT mcp собрал бы адрес из пустого origin.
 func (c *Client) project(ctx context.Context, explicit string) (string, error) {
+	key, err := c.optionalProject(ctx, explicit)
+	if err != nil {
+		return "", err
+	}
+	if key != "" {
+		return key, nil
+	}
+	return "", fmt.Errorf("не указан проект: --project, SDLC_PROJECT или каталог репозитория, привязанного к проекту")
+}
+
+// optionalProject — тот же выбор проекта, но «не задан» здесь не ошибка, а
+// пустой ключ: clab whoami отвечает и без проекта, а ошибка сервера при
+// поиске по git remote остаётся ошибкой.
+func (c *Client) optionalProject(ctx context.Context, explicit string) (string, error) {
 	if err := c.requireHost(); err != nil {
 		return "", err
 	}
@@ -209,14 +223,7 @@ func (c *Client) project(ctx context.Context, explicit string) (string, error) {
 	if key := os.Getenv("SDLC_PROJECT"); key != "" {
 		return key, nil
 	}
-	key, err := c.projectByRemote(ctx)
-	if err != nil {
-		return "", err
-	}
-	if key != "" {
-		return key, nil
-	}
-	return "", fmt.Errorf("не указан проект: --project, SDLC_PROJECT или каталог репозитория, привязанного к проекту")
+	return c.projectByRemote(ctx)
 }
 
 func query(pairs ...string) url.Values {
