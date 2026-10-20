@@ -112,12 +112,28 @@ func (s *Server) getProject(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Доступ актора: уровень и роли, которые он может забирать. Считает их
+	// тот же Auth, что и захват, — clab whoami только печатает ответ, а
+	// эффективные роли зависят от путей через команды и от токена, которых
+	// клиент не видит. allowed_roles: null — любые роли.
+	id := identity(c)
+	level, err := s.auth.ProjectRole(ctx, id, project.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	allowed, err := s.auth.AllowedRoles(ctx, id, project.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"project":            project,
 		"repositories":       repos,
 		"task_property_defs": props,
 		"active_workflows":   workflows,
+		"access":             gin.H{"level": level, "allowed_roles": allowed},
 	})
 }
 

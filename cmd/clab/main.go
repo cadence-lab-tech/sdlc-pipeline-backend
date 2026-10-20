@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type command struct {
@@ -43,7 +44,7 @@ func commands() []command {
 	return []command{
 		{"auth", "вход через браузер, состояние, выход", "clab auth login [--host https://sdlc.example.com] [--days 365] [--no-browser] | clab auth status | clab auth logout | clab auth token", cmdAuth},
 		{"mcp", "подключить локального агента к MCP проекта", "clab mcp install [--project SDLC] [--name sdlc] [--scope local|user] | clab mcp config | clab mcp url", cmdMCP},
-		{"whoami", "кто я и к какому проекту подключён", "clab whoami", cmdWhoami},
+		{"whoami", "кто я, на каком инстансе и что могу в проекте", "clab whoami [--project SDLC]", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4] [--external PROJ-12 | --external jira:PROJ-12]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
@@ -52,7 +53,7 @@ func commands() []command {
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
 		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
-		{"claim", "забрать задачу и получить контекст этапа", "clab claim SDLC-42 [--session ref]", cmdClaim},
+		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md]", cmdClaim},
 		{"heartbeat", "продлить аренду", "clab heartbeat SDLC-42", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
@@ -208,6 +209,12 @@ func requireTask(fs *flag.FlagSet, task string) error {
 
 // ── команды ─────────────────────────────────────────────────────────────────
 
+// cmdWhoami отвечает всегда, когда есть вход: кто я, на каком инстансе и как
+// предъявлен. Проект — дополнительная секция: задан — уровень доступа и роли,
+// которые можно забирать; не задан — строка с подсказкой и код выхода 0.
+// Роли и уровень считает сервер (поле access в GET /projects/:key), CLI их
+// только раскладывает. Сервер старше этих полей или без /instance —
+// соответствующих строк просто нет.
 func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	var projectFlag string
 	_, err := flags("whoami", args, func(fs *flag.FlagSet) {
@@ -216,21 +223,11 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	key, err := c.project(ctx, projectFlag)
+	key, err := c.optionalProject(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
 
-	var view struct {
-		Project struct {
-			Key  string `json:"key"`
-			Name string `json:"name"`
-		} `json:"project"`
-	}
-	if err := c.get(ctx, "/projects/"+key, nil, &view); err != nil {
-		return err
-	}
-	project := view.Project
 	var me struct {
 		Principal struct {
 			Kind   string `json:"kind"`
@@ -242,14 +239,103 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	who := me.Principal.Kind + ":" + me.Principal.Handle
-	return emit(map[string]any{"principal": who, "authenticated": me.Authenticated, "api": c.base, "project": project}, func() error {
+
+	// /instance появилась позже /auth/me: её отсутствие — не повод молчать
+	// про всё остальное.
+	var instance *instanceInfo
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	var info instanceInfo
+	if err := c.get(qctx, "/instance", nil, &info); err == nil {
+		instance = &info
+	}
+	cancel()
+
+	var project *whoamiProject
+	if key != "" {
+		if project, err = c.whoamiProject(ctx, key); err != nil {
+			return err
+		}
+	}
+
+	out := map[string]any{"principal": who, "authenticated": me.Authenticated, "api": c.base,
+		"instance": instance, "project": project}
+	return emit(out, func() error {
 		how := "по токену"
 		if !me.Authenticated {
 			how = "по заголовку"
 		}
-		kv("Кто:", who+" ("+how+")", "API:", c.base, "Проект:", project.Key+" — "+project.Name)
+		pairs := []string{"Кто:", who + " (" + how + ")", "API:", c.base}
+		if instance != nil {
+			line := dash(instance.Version)
+			if instance.Tenancy != "" {
+				line += ", профиль " + instance.Tenancy
+			}
+			pairs = append(pairs, "Инстанс:", line)
+		}
+		if project == nil {
+			pairs = append(pairs, "Проект:", "не задан — --project, SDLC_PROJECT или каталог привязанного репозитория")
+			kv(pairs...)
+			return nil
+		}
+		pairs = append(pairs, "Проект:", project.Key+" — "+project.Name)
+		if a := project.Access; a != nil {
+			roles := "любые"
+			if a.AllowedRoles != nil {
+				roles = joinOr(*a.AllowedRoles, "ни одной")
+			}
+			pairs = append(pairs, "Уровень:", dash(a.Level), "Можно забирать:", roles)
+		}
+		if project.Roles != nil {
+			pairs = append(pairs, "Роли проекта:", joinOr(project.Roles, "нет"))
+		}
+		kv(pairs...)
 		return nil
 	})
+}
+
+// whoamiProject — секция проекта в clab whoami. Access указателем: у сервера
+// до CLAB-146 поля нет, и это не «ни одной роли». AllowedRoles указателем:
+// null — любые, [] — ни одной.
+type whoamiProject struct {
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Access *struct {
+		Level        string    `json:"level"`
+		AllowedRoles *[]string `json:"allowed_roles"`
+	} `json:"access"`
+	Roles []string `json:"roles"`
+}
+
+func (c *Client) whoamiProject(ctx context.Context, key string) (*whoamiProject, error) {
+	var view struct {
+		Project struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+		} `json:"project"`
+		Access json.RawMessage `json:"access"`
+	}
+	if err := c.get(ctx, "/projects/"+url.PathEscape(key), nil, &view); err != nil {
+		return nil, err
+	}
+	p := &whoamiProject{Key: view.Project.Key, Name: view.Project.Name}
+	if len(view.Access) > 0 && string(view.Access) != "null" {
+		if err := decode(view.Access, &p.Access); err != nil {
+			return nil, err
+		}
+	}
+	var roles struct {
+		Roles []struct {
+			Key string `json:"key"`
+		} `json:"roles"`
+	}
+	if err := c.get(ctx, "/projects/"+url.PathEscape(key)+"/roles", nil, &roles); err != nil {
+		return nil, err
+	}
+	p.Roles = []string{}
+	for _, r := range roles.Roles {
+		p.Roles = append(p.Roles, r.Key)
+	}
+	return p, nil
 }
 
 func cmdQueue(ctx context.Context, c *Client, args []string) error {
@@ -338,10 +424,11 @@ func cmdShow(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdClaim(ctx context.Context, c *Client, args []string) error {
-	var session string
+	var session, instructionsFile string
 	task, rest := popTask(args)
 	fs, err := flags("claim", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&session, "session", "", "идентификатор сессии агента")
+		fs.StringVar(&instructionsFile, "instructions-file", "", "записать инструкцию роли в этот файл вместо вывода")
 	})
 	if err != nil {
 		return err
@@ -359,7 +446,23 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 		map[string]any{"session_ref": session}, &out); err != nil {
 		return err
 	}
-	return emit(out, render(renderState, out))
+	// Аренда уже взята: что бы ни случилось с файлом, сводка с прогоном
+	// печатается первой, чтобы агент мог отпустить задачу.
+	if jsonOut {
+		if err := print(out); err != nil {
+			return err
+		}
+		if instructionsFile == "" {
+			return nil
+		}
+		var s stateView
+		if err := decode(out, &s); err != nil {
+			return err
+		}
+		_, err := writeInstructions(s, instructionsFile)
+		return err
+	}
+	return renderClaim(out, instructionsFile)
 }
 
 func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {

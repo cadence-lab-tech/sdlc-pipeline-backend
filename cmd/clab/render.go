@@ -88,9 +88,13 @@ type stateView struct {
 		ExternalRef json.RawMessage `json:"external_ref"`
 	} `json:"task"`
 	Role *struct {
-		Key     string `json:"key"`
-		Name    string `json:"name"`
-		Version int    `json:"version"`
+		Key          string `json:"key"`
+		Name         string `json:"name"`
+		Version      int    `json:"version"`
+		Instructions string `json:"instructions"`
+		// Сырым: форму контракта проверяет сервер, а show не должен падать
+		// из-за поля, которое он не печатает.
+		OutputContract json.RawMessage `json:"output_contract"`
 	} `json:"role"`
 	Lease *struct {
 		ExpiresAt time.Time `json:"expires_at"`
@@ -103,11 +107,19 @@ type stateView struct {
 			RoleHint *string `json:"role_hint"`
 			Primary  bool    `json:"primary"`
 		} `json:"repositories"`
-		PriorArtifacts []json.RawMessage `json:"prior_artifacts"`
+		PriorArtifacts []artifactRef     `json:"prior_artifacts"`
 		Drift          []json.RawMessage `json:"drift"`
 		Rejection      *struct {
-			Reason string `json:"reason"`
+			FromStage               string  `json:"from_stage"`
+			Reason                  string  `json:"reason"`
+			ProblemReportArtifactID *string `json:"problem_report_artifact_id"`
 		} `json:"rejection"`
+		Review *struct {
+			Gate             string        `json:"gate"`
+			Transition       string        `json:"transition"`
+			SubjectRole      string        `json:"subject_role"`
+			SubjectArtifacts []artifactRef `json:"subject_artifacts"`
+		} `json:"review"`
 	} `json:"context"`
 	GatesAhead []struct {
 		Transition string `json:"transition"`
@@ -119,11 +131,30 @@ type stateView struct {
 	} `json:"gates_ahead"`
 }
 
+// artifactRef — ссылка на артефакт в контексте этапа: входы и то, что
+// проверяет ревьюер. Содержимого в захвате нет, только координаты.
+type artifactRef struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Title   string `json:"title"`
+	Stage   string `json:"stage"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
+}
+
 func renderState(raw json.RawMessage) error {
 	var s stateView
 	if err := decode(raw, &s); err != nil {
 		return err
 	}
+	printSummary(s, true)
+	return nil
+}
+
+// printSummary — сводка задачи, общая для show и claim. Причину возврата
+// show показывает одной усечённой строкой, claim — целиком отдельной
+// секцией, поэтому здесь она по флагу.
+func printSummary(s stateView, rejectionLine bool) {
 	fmt.Printf("%s  %s\n", s.Task.Key, s.Task.Title)
 	pairs := []string{
 		"Статус:", fmt.Sprintf("%s (%s), попытка %d, тип %s, приоритет %s",
@@ -164,7 +195,7 @@ func renderState(raw json.RawMessage) error {
 	pairs = append(pairs, "Репозитории:", joinOr(repos, "—"))
 	pairs = append(pairs, "Контекст:", fmt.Sprintf("артефактов ранее %d, сигналов дрейфа %d",
 		len(s.Context.PriorArtifacts), len(s.Context.Drift)))
-	if s.Context.Rejection != nil {
+	if s.Context.Rejection != nil && rejectionLine {
 		pairs = append(pairs, "Возврат:", trunc(s.Context.Rejection.Reason, 120))
 	}
 	kv(pairs...)
@@ -182,7 +213,127 @@ func renderState(raw json.RawMessage) error {
 			fmt.Printf("  %s → %s   гейты: %s\n", tr.Transition, tr.ToStatus, joinOr(gates, "нет"))
 		}
 	}
+}
+
+// renderClaim — ответ захвата: сводка, как у show, и всё, что нужно агенту
+// без MCP, — что сдать, входы, возврат или перепроверка и инструкция роли
+// целиком последней, чтобы длинный текст не прятал остальное. С файлом
+// инструкция пишется в него, и только после того, как всё прочее
+// напечатано: аренда уже взята, и id прогона агенту нужен даже при ошибке.
+func renderClaim(raw json.RawMessage, instructionsFile string) error {
+	var s stateView
+	if err := decode(raw, &s); err != nil {
+		return err
+	}
+	printSummary(s, false)
+
+	if s.Role != nil {
+		printContract(s.Role.OutputContract)
+	}
+	if len(s.Context.PriorArtifacts) == 0 {
+		fmt.Println("Входные артефакты: нет")
+	} else {
+		fmt.Println("Входные артефакты:")
+		printArtifactRefs(s.Context.PriorArtifacts, true)
+	}
+	if r := s.Context.Rejection; r != nil {
+		fmt.Printf("Возврат с этапа %s:\n", dash(r.FromStage))
+		fmt.Println(indent(dash(strings.TrimSpace(r.Reason)), "  "))
+		if id := ptr(r.ProblemReportArtifactID); id != "" {
+			fmt.Println("  описание проблемы:", id)
+		}
+	}
+	if r := s.Context.Review; r != nil {
+		line := "Перепроверка: гейт " + dash(r.Gate)
+		if r.Transition != "" {
+			line += " перехода " + r.Transition
+		}
+		fmt.Println(line + ", проверяется результат роли " + dash(r.SubjectRole) + ":")
+		if len(r.SubjectArtifacts) == 0 {
+			fmt.Println("  артефактов нет")
+		} else {
+			printArtifactRefs(r.SubjectArtifacts, false)
+		}
+	}
+
+	if s.Role == nil {
+		if instructionsFile != "" {
+			return fmt.Errorf("в ответе захвата нет роли: инструкцию в %s писать нечего", instructionsFile)
+		}
+		return nil
+	}
+	head := fmt.Sprintf("Инструкция роли %s v%d", s.Role.Key, s.Role.Version)
+	if instructionsFile != "" {
+		n, err := writeInstructions(s, instructionsFile)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s: %s (%d симв.)\n", head, instructionsFile, n)
+		return nil
+	}
+	fmt.Println(head + ":")
+	fmt.Println(s.Role.Instructions)
 	return nil
+}
+
+// writeInstructions пишет инструкцию роли в файл байт в байт и отвечает
+// длиной в символах.
+func writeInstructions(s stateView, path string) (int, error) {
+	if s.Role == nil {
+		return 0, fmt.Errorf("в ответе захвата нет роли: инструкцию в %s писать нечего", path)
+	}
+	if err := os.WriteFile(path, []byte(s.Role.Instructions), 0o644); err != nil {
+		return 0, fmt.Errorf("инструкция роли не записана в %s: %w", path, err)
+	}
+	return utf8.RuneCountInString(s.Role.Instructions), nil
+}
+
+// printContract — что этап обязан сдать. Контракт не той формы (сервер его
+// проверяет на сохранении роли, так что это чужой сервер) не валит вывод:
+// захват уже случился, и сводка важнее.
+func printContract(raw json.RawMessage) {
+	var items []struct {
+		Kind     string `json:"kind"`
+		Title    string `json:"title"`
+		Format   string `json:"format"`
+		Required bool   `json:"required"`
+	}
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &items); err != nil {
+			fmt.Println("Сдать: контракт роли не разбирается, смотрите --json")
+			return
+		}
+	}
+	if len(items) == 0 {
+		fmt.Println("Сдать: контракт роли пуст")
+		return
+	}
+	fmt.Println("Сдать:")
+	t := newTable("  KIND", "ОБЯЗАТЕЛЬНО", "ФОРМАТ", "ЗАГОЛОВОК")
+	for _, it := range items {
+		t.add("  "+it.Kind, yesNo(it.Required), dash(it.Format), dash(it.Title))
+	}
+	t.print()
+}
+
+func printArtifactRefs(refs []artifactRef, withStage bool) {
+	headers := []string{"  KIND", "ВЕРСИЯ"}
+	if withStage {
+		headers = append(headers, "ЭТАП")
+	}
+	t := newTable(append(headers, "ЗАГОЛОВОК", "ID")...)
+	for _, a := range refs {
+		row := []string{"  " + a.Kind, "v" + strconv.Itoa(a.Version)}
+		if withStage {
+			row = append(row, dash(a.Stage))
+		}
+		t.add(append(row, dash(a.Title), a.ID)...)
+	}
+	t.print()
+}
+
+func indent(text, prefix string) string {
+	return prefix + strings.ReplaceAll(text, "\n", "\n"+prefix)
 }
 
 type gateOutcome struct {
