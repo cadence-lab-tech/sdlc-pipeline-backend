@@ -45,8 +45,8 @@ test-integration:
 # `|| exit 1` не даёт подстановке проглотить код самого gofmt.
 lint:
 	go vet ./...
-	@echo 'gofmt -l cmd internal migrations'; \
-	out=$$(gofmt -l cmd internal migrations) || exit 1; \
+	@echo 'gofmt -l cmd internal migrations agentkit'; \
+	out=$$(gofmt -l cmd internal migrations agentkit) || exit 1; \
 	if [ -n "$$out" ]; then \
 		echo 'неформатированные файлы, исправить: gofmt -w <файл>' >&2; \
 		echo "$$out" >&2; \
