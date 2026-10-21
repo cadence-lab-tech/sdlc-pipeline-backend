@@ -100,6 +100,15 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	e := i.e
 	oldVersion := i.version
 	backups := i.backupsDir()
+	// Бинарь пакета этой установки апгрейд заменяет бинарём целевой версии:
+	// предупреждать его о версии новее себя незачем (CLAB-242, R4). Внешний
+	// clab — и под обёрткой (CADENCE_CLAB) — предупреждается как раньше.
+	packageBinary := e.packageBinary(i.dir)
+	// Команды для администратора: под обёрткой пакета — его скрипты.
+	upgradeCmd, restoreCmd := "clab server upgrade", "clab server restore"
+	if e.wrapped() {
+		upgradeCmd, restoreCmd = e.script(i.dir, "upgrade.sh"), "./restore.sh"
+	}
 	// .env перекрывает окружение, как у всех переменных пакета (q7).
 	v, err := newVerifier(ctx, e, i.get("CADENCE_VERIFY"), nothingChanged)
 	if err != nil {
@@ -134,13 +143,13 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	if versionLess(target, oldVersion) {
 		return fmt.Errorf("%s is older than the running %s: downgrades are not supported (migrations only go forward).\n"+
 			"  To return to %s, put its package files back and restore one of its backups:\n%s    %s && %s backups/cadence-%s-<date>.sql.gz",
-			target, oldVersion, target, i.cdHint(), i.packageFilesHint(ctx, target), restoreCommand(target), target)
+			target, oldVersion, target, i.cdHint(), i.packageFilesHint(ctx, target), restoreCommand(target, e.wrapped()), target)
 	}
 	if target == oldVersion {
 		e.ok("already on %s; nothing to do", oldVersion)
 		return nil
 	}
-	if w := targetNewerWarning(e.cli, target); w != "" {
+	if w := targetNewerWarning(e.cli, target); w != "" && !packageBinary {
 		e.warn("%s", w)
 	}
 
@@ -230,9 +239,9 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		if !force {
 			return fmt.Errorf("package files are edited here, and the upgrade would replace them:\n%s\n"+
 				"  Keep settings in .env and compose changes in compose.override.yml (docs/admin.md, \"Local compose changes\"),\n"+
-				"  and put these files back as they were - or run clab server upgrade --force %s to replace them\n"+
+				"  and put these files back as they were - or run %s --force %s to replace them\n"+
 				"  and keep the edited copies in %s/package-%s-<date>.tar.gz. Nothing has changed.",
-				list, target, backups, oldVersion)
+				list, upgradeCmd, target, backups, oldVersion)
 		}
 		e.warn("replacing package files edited here (--force); the edited copies go to %s/package-%s-<date>.tar.gz:", backups, oldVersion)
 		fmt.Fprintln(e.errw, list)
@@ -322,8 +331,8 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	}
 
 	// --- 5. образы и старт ------------------------------------------------------
-	rollback := fmt.Sprintf("%s  tar -xpzf %s   # package files of %s\n  clab server restore --yes %s   # data as of the backup, starts %s",
-		i.cdHint(), shellQuote(i.rel(saved)), oldVersion, shellQuote(i.rel(backup)), oldVersion)
+	rollback := fmt.Sprintf("%s  tar -xpzf %s   # package files of %s\n  %s --yes %s   # data as of the backup, starts %s",
+		i.cdHint(), shellQuote(i.rel(saved)), oldVersion, restoreCmd, shellQuote(i.rel(backup)), oldVersion)
 
 	e.info("pulling images of %s", target)
 	if err := i.composeRun(ctx, false, "pull", "--quiet"); err != nil {
@@ -358,7 +367,7 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	// clab людей и агентов остаётся на старой версии: сказать здесь, где
 	// смотрит администратор.
 	e.say("%s", clabReminder(target))
-	if versionLess(e.cli, target) {
+	if versionLess(e.cli, target) && !packageBinary {
 		e.say("  This clab is %s: update it too, clab server does not manage a stack newer than itself:\n%s",
 			e.cli, updateCLICommands(target, e.brew))
 	}

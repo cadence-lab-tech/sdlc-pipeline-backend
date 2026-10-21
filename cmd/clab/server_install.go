@@ -144,6 +144,7 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	if err != nil {
 		return err
 	}
+	o.dir = dir
 	// Таймаут ожидания проверяется сразу, а не после записи .env.
 	probe := &installation{e: e, dir: dir}
 	if _, err := probe.readyTimeout(); err != nil {
@@ -166,7 +167,11 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		return err
 	}
 	if taken != "" {
-		return nameTaken(name, taken)
+		retry := "clab server install --dir <a new directory>"
+		if e.wrapped() {
+			retry = e.script(dir, "install.sh")
+		}
+		return nameTaken(name, taken, retry)
 	}
 	switch e.arch {
 	case "amd64", "arm64", "":
@@ -185,7 +190,7 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		if version, err = inPlaceVersion(dir, o.version); err != nil {
 			return err
 		}
-		if err := installCompat(e.cli, version, e.brew); err != nil {
+		if err := (&installation{e: e, dir: dir, version: version}).installCompatible(ctx); err != nil {
 			return err
 		}
 		e.info("installing %s in place: %s holds its unpacked package", version, dir)
@@ -295,11 +300,23 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	e.say("")
 	e.say("Next: sign in with the token and follow docs/admin.md (teams, GitHub App, OIDC, CLI):")
 	e.say("  clab auth login --host %s --with-token", signInURL(inst))
-	e.say("Manage the installation with clab server upgrade, backup, restore and status --dir %s.", shellQuote(dir))
-	e.say("Set up nightly backups: 0 3 * * * %s server backup --dir %s >> %s 2>&1",
-		shellQuote(e.self), shellQuote(dir), shellQuote(filepath.Join(dir, "backups", "backup.log")))
-	e.say("and a weekly restore check: 0 5 * * 0 %s server backup verify --dir %s >> %s 2>&1",
-		shellQuote(e.self), shellQuote(dir), shellQuote(filepath.Join(dir, "backups", "backup.log")))
+	backupLog := shellQuote(filepath.Join(dir, "backups", "backup.log"))
+	if e.wrapped() {
+		// Под обёрткой — скрипты пакета, как у install.sh: cron зовёт
+		// backup.sh по абсолютному пути, clab в PATH ему не нужен. У
+		// состояния скрипта нет — его показывает этот clab.
+		backupSh := shellQuote(filepath.Join(dir, "backup.sh"))
+		e.say("Manage the installation with the scripts in %s: ./upgrade.sh, ./backup.sh and ./restore.sh;", shellQuote(dir))
+		e.say("its state: %s server status --dir %s.", shellQuote(e.self), shellQuote(dir))
+		e.say("Set up nightly backups: 0 3 * * * %s >> %s 2>&1", backupSh, backupLog)
+		e.say("and a weekly restore check: 0 5 * * 0 %s verify >> %s 2>&1", backupSh, backupLog)
+	} else {
+		e.say("Manage the installation with clab server upgrade, backup, restore and status --dir %s.", shellQuote(dir))
+		e.say("Set up nightly backups: 0 3 * * * %s server backup --dir %s >> %s 2>&1",
+			shellQuote(e.self), shellQuote(dir), backupLog)
+		e.say("and a weekly restore check: 0 5 * * 0 %s server backup verify --dir %s >> %s 2>&1",
+			shellQuote(e.self), shellQuote(dir), backupLog)
+	}
 	e.say("Copy the backups off this machine: BACKUP_S3_* in .env (docs/admin.md, \"Off-machine copy\").")
 	return nil
 }
@@ -313,8 +330,10 @@ func signInURL(i *installation) string {
 	return "https://" + i.get("SDLC_DOMAIN")
 }
 
-// nameTaken — отказ install.sh на занятом имени, с подсказкой для clab.
-func nameTaken(name, taken string) error {
+// nameTaken — отказ install.sh на занятом имени, с подсказкой для clab;
+// retry — команда установки перед --name: clab server install с новым
+// каталогом или install.sh пакета под обёрткой (CLAB-242).
+func nameTaken(name, taken, retry string) error {
 	var where string
 	switch taken {
 	case "volumes":
@@ -326,9 +345,9 @@ func nameTaken(name, taken string) error {
 	}
 	return fmt.Errorf("the installation name '%s' is taken on this machine: %s.\n"+
 		"  Every installation on one machine needs a name of its own; pick another one with --name:\n"+
-		"    clab server install --dir <a new directory> --name %s-2 ...\n"+
+		"    %s --name %s-2 ...\n"+
 		"  The name is the Docker Compose project of the installation, not a project inside Cadence Lab. Nothing was changed.",
-		name, where, name)
+		name, where, retry, name)
 }
 
 // ── каталог ──────────────────────────────────────────────────────────────────
@@ -360,11 +379,15 @@ func installDir(e *serverEnv, flag string) (dir string, inPlace bool, err error)
 		return "", false, fmt.Errorf("%s exists and is not a directory: pick a new directory with --dir", dir)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, ".env")); err == nil {
+		status, upgrade := "clab server status --dir "+shellQuote(dir), "clab server upgrade --dir "+shellQuote(dir)
+		if e.wrapped() {
+			status, upgrade = shellQuote(e.self)+" server status --dir "+shellQuote(dir), e.script(dir, "upgrade.sh")
+		}
 		return "", false, fmt.Errorf("%s/.env exists: Cadence Lab is already installed there, and install never regenerates secrets\n"+
 			"  (a new POSTGRES_PASSWORD would no longer open the existing database volume). Nothing was changed.\n"+
-			"  - its state:  clab server status --dir %s\n"+
-			"  - upgrade:    clab server upgrade --dir %s",
-			dir, shellQuote(dir), shellQuote(dir))
+			"  - its state:  %s\n"+
+			"  - upgrade:    %s",
+			dir, status, upgrade)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -515,7 +538,7 @@ func installAnswers(e *serverEnv, o installOptions) (*installAnswersT, error) {
 				return nil, fmt.Errorf("port %d is already in use on this machine; tls mode needs ports 80 and 443 (or use --mode proxy behind the existing web server)", port)
 			}
 		}
-		checkDomain(e, a.domain)
+		checkDomain(e, a.domain, o.dir)
 		a.composeFile = "docker-compose.yml:compose.tls.yml:compose.override.yml"
 	case "proxy":
 		if a.httpAddr, err = q.ask("Address Caddy listens on for your proxy ([ip:]port)", a.httpAddr, "127.0.0.1:8080"); err != nil {
@@ -691,11 +714,18 @@ func realPortBusy(host string, port int) bool {
 // checkDomain — предупреждения install.sh про DNS: сертификат выдаётся,
 // только если домен указывает на эту машину. Это не отказ: за NAT адреса
 // и должны различаться.
-func checkDomain(e *serverEnv, domain string) {
+//
+// dir — каталог установки: под обёрткой пакета подсказка называет его
+// install.sh (CLAB-242).
+func checkDomain(e *serverEnv, domain, dir string) {
 	resolved, err := e.lookupHost(domain)
 	if err != nil || len(resolved) == 0 {
+		install := "clab server install"
+		if e.wrapped() {
+			install = e.script(dir, "install.sh")
+		}
 		e.warn("%s does not resolve. Create a DNS record pointing at this machine before the first start,", domain)
-		e.warn("or install in proxy mode behind your reverse proxy: clab server install --mode proxy")
+		e.warn("or install in proxy mode behind your reverse proxy: %s --mode proxy", install)
 		return
 	}
 	local := e.localAddrs()
@@ -924,8 +954,12 @@ func externalPrecheck(ctx context.Context, e *serverEnv, dir, version, name stri
 	defer func() { _, _ = output(ctx, e.run, probe.compose("down", "-v", "--remove-orphans")) }()
 
 	e.info("checking the external database %s", dbTarget(a.dbURL))
+	again := "clab server install --dir " + shellQuote(dir)
+	if e.wrapped() {
+		again = e.script(dir, "install.sh")
+	}
 	notReady := fmt.Errorf("the external database is not ready (see above). .env was not written:\n"+
-		"  fix the database or the URL and run clab server install --dir %s again with the same flags (docs/admin.md, \"External PostgreSQL\")", shellQuote(dir))
+		"  fix the database or the URL and run %s again with the same flags (docs/admin.md, \"External PostgreSQL\")", again)
 	if err := probe.dbCheck(ctx, probe.compose("run", "--rm", "--no-deps", "-T", "api", "dbcheck", "--install")); err != nil {
 		return notReady
 	}

@@ -407,9 +407,12 @@ func (i *installation) packageFilesHint(ctx context.Context, v string) string {
 
 // restoreCommand — чем восстанавливать бэкап версии v после того, как её
 // файлы на месте: clab server для версий с пакетом, restore.sh — для более
-// ранних, которыми clab server не управляет.
-func restoreCommand(v string) string {
-	if versionLess(v, firstPackageVersion) {
+// ранних, которыми clab server не управляет. Под обёрткой пакета (wrapped,
+// CLAB-242) — всегда restore.sh: после возврата файлов пакета прежней
+// версии он есть у любой из них, bash или обёртка, а clab в PATH может не
+// быть.
+func restoreCommand(v string, wrapped bool) string {
+	if wrapped || versionLess(v, firstPackageVersion) {
 		return "./restore.sh"
 	}
 	return "clab server restore"

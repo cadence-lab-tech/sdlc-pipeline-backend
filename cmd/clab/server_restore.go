@@ -58,7 +58,13 @@ func serverRestore(ctx context.Context, e *serverEnv, args []string) error {
 	}
 	switch {
 	case len(pos) == 0:
-		return usageError{"which backup? clab server restore backups/cadence-<version>-<date>.sql.gz"}
+		cmd := "clab server restore"
+		if e.wrapped() {
+			// Каталог — только для пути к скрипту; не нашёлся — ./restore.sh.
+			where, _ := findInstallation(e, dir)
+			cmd = e.script(where, "restore.sh")
+		}
+		return usageError{"which backup? " + cmd + " backups/cadence-<version>-<date>.sql.gz"}
 	case len(pos) > 1:
 		return usageError{"one backup file at a time"}
 	}
@@ -107,7 +113,7 @@ func serverRestore(ctx context.Context, e *serverEnv, args []string) error {
 		return fmt.Errorf("the backup was taken on %s, the package is on %s.\n"+
 			"  Put the package files of %s in place first, then restore:\n%s    %s && %s %s",
 			backupVersion, inst.version, backupVersion, inst.cdHint(),
-			inst.packageFilesHint(ctx, backupVersion), restoreCommand(backupVersion), shellQuote(inst.rel(path)))
+			inst.packageFilesHint(ctx, backupVersion), restoreCommand(backupVersion, e.wrapped()), shellQuote(inst.rel(path)))
 	}
 
 	blobs := strings.TrimSuffix(path, ".sql.gz") + ".blobs.tar.gz"

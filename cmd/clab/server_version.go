@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -68,8 +69,42 @@ func installCompat(cli, v string, brew bool) error {
 	return nil
 }
 
-func (i *installation) compatible() error {
+// compatible — правило версий для этой установки. Бинарь её пакета
+// (packageBinary) старше VERSION бывает, только если файлы пакета
+// разошлись: upgrade заменяет его вместе с VERSION. Тогда отказ называет
+// бинарь пакета и печатает, как вернуть файлы пакета версии, а не как
+// обновить clab из тапа (CLAB-242, R5).
+func (i *installation) compatible(ctx context.Context) error {
+	if i.packageBinaryStale() {
+		return i.packageMismatch(ctx)
+	}
 	return stackCompat(i.e.cli, i.version, i.e.brew)
+}
+
+// installCompatible — правило версий install для пакета, распакованного в
+// каталоге установки (установка на месте), с тем же отказом для бинаря
+// пакета, что у compatible.
+func (i *installation) installCompatible(ctx context.Context) error {
+	if i.packageBinaryStale() {
+		return i.packageMismatch(ctx)
+	}
+	return installCompat(i.e.cli, i.version, i.e.brew)
+}
+
+// packageBinaryStale — работает бинарь пакета установки, и он старше
+// VERSION. Версии до пакетов отказывают своим текстом раньше: у них
+// бинаря в пакете нет.
+func (i *installation) packageBinaryStale() bool {
+	return i.e.packageBinary(i.dir) && !versionLess(i.version, firstPackageVersion) && versionLess(i.e.cli, i.version)
+}
+
+// packageMismatch — отказ R5: бинарь пакета (путь и версия) против VERSION
+// и команда, которая ставит файлы пакета версии VERSION на место. Команд
+// тапа в нём нет: этот clab обновляют файлы пакета, а не brew.
+func (i *installation) packageMismatch(ctx context.Context) error {
+	return fmt.Errorf("clab %s at %s is the clab of this package, but VERSION is %s: the package files do not match VERSION.\n"+
+		"  Put the package files of %s in place, then run the command again:\n%s    %s",
+		i.e.cli, shellQuote(i.e.self), i.version, i.version, i.cdHint(), i.packageFilesHint(ctx, i.version))
 }
 
 // targetNewerWarning — предупреждение upgrade на версию новее clab; пусто,

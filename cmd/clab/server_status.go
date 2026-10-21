@@ -44,7 +44,7 @@ func serverStatus(ctx context.Context, e *serverEnv, args []string) error {
 	}
 
 	compat, compatible := "yes", true
-	if err := inst.compatible(); err != nil {
+	if err := inst.compatible(ctx); err != nil {
 		compat, compatible = err.Error(), false
 	}
 	view := map[string]any{

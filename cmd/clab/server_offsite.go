@@ -141,7 +141,11 @@ func (i *installation) fetch(ctx context.Context, name string) error {
 		return fmt.Errorf("fetching from %s failed (see above)", i.offsiteLocation())
 	}
 	dump := filepath.Join(dir, firstLine(got))
-	i.e.ok("%s; restore it with: clab server restore --yes %s", i.rel(dump), shellQuote(i.rel(dump)))
+	restore := "clab server restore"
+	if i.e.wrapped() {
+		restore = i.e.script(i.dir, "restore.sh")
+	}
+	i.e.ok("%s; restore it with: %s --yes %s", i.rel(dump), restore, shellQuote(i.rel(dump)))
 	return nil
 }
 

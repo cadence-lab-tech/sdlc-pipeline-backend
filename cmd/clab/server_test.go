@@ -922,7 +922,7 @@ func TestPackageFilesHint(t *testing.T) {
 	if got := inst.packageFilesHint(ctx, "v0.5.2"); got != "git fetch --tags upstream && git -c advice.detachedHead=false checkout --force v0.5.2" {
 		t.Errorf("no tag in the clone: %q", got)
 	}
-	if restoreCommand("v0.5.2") != "./restore.sh" || restoreCommand("v0.6.0") != "clab server restore" {
+	if restoreCommand("v0.5.2", false) != "./restore.sh" || restoreCommand("v0.6.0", false) != "clab server restore" {
 		t.Error("restoreCommand")
 	}
 }
