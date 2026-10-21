@@ -77,16 +77,46 @@ func (s *Server) registerTools() {
 		s.release)
 }
 
-// add регистрирует тул. Через неё проходит каждый вызов, дошедший до тула,
-// и здесь же он пишется в журнал действий (CLAB-210): новый тул без записи
-// завести нельзя.
+// add регистрирует тул. Через неё проходит каждый вызов, дошедший до тула:
+// здесь стоит белый список токена задачи (CLAB-208) — тул, которого нет в
+// перечне workflow, токену задачи закрыт, даже если о нём забыли подумать, —
+// и здесь же вызов пишется в журнал действий (CLAB-210), отказ тоже: новый
+// тул без проверки и записи завести нельзя.
 func add[In any](s *Server, name, description string, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
 	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Description: description},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
-			res, out, err := h(ctx, in)
+			var (
+				res *sdk.CallToolResult
+				out any
+				err error
+			)
+			if denied := s.executorMay(ctx, name); denied != nil {
+				res, out, err = fail(denied)
+			} else {
+				res, out, err = h(ctx, in)
+			}
 			s.recordCall(ctx, name, in, res, err)
 			return res, out, err
 		})
+}
+
+// addPrompt регистрирует промпт с тем же белым списком, что у тулов.
+func (s *Server) addPrompt(p *sdk.Prompt, h sdk.PromptHandler) {
+	s.mcp.AddPrompt(p, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
+		if err := s.executorMay(ctx, workflow.PromptAction(p.Name)); err != nil {
+			return nil, err
+		}
+		return h(ctx, req)
+	})
+}
+
+// executorMay — белый список токена задачи. Сервер без Auth собирают только
+// тесты промптов и версии: прав там нет вовсе.
+func (s *Server) executorMay(ctx context.Context, action string) error {
+	if s.auth == nil {
+		return nil
+	}
+	return s.auth.ExecutorMay(identity(ctx), action)
 }
 
 // ── кто я ───────────────────────────────────────────────────────────────────
@@ -666,7 +696,8 @@ func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sd
 	if in.Reason != "" {
 		comment = in.Reason
 	}
-	res, err := s.engine.Execute(ctx, taskKey, in.Transition, actor(ctx).ID, comment)
+	res, err := s.engine.ExecuteBound(ctx, taskKey, in.Transition, actor(ctx).ID,
+		s.auth.Bound(identity(ctx)), comment)
 	if err != nil {
 		return fail(err)
 	}

@@ -480,7 +480,20 @@ func (a *Auth) VisibleProjects(ctx context.Context, id Identity) ([]domain.Proje
 	if !a.Enforced() {
 		return a.store.ListProjects(ctx, a.store.DB())
 	}
-	return a.store.ListProjectsFor(ctx, a.store.DB(), id.Principal)
+	projects, err := a.store.ListProjectsFor(ctx, a.store.DB(), id.Principal)
+	if err != nil || a.Bound(id) == nil || id.Token.ProjectID == nil {
+		return projects, err
+	}
+	// Токен задачи видит только проект своей задачи (CLAB-208): по нему clab
+	// находит проект по git remote, а где ещё состоит держатель аренды,
+	// исполнителю этапа знать незачем.
+	own := []domain.Project{}
+	for _, p := range projects {
+		if p.ID == *id.Token.ProjectID {
+			own = append(own, p)
+		}
+	}
+	return own, nil
 }
 
 // ListPrincipals — все заведённые в системе. Спрашивает страница
