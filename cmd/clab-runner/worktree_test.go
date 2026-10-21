@@ -481,6 +481,10 @@ func TestWorkRunsAgentInCopy(t *testing.T) {
 			released = append(released, string(body))
 			mu.Unlock()
 		}
+		if strings.HasSuffix(req.URL.Path, "/task-token") {
+			_, _ = w.Write([]byte(`{"token":"clab_task_x","record":{"id":"t-1"}}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()

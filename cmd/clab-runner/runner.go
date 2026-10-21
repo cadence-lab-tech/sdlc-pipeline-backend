@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,13 +22,16 @@ type runner struct {
 	api *client
 	// Рабочие копии задач; nil — раннер без клонов, агент в его каталоге.
 	ws *workspaces
+	// Окружение раннера, из которого собирается окружение агента; в тестах
+	// подменяется.
+	environ func() []string
 
 	mu      sync.Mutex
 	running map[string]bool
 }
 
 func newRunner(cfg Config, log *slog.Logger) *runner {
-	r := &runner{cfg: cfg, log: log, api: newClient(cfg), running: map[string]bool{}}
+	r := &runner{cfg: cfg, log: log, api: newClient(cfg), environ: os.Environ, running: map[string]bool{}}
 	if cfg.ReposDir != "" {
 		r.ws = newWorkspaces(cfg.ReposDir, cfg.WorktreesDir, log)
 	}
@@ -84,8 +90,9 @@ func (r *runner) dispatch(ctx context.Context, slots chan struct{}, wg *sync.Wai
 
 		// Задачу забирает раннер, а не запущенный им агент: иначе два слота
 		// увидели бы одну свободную задачу и подняли бы двух агентов на неё.
-		// Агент ходит тем же токеном, поэтому его собственный захват — это
-		// подтверждение уже своей аренды, а не спор за неё.
+		// Агент ходит токеном задачи на эту аренду — тот же принципал, что у
+		// раннера, — поэтому его собственный захват — это подтверждение уже
+		// своей аренды, а не спор за неё.
 		claim, err := r.api.claim(ctx, item.Task.Key, "runner")
 		if err != nil {
 			<-slots
@@ -145,6 +152,12 @@ func (r *runner) mark(task string, busy bool) {
 
 // work поднимает агента на задачу, держит аренду живой, пока он работает, и
 // отчитывается о стоимости по его выводу.
+//
+// Агент ходит не токеном раннера, а токеном задачи на захваченный прогон
+// (решение 0049): раннер выпускает его после захвата, кладёт в mcp.json и
+// конфиг clab агента и отзывает, когда агент закончил. Аренду, отпуск и
+// отчёт о стоимости раннер по-прежнему ведёт своим токеном: токен задачи
+// гаснет на переходе, а отчёт идёт после него.
 func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	log := r.log.With("task", item.Task.Key, "role", claim.roleKey(item.RoleKey))
 
@@ -159,21 +172,33 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	defer r.cleanupWorkspace(ctx, space)
 	workdir := space.dir()
 
-	config, cleanup, err := r.mcpConfig()
-	if err != nil {
-		log.Error("не собрать конфигурацию MCP", "error", err)
-		r.releaseQuietly(ctx, item.Task.Key, "раннер не смог подготовить запуск")
-		return
-	}
-	defer cleanup()
-
-	argv := r.argv(item, claim, config, workdir)
 	if r.cfg.DryRun {
-		log.Info("сухой прогон", "argv", strings.Join(argv, " "), "workdir", workdir)
+		// Токен задачи в сухом прогоне не выпускается: он гас бы через
+		// секунду вместе с отпущенной арендой, а след в ленте остался бы.
+		argv := r.argv(item, claim, "<mcp.json>", workdir)
+		log.Info("сухой прогон: агент получил бы токен задачи и окружение по списку",
+			"argv", strings.Join(argv, " "), "workdir", workdir)
 		r.releaseQuietly(ctx, item.Task.Key, "сухой прогон раннера")
 		return
 	}
-	log.Info("запуск агента", "model", claim.model(), "command", argv[0], "workdir", workdir)
+
+	creds, ok := r.agentCredentials(ctx, log, item.Task.Key)
+	if !ok {
+		return
+	}
+	defer r.revokeQuietly(ctx, log, creds)
+
+	home, err := r.agentHome(creds)
+	if err != nil {
+		log.Error("не собрать конфигурацию агента", "error", err)
+		r.releaseQuietly(ctx, item.Task.Key, "раннер не смог подготовить запуск")
+		return
+	}
+	defer home.cleanup()
+
+	argv := r.argv(item, claim, home.mcpConfig, workdir)
+	log.Info("запуск агента", "model", claim.model(), "command", argv[0], "workdir", workdir,
+		"credentials", creds.kind())
 
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
@@ -181,6 +206,7 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	stop := r.keepLease(runCtx, item.Task.Key, claim)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
+	cmd.Env = r.agentEnv(creds, home)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	stop()
@@ -202,6 +228,67 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	} else {
 		// Молчание честнее выдуманного нуля: прогон останется «неизвестно».
 		log.Info("агент отработал, стоимость неизвестна")
+	}
+}
+
+// agentCreds — чем агент представляется серверу: токеном задачи, а у
+// сервера без ручки выпуска — токеном раннера или его актором заголовка.
+// Значения не печатаются: у типа свой LogValue.
+type agentCreds struct {
+	token   string
+	actor   string
+	tokenID string // запись токена задачи; пусто — отзывать нечего
+}
+
+func (c agentCreds) kind() string {
+	switch {
+	case c.tokenID != "":
+		return "task"
+	case c.token != "":
+		return "runner"
+	default:
+		return "actor"
+	}
+}
+
+func (c agentCreds) LogValue() slog.Value { return slog.StringValue(c.kind()) }
+
+// agentCredentials выпускает токен задачи. Откат на учётные данные раннера —
+// только у сервера, который ручки не знает: любой другой отказ значит, что
+// с арендой что-то не так, и агент не запускается вовсе.
+func (r *runner) agentCredentials(ctx context.Context, log *slog.Logger, task string) (agentCreds, bool) {
+	issued, err := r.api.issueTaskToken(ctx, task)
+	switch {
+	case err == nil:
+		return agentCreds{token: issued.Token, tokenID: issued.Record.ID}, true
+	case noRoute(err):
+		log.Warn("сервер не выдаёт токен задачи: агент получил токен раннера; обновите сервер")
+		return agentCreds{token: r.cfg.Token, actor: r.cfg.Actor}, true
+	default:
+		log.Error("токен задачи не выпущен, агент не запущен", "error", err)
+		r.releaseQuietly(ctx, task, "раннер не выпустил токен задачи: "+errCode(err))
+		return agentCreds{}, false
+	}
+}
+
+// revokeQuietly отзывает токен задачи, когда агент закончил, чем бы ни
+// кончилось. После перехода или release он уже мёртв, и 401 или 404 на
+// отзыв — штатный исход, а не повод шуметь.
+func (r *runner) revokeQuietly(ctx context.Context, log *slog.Logger, creds agentCreds) {
+	if creds.tokenID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	err := r.api.revokeToken(ctx, creds.tokenID)
+	var apiErr *apiError
+	switch {
+	case err == nil:
+		log.Debug("токен задачи отозван", "token_id", creds.tokenID)
+	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusUnauthorized):
+		log.Debug("токен задачи уже недействителен", "token_id", creds.tokenID)
+	default:
+		log.Warn("токен задачи не отозван", "token_id", creds.tokenID, "error", err)
 	}
 }
 
@@ -307,38 +394,98 @@ func prompt(task, role string) string {
 	return "/mcp__sdlc__work_on_task " + task + " " + role
 }
 
-// mcpConfig пишет временную конфигурацию MCP для запускаемого агента: тот же
-// проект, тот же токен. Файл живёт ровно столько, сколько работает агент.
-func (r *runner) mcpConfig() (string, func(), error) {
-	body := map[string]any{
-		"mcpServers": map[string]any{
-			"sdlc": map[string]any{
-				"type": "http",
-				"url":  r.cfg.mcpURL(),
-			},
-		},
-	}
-	server := body["mcpServers"].(map[string]any)["sdlc"].(map[string]any)
-	if r.cfg.Token != "" {
-		server["headers"] = map[string]string{"Authorization": "Bearer " + r.cfg.Token}
+// agentDir — временный каталог агента: mcp.json и конфиг clab с его
+// учётными данными. Живёт ровно столько, сколько работает агент.
+type agentDir struct {
+	root      string
+	mcpConfig string // путь к mcp.json
+	clabDir   string // CLAB_CONFIG_DIR агента
+}
+
+func (d agentDir) cleanup() { os.RemoveAll(d.root) }
+
+// agentHome пишет временный каталог агента. mcp.json — сервер проекта с
+// учётными данными агента; рядом каталог для CLAB_CONFIG_DIR с config.json в
+// формате clab (cmd/clab/config.go), чтобы clab в агенте по умолчанию шёл
+// токеном задачи, а не конфигом сотрудника из ~/.config/clab.
+func (r *runner) agentHome(creds agentCreds) (agentDir, error) {
+	server := map[string]any{"type": "http", "url": r.cfg.mcpURL()}
+	if creds.token != "" {
+		server["headers"] = map[string]string{"Authorization": "Bearer " + creds.token}
 	} else {
-		server["headers"] = map[string]string{"X-SDLC-Actor": r.cfg.Actor}
+		server["headers"] = map[string]string{"X-SDLC-Actor": creds.actor}
+	}
+	mcpRaw, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"sdlc": server}})
+	if err != nil {
+		return agentDir{}, err
+	}
+	host, origin, err := apiOrigin(r.cfg.APIURL)
+	if err != nil {
+		return agentDir{}, err
+	}
+	hostConfig := map[string]any{"url": origin}
+	if creds.token != "" {
+		hostConfig["token"] = creds.token
+	}
+	clabRaw, err := json.MarshalIndent(map[string]any{
+		"default_host": host,
+		"hosts":        map[string]any{host: hostConfig},
+	}, "", "  ")
+	if err != nil {
+		return agentDir{}, err
 	}
 
-	raw, err := json.Marshal(body)
+	root, err := os.MkdirTemp("", "clab-runner-*") // 0700
 	if err != nil {
-		return "", func() {}, err
+		return agentDir{}, err
 	}
-	dir, err := os.MkdirTemp("", "clab-runner-*")
-	if err != nil {
-		return "", func() {}, err
+	d := agentDir{
+		root:      root,
+		mcpConfig: filepath.Join(root, "mcp.json"),
+		clabDir:   filepath.Join(root, "clab"),
 	}
-	path := filepath.Join(dir, "mcp.json")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		os.RemoveAll(dir)
-		return "", func() {}, err
+	if err := os.WriteFile(d.mcpConfig, mcpRaw, 0o600); err != nil {
+		d.cleanup()
+		return agentDir{}, err
 	}
-	return path, func() { os.RemoveAll(dir) }, nil
+	if err := os.Mkdir(d.clabDir, 0o700); err != nil {
+		d.cleanup()
+		return agentDir{}, err
+	}
+	if err := os.WriteFile(filepath.Join(d.clabDir, "config.json"), append(clabRaw, '\n'), 0o600); err != nil {
+		d.cleanup()
+		return agentDir{}, err
+	}
+	return d, nil
+}
+
+// apiOrigin — хост и адрес инстанса из SDLC_API_URL без хвоста /v1: так их
+// хранит конфиг clab (normalizeHost в cmd/clab; пакеты main разные, импорт
+// невозможен).
+func apiOrigin(apiURL string) (host, origin string, err error) {
+	u, err := url.Parse(strings.TrimSpace(apiURL))
+	if err != nil || u.Host == "" || u.Scheme == "" {
+		return "", "", fmt.Errorf("SDLC_API_URL %q не разбирается как адрес", apiURL)
+	}
+	path := strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
+	return u.Host, u.Scheme + "://" + u.Host + path, nil
+}
+
+// agentEnv — окружение агента: базовый список и SDLC_RUNNER_ENV из окружения
+// раннера, а SDLC_* и CLAB_CONFIG_DIR — заданные раннером. У сервера без
+// ручки токена задачи в режиме заголовка агенту уходит актор раннера, как
+// раньше уходил через наследование.
+func (r *runner) agentEnv(creds agentCreds, home agentDir) []string {
+	set := map[string]string{
+		"SDLC_API_URL":    r.cfg.APIURL,
+		"SDLC_PROJECT":    r.cfg.Project,
+		"SDLC_TOKEN":      creds.token,
+		"CLAB_CONFIG_DIR": home.clabDir,
+	}
+	if creds.token == "" {
+		set["SDLC_ACTOR"] = creds.actor
+	}
+	return agentEnv(r.environ(), r.cfg.AgentEnv, set)
 }
 
 func (c claimResult) roleKey(fallback string) string {

@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
 )
 
-// Клиент REST: раннеру нужны пять ручек, и клиентская библиотека ради них не
+// Клиент REST: раннеру нужны семь ручек, и клиентская библиотека ради них не
 // окупается. Ошибки домена приезжают кодом — по нему раннер отличает «занято
 // другим» от «нет прав».
 type client struct {
@@ -31,9 +33,40 @@ func newClient(cfg Config) *client {
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Статус ответа: код домена есть не всегда, а 401 и 404 раннер различает
+	// и без него.
+	Status int `json:"-"`
 }
 
-func (e *apiError) Error() string { return e.Code + ": " + e.Message }
+func (e *apiError) Error() string {
+	if e.Code == "" {
+		return e.Message
+	}
+	return e.Code + ": " + e.Message
+}
+
+// noRoute — ответ 404 без кода домена: такой ручки у сервера нет. Сервер
+// отвечает на неизвестный маршрут штатным 404 gin текстом, а на «задачи нет»
+// — JSON с code: not_found; по этой разнице раннер узнаёт сервер прежней
+// версии.
+func noRoute(err error) bool {
+	var e *apiError
+	return errors.As(err, &e) && e.Status == http.StatusNotFound && e.Code == ""
+}
+
+// errCode — что написать в ленту задачи об отказе: код домена, иначе статус,
+// иначе текст ошибки сети.
+func errCode(err error) string {
+	var e *apiError
+	switch {
+	case errors.As(err, &e) && e.Code != "":
+		return e.Code
+	case errors.As(err, &e):
+		return http.StatusText(e.Status)
+	default:
+		return err.Error()
+	}
+}
 
 func (c *client) do(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
@@ -72,9 +105,11 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 			Error apiError `json:"error"`
 		}
 		if json.Unmarshal(raw, &wrapper) == nil && wrapper.Error.Code != "" {
+			wrapper.Error.Status = resp.StatusCode
 			return &wrapper.Error
 		}
-		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
+		return &apiError{Status: resp.StatusCode,
+			Message: fmt.Sprintf("%s %s: %s", method, path, resp.Status)}
 	}
 	if out == nil {
 		return nil
@@ -170,4 +205,37 @@ func (c *client) reportUsage(ctx context.Context, task, runID string, body map[s
 		path = "/tasks/" + task + "/runs/" + runID + "/usage"
 	}
 	return c.do(ctx, http.MethodPost, path, body, nil)
+}
+
+// taskToken — токен задачи на захваченный прогон (решение 0049, CLAB-212).
+// Значение не печатается: ни в журнал, ни в argv — у него свой LogValue.
+type taskToken struct {
+	Token  string `json:"token"`
+	Record struct {
+		ID string `json:"id"`
+	} `json:"record"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+func (t taskToken) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("id", t.Record.ID), slog.String("token", "<скрыт>"))
+}
+
+// issueTaskToken выпускает токен задачи держателю аренды — раннеру, своим
+// токеном. Сервер прежней версии ручки не знает: это noRoute.
+func (c *client) issueTaskToken(ctx context.Context, task string) (taskToken, error) {
+	var out taskToken
+	if err := c.do(ctx, http.MethodPost, "/tasks/"+task+"/task-token", map[string]any{}, &out); err != nil {
+		return out, err
+	}
+	if out.Token == "" || out.Record.ID == "" {
+		return out, fmt.Errorf("сервер выпустил токен задачи без значения или идентификатора")
+	}
+	return out, nil
+}
+
+// revokeToken отзывает токен по идентификатору записи. Свой токен задачи
+// раннер отзывает как его владелец.
+func (c *client) revokeToken(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/auth/tokens/"+url.PathEscape(id), nil, nil)
 }
