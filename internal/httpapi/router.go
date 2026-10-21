@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -37,6 +38,8 @@ type Server struct {
 	version string
 	// Метрики эксплуатации (CLAB-126); nil — выключены, методы nil-безопасны.
 	ops *metrics.API
+	// Провайдер трассировок (CLAB-204); nil — выключены.
+	tracer trace.TracerProvider
 	// Журнал действий (CLAB-210): один писатель на процесс, общий с MCP.
 	audit *workflow.Audit
 }
@@ -59,7 +62,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	r := gin.New()
-	r.Use(requestID(), requestLog(s.log), requestMetrics(s.ops), recovery(s.log))
+	r.Use(requestID(), requestLog(s.log), requestMetrics(s.ops), requestTracing(s.tracer), recovery(s.log))
 	r.Use(serverVersion(s.buildVersion()))
 
 	// Пробы вне группы с резолвом актора: kubelet не присылает заголовков и не

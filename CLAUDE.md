@@ -29,6 +29,10 @@ MCP — официальный `github.com/modelcontextprotocol/go-sdk`, схе�
 `github.com/prometheus/client_golang`: формат exposition, OpenMetrics по
 `Accept` и коллекторы рантайма и процесса — это не одна ручка, а формат,
 который читает чужой Prometheus.
+Трассировки api — OpenTelemetry SDK с экспортёром OTLP/HTTP
+(`internal/tracing`, CLAB-204): протокол и переменные `OTEL_*` стандартны, их
+читает сборщик клиента. SDK и экспортёр импортирует только `cmd/api` —
+воркер и `clab` их не тянут, это держит `TestOnlyAPILinksSDK`.
 
 ## Структура
 
@@ -80,6 +84,8 @@ internal/
   blobstore/        вынос крупного содержимого: каталог и S3 за одним интерфейсом
   metrics/          метрики эксплуатации api и воркера (Prometheus) и их
                     отдельный слушатель SDLC_METRICS_ADDR
+  tracing/          OTLP/HTTP-трассировки api: включение только явными OTEL_*,
+                    провайдер с версией сборки; спан на запрос — httpapi
 migrations/         схема и сиды; embed.go встраивает их в бинарник
 agentkit/           набор агента для пользователей: скилы и саб-агент Claude Code
                     на английском, встроены в api (go:embed), отдаёт их
