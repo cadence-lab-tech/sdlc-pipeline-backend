@@ -487,6 +487,43 @@ func TestVerifyUpgradeModes(t *testing.T) {
 	}
 }
 
+// AC-8, AC-9, AC-13: строки таблицы режимов для апгрейда, которых нет выше, —
+// нет cosign в auto, образ без pin в require, ghcr.io не отвечает.
+func TestVerifyUpgradeNoCosignUnpinnedUnreachable(t *testing.T) {
+	f := verifyUpgradeSetup(t, "", nil)
+	f.r.cosign = false
+	if code := f.upgrade("v0.13.0"); code != 0 ||
+		countLines(f.errw.String(), "! cosign 3.x is not installed: the signatures of the release are not verified (CADENCE_VERIFY=auto)") != 1 ||
+		len(cosignCalls(f.r)) != 0 {
+		t.Errorf("auto, no cosign: %d %v\n%s", code, cosignCalls(f.r), f.errw)
+	}
+
+	g := verifyUpgradeSetup(t, "CADENCE_FRONTEND_DIGEST=\n", map[string]string{"CADENCE_VERIFY": "require"})
+	before := tree(t, g.dir)
+	if code := g.upgrade("v0.13.0"); code != 1 ||
+		!strings.Contains(g.errw.String(), "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v0.13.0 is not pinned to a digest (an empty CADENCE_FRONTEND_DIGEST, or compose.override.yml), and CADENCE_VERIFY=require verifies images by digest only. Nothing has changed.") {
+		t.Errorf("require, unpinned: %d\n%s", code, g.errw)
+	}
+	g.unchanged(t, before)
+
+	for _, mode := range []string{"auto", "require"} {
+		h := verifyUpgradeSetup(t, "", map[string]string{"CADENCE_VERIFY": mode})
+		h.r.cosignBad, h.r.ghcrDown = "sdlc-pipeline-backend", true
+		before := tree(t, h.dir)
+		code := h.upgrade("v0.13.0")
+		if mode == "auto" {
+			if code != 0 || !strings.Contains(h.errw.String(), "! images not verified: ghcr.io is unreachable from this host") {
+				t.Errorf("auto, ghcr.io down: %d\n%s", code, h.errw)
+			}
+			continue
+		}
+		if code != 1 || !strings.Contains(h.errw.String(), "the images cannot be verified: ghcr.io is unreachable from this host, and CADENCE_VERIFY=require needs it (the signatures are checked there by digest). Nothing has changed.") {
+			t.Errorf("require, ghcr.io down: %d\n%s", code, h.errw)
+		}
+		h.unchanged(t, before)
+	}
+}
+
 // AC-4: апгрейд на версию до подписей.
 func TestVerifyUpgradeUnsigned(t *testing.T) {
 	for _, mode := range []string{"auto", "require"} {
