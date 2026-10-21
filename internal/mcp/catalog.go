@@ -59,7 +59,7 @@ func (s *Server) registerCatalogTools() {
 // registerPrompts объявляет промпт переноса правил: в Claude Code он
 // доступен как /mcp__sdlc__import_rules и запускает сценарий целиком.
 func (s *Server) registerPrompts() {
-	s.mcp.AddPrompt(&sdk.Prompt{
+	s.addPrompt(&sdk.Prompt{
 		Name: "import_rules",
 		Description: "Перенести правила команды из локального репозитория в проект SDLC: " +
 			"роли, документы, репозитории.",

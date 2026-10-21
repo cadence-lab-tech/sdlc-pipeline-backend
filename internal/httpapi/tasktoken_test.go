@@ -286,9 +286,13 @@ func TestTaskTokenOverREST(t *testing.T) {
 		}
 	}
 
-	// Переход гасит токен: дальше любой вызов — 401 (критерий 18).
-	if code, body := call("POST", "/v1/tasks/SDLC-1/transitions/cancel", tok, nil); code != http.StatusOK {
-		t.Fatalf("переход токеном задачи: %d %v", code, body)
+	// Переход гасит токен: дальше любой вызов — 401 (критерий 18). Снять
+	// задачу токеном задачи нельзя (CLAB-208) — снимает человек.
+	if code, body := call("POST", "/v1/tasks/SDLC-1/transitions/cancel", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("cancel токеном задачи: %d %v", code, body)
+	}
+	if code, body := call("POST", "/v1/tasks/SDLC-1/transitions/cancel", rootToken, nil); code != http.StatusOK {
+		t.Fatalf("переход человеком: %d %v", code, body)
 	}
 	code, body := call("GET", "/v1/tasks/SDLC-1", tok, nil)
 	if code != http.StatusUnauthorized || !strings.Contains(body["error"].(map[string]any)["message"].(string), "токен задачи погас") {

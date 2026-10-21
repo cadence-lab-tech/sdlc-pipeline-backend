@@ -324,6 +324,11 @@ func (s *Server) linkTasks(c *gin.Context) {
 	if req.Rel == "" {
 		req.Rel = domain.TaskLinkBlocks
 	}
+	// Токен задачи связывает только внутри круга своей задачи (CLAB-208).
+	if err := s.auth.RequireLink(c.Request.Context(), identity(c), c.Param("taskKey"), req.Task, req.Rel); err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	links, err := s.engine.LinkTasks(c.Request.Context(), c.Param("taskKey"), req.Task,
 		req.Rel, req.Note, actor(c).ID, req.Remove)
 	if err != nil {
@@ -342,6 +347,10 @@ func (s *Server) assignTask(c *gin.Context) {
 	var req assignRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
+		return
+	}
+	if err := s.auth.RequireWriteCircle(c.Request.Context(), identity(c), c.Param("taskKey"), "назначение"); err != nil {
+		fail(c, s.log, err)
 		return
 	}
 	task, err := s.engine.Assign(c.Request.Context(), c.Param("taskKey"), req.Assignee, actor(c).ID)
@@ -439,8 +448,8 @@ func (s *Server) executeTransition(c *gin.Context) {
 		return
 	}
 
-	res, err := s.engine.Execute(c.Request.Context(),
-		c.Param("taskKey"), c.Param("transitionKey"), actor(c).ID, req.Comment)
+	res, err := s.engine.ExecuteBound(c.Request.Context(),
+		c.Param("taskKey"), c.Param("transitionKey"), actor(c).ID, s.auth.Bound(identity(c)), req.Comment)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -482,7 +491,7 @@ func (s *Server) decideGate(c *gin.Context) {
 
 	out, err := s.engine.DecideGate(c.Request.Context(),
 		c.Param("taskKey"), c.Param("transitionKey"), c.Param("gateKey"),
-		actor(c).ID, req.Status, req.Details)
+		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -506,6 +515,10 @@ func (s *Server) updateTask(c *gin.Context) {
 	var req updateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
+		return
+	}
+	if err := s.auth.RequireWriteCircle(c.Request.Context(), identity(c), c.Param("taskKey"), "правка постановки"); err != nil {
+		fail(c, s.log, err)
 		return
 	}
 	level, err := s.level(c)
