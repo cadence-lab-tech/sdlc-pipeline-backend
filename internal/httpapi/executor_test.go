@@ -22,7 +22,7 @@ var publicV1 = map[string]bool{
 	"GET /v1/auth/oidc": true, "POST /v1/auth/oidc/login": true,
 	"GET /v1/auth/github": true, "POST /v1/auth/github/login": true,
 	"POST /v1/auth/cli": true, "POST /v1/auth/cli/poll": true,
-	"GET /v1/instance": true,
+	"GET /v1/instance": true, "GET /v1/agent-kit": true,
 }
 
 func executorRefused(body map[string]any) bool {
