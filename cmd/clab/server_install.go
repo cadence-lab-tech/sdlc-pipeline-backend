@@ -87,9 +87,18 @@ It runs once: a directory with .env is refused, and nothing is changed there
 .env is written. If the stack does not start after that, .env is kept and the
 command prints how to start it.
 
+With cosign 3.x in PATH it verifies the signature of checksums.txt of the
+release (before anything is unpacked) and of both images of the version at
+ghcr.io by the digests docker-compose.yml pins (before the answers, the check
+of an external database and .env); installed in place, the images only.
+CADENCE_VERIFY decides the rest: auto (default) warns once without cosign,
+require refuses without it, off does not verify (docs/admin.md, "Verifying
+a release").
+
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
-                         latest/download/<asset> (https://, http:// or file://)`
+                         latest/download/<asset> (https://, http:// or file://)
+  CADENCE_VERIFY         auto, require or off: the signatures of the release`
 
 // installOptions — флаги clab server install.
 type installOptions struct {
@@ -143,6 +152,12 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 
 	// --- 2. Docker и имя на этой машине ------------------------------------------
 	e.info("checking the environment")
+	// Режим проверки подписей — до Docker и сети: require без cosign
+	// отказывает раньше всего (lib.sh verify_init в install.sh).
+	v, err := newVerifier(ctx, e, e.getenv("CADENCE_VERIFY"), nothingInstalled)
+	if err != nil {
+		return err
+	}
 	if err := requireDocker(ctx, e); err != nil {
 		return err
 	}
@@ -165,7 +180,7 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	var version, tarball string
+	var version, tarball, pkgDir string
 	if inPlace {
 		if version, err = inPlaceVersion(dir, o.version); err != nil {
 			return err
@@ -174,14 +189,22 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 			return err
 		}
 		e.info("installing %s in place: %s holds its unpacked package", version, dir)
+		pkgDir = dir
 	} else {
 		releases := releasesFrom(e.getenv("CADENCE_RELEASES_URL"))
 		if version, err = installVersion(ctx, e, releases, o.version, work); err != nil {
 			return err
 		}
-		if tarball, err = fetchInstallPackage(ctx, e, releases, version, work); err != nil {
+		if tarball, err = fetchInstallPackage(ctx, e, v, releases, version, work); err != nil {
 			return err
 		}
+		pkgDir = filepath.Join(work, "peek")
+	}
+	// Подписи образов версии — до вопросов, до предпроверки внешней базы
+	// (она запускает образ backend) и до .env. Установка на месте
+	// проверяет только их: скачанного checksums.txt у неё нет.
+	if err := v.verifyImages(ctx, version, installImages(e, pkgDir, version)); err != nil {
+		return err
 	}
 
 	// --- 4. ответы и проверки машины ---------------------------------------------
@@ -401,9 +424,10 @@ func installVersion(ctx context.Context, e *serverEnv, releases, want, work stri
 }
 
 // fetchInstallPackage скачивает пакет версии во временный каталог, сверяет
-// сумму и заглядывает внутрь: эталон есть, VERSION — та самая. Каталог
-// установки до этого не создаётся.
-func fetchInstallPackage(ctx context.Context, e *serverEnv, releases, v, work string) (string, error) {
+// сумму и подпись checksums.txt (до распаковки) и заглядывает внутрь:
+// эталон есть, VERSION — та самая; docker-compose.yml — для проверки
+// образов. Каталог установки до этого не создаётся.
+func fetchInstallPackage(ctx context.Context, e *serverEnv, verify *verifier, releases, v, work string) (string, error) {
 	name := packageName(v)
 	e.info("downloading %s", name)
 	tarball, err := downloadRelease(ctx, e, releases, v, work)
@@ -419,8 +443,11 @@ func fetchInstallPackage(ctx context.Context, e *serverEnv, releases, v, work st
 	case err != nil:
 		return "", fmt.Errorf("downloading %s failed: %v; nothing was installed", name, err)
 	}
+	if err := verify.verifyPackage(ctx, releases, v, work); err != nil {
+		return "", err
+	}
 	peek := filepath.Join(work, "peek")
-	if err := extractTarGz(tarball, peek, map[string]bool{"VERSION": true, packageManifest: true, ".env.example": true}); err != nil {
+	if err := extractTarGz(tarball, peek, map[string]bool{"VERSION": true, packageManifest: true, ".env.example": true, "docker-compose.yml": true}); err != nil {
 		return "", err
 	}
 	if !isFile(filepath.Join(peek, packageManifest)) || !isFile(filepath.Join(peek, ".env.example")) {

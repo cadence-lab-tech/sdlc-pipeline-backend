@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +55,13 @@ type fakeRunner struct {
 	verifyLoadFails bool   // psql одноразовой базы не загружает дамп
 	dbcheckJSON     string // ответ /api dbcheck --json одноразовой базе
 	verifyCounts    string // проекты, задачи, артефакты
+
+	// Подписи (CLAB-197): cosign в PATH, его версия и что он отвергает —
+	// package (verify-blob) или репозиторий образа; ghcr.io не отвечает.
+	cosign        bool
+	cosignVersion string
+	cosignBad     string
+	ghcrDown      bool
 }
 
 // exitErr — код выхода внешней команды, как у *exec.ExitError.
@@ -100,6 +108,8 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 	}
 	args := strings.Join(c.args, " ")
 	switch c.name {
+	case "cosign":
+		return f.runCosign(c)
 	case "git":
 		if !f.gitAvailable {
 			return errExit1
@@ -131,6 +141,9 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		write("-- PostgreSQL database dump\n" + b.String())
 	}
 	switch {
+	case strings.HasSuffix(args, " config --images"):
+		write(fakeComposeImages(c))
+		return nil
 	case strings.Contains(args, " api backup-s3 put "):
 		if f.s3PutFails {
 			io.WriteString(c.stderr, "✗ upload to s3://bk/ failed: PUT x: 403 Forbidden AccessDenied\n")
@@ -252,6 +265,91 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 	return fmt.Errorf("unexpected docker call: %s", line)
 }
 
+// runCosign — cosign 3.x: version, verify-blob и verify; отказывает тому,
+// что назвал cosignBad.
+func (f *fakeRunner) runCosign(c cmdSpec) error {
+	if len(c.args) == 0 {
+		return errExit1
+	}
+	switch c.args[0] {
+	case "version":
+		v := f.cosignVersion
+		if v == "" {
+			v = "v3.1.3"
+		}
+		if c.stdout != nil {
+			io.WriteString(c.stdout, "  ______   ______\n\nGitVersion:    "+v+"\nGitCommit:     0000000\n")
+		}
+		return nil
+	case "verify-blob":
+		if f.cosignBad == "package" {
+			io.WriteString(c.stderr, "Error: none of the expected identities matched what was in the certificate\n")
+			return exitErr(1)
+		}
+		return nil
+	case "verify":
+		if f.cosignBad != "" && strings.Contains(c.args[len(c.args)-1], "/"+f.cosignBad+"@") {
+			io.WriteString(c.stderr, "Error: no matching signatures: none of the expected identities matched what was in the certificate\n")
+			return exitErr(1)
+		}
+		if c.stdout != nil {
+			io.WriteString(c.stdout, `[{"critical":{}}]`+"\n")
+		}
+		return nil
+	}
+	return fmt.Errorf("unexpected cosign call: %s", c)
+}
+
+// composeVar — подстановка переменных compose в тех формах, что у пакета:
+// ${VAR:-по умолчанию}, ${VAR-по умолчанию}, ${VAR:?сообщение}.
+var composeVar = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-|-|:\?)([^}]*)\}`)
+
+// fakeComposeImages — docker compose -f … config --images: строки image:
+// файлов после -f с переменными окружения команды.
+func fakeComposeImages(c cmdSpec) string {
+	env := map[string]string{}
+	for _, kv := range c.env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	var files []string
+	for i, a := range c.args {
+		if a == "-f" && i+1 < len(c.args) {
+			files = append(files, c.args[i+1])
+		}
+	}
+	var b strings.Builder
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			img, ok := strings.CutPrefix(strings.TrimSpace(line), "image:")
+			if !ok {
+				continue
+			}
+			b.WriteString(composeVar.ReplaceAllStringFunc(strings.TrimSpace(img), func(m string) string {
+				p := composeVar.FindStringSubmatch(m)
+				v, set := env[p[1]]
+				switch p[2] {
+				case ":-":
+					if v == "" {
+						return p[3]
+					}
+				case "-":
+					if !set {
+						return p[3]
+					}
+				}
+				return v
+			}) + "\n")
+		}
+	}
+	return b.String()
+}
+
 func (f *fakeRunner) called(prefix string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -268,7 +366,7 @@ func testEnv(t *testing.T, cwd string, r *fakeRunner, vars map[string]string) (*
 	t.Helper()
 	origLook := lookPath
 	lookPath = func(name string) (string, error) {
-		if name == "git" && !r.gitAvailable {
+		if (name == "git" && !r.gitAvailable) || (name == "cosign" && !r.cosign) {
 			return "", errors.New("not found")
 		}
 		return "/usr/bin/" + name, nil
@@ -300,6 +398,7 @@ func testEnv(t *testing.T, cwd string, r *fakeRunner, vars map[string]string) (*
 		portBusy:   func(string, int) bool { return false },
 		lookupHost: func(string) ([]string, error) { return []string{"203.0.113.7"}, nil },
 		localAddrs: func() []string { return []string{"203.0.113.7"} },
+		reachable:  func(context.Context, string) bool { return !r.ghcrDown },
 	}, &out, &errw
 }
 
