@@ -87,6 +87,11 @@ func (a *Auth) RequireOwnTaskKey(id Identity, taskKey string) error {
 	if b == nil || b.TaskKey == taskKey {
 		return nil
 	}
+	if taskKey == "" {
+		// Пустой ключ приходит из create_task без parent: агенту надо
+		// сказать, чего не хватает, а не «задача  чужая».
+		return notOwn(b, "задача не указана — заводить можно только дочерние к своей (parent)")
+	}
 	return notOwn(b, fmt.Sprintf("задача %s чужая", taskKey))
 }
 

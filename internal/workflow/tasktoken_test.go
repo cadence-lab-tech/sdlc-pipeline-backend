@@ -369,7 +369,8 @@ func TestTaskTokenBindingAndReadCircle(t *testing.T) {
 	if _, err := w.auth.OwnRun(tid, "", &b.StageRunID); code(err) != apperr.CodeForbidden {
 		t.Fatalf("чужой прогон по идентификатору: %v", err)
 	}
-	if err := w.auth.RequireOwnTaskKey(tid, ""); code(err) != apperr.CodeForbidden {
+	if err := w.auth.RequireOwnTaskKey(tid, ""); code(err) != apperr.CodeForbidden ||
+		!strings.Contains(err.Error(), "parent") {
 		t.Fatalf("задача без родителя токеном задачи: %v", err)
 	}
 	onlyRun, _ := w.auth.OwnRun(tid, "SDLC-1", nil)
