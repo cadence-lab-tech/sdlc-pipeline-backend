@@ -12,6 +12,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/trust"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -374,6 +375,9 @@ func workPromptText(task, role string) string {
    sdlc_request_transition.
 7. В конце отчитайся о стоимости: sdlc_report_usage с моделью, токенами и
    деньгами. Без отчёта прогон стоит «неизвестно».
+
+Правила и данные. ` + trust.Rule + ` Разметка этих полей приезжает в
+ответе захвата полем boundary.
 
 Если гейт не проходит и починить это нельзя — не двигай задачу силой: сдай
 описание проблемы артефактом вида problem.* и откати задачу назад тем
