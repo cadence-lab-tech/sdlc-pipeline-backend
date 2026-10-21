@@ -159,6 +159,11 @@ type Config struct {
 	// как включить сборку на засиженной базе.
 	BlobGCDryRun bool
 
+	// Срок хранения журнала действий в днях (CLAB-210); 0 — хранить вечно.
+	// Журнал пишется на каждый вызов агента и растит базу вместе с бэкапом,
+	// поэтому срок по умолчанию есть, а выключение — явное.
+	AuditRetentionDays int
+
 	// Вытеснение кэша эмбеддингов: таблица ключуется содержимым и владельца
 	// не имеет намеренно, поэтому ни удаление проекта, ни отвязка
 	// репозитория её не уменьшают — растёт она монотонно. Свой период и свои
@@ -263,8 +268,11 @@ func Load() (Config, error) {
 		BlobGCInterval:     time.Hour,
 		// Пятьсот за проход: тик не затягивается, а следующий всё равно
 		// наступит — хвост разбирается за несколько проходов.
-		BlobGCLimit:              500,
-		BlobGCMinAge:             24 * time.Hour,
+		BlobGCLimit:  500,
+		BlobGCMinAge: 24 * time.Hour,
+		// Полгода: разбор инцидента обычно начинается в пределах квартала,
+		// и запас вдвое дешевле базы, растущей без предела.
+		AuditRetentionDays:       180,
 		EmbeddingCacheGCEnabled:  true,
 		EmbeddingCacheGCInterval: 6 * time.Hour,
 		// Месяц без использования: кусок кода, не встретившийся за месяц ни в
@@ -341,6 +349,14 @@ func Load() (Config, error) {
 	if c.BlobGCEnabled && c.BlobGCLimit < 1 {
 		return c, fmt.Errorf("сборка блобов включена, но SDLC_BLOB_GC_LIMIT (%d) не больше нуля: "+
 			"проход ничего не удалит; выключается сборка через SDLC_BLOB_GC_ENABLED", c.BlobGCLimit)
+	}
+	if c.AuditRetentionDays, err = envInt("SDLC_AUDIT_RETENTION_DAYS", c.AuditRetentionDays); err != nil {
+		return c, err
+	}
+	// Отрицательный срок иначе молча работал бы как «удалять всё старше
+	// завтрашнего дня» — то есть весь журнал на каждом проходе.
+	if c.AuditRetentionDays < 0 {
+		return c, fmt.Errorf("SDLC_AUDIT_RETENTION_DAYS (%d) меньше нуля; 0 — хранить журнал вечно", c.AuditRetentionDays)
 	}
 	if c.EmbeddingCacheGCEnabled, err = envBool("SDLC_EMBEDDING_CACHE_GC_ENABLED", c.EmbeddingCacheGCEnabled); err != nil {
 		return c, err

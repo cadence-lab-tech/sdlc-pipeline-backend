@@ -77,10 +77,15 @@ func (s *Server) registerTools() {
 		s.release)
 }
 
+// add регистрирует тул. Через неё проходит каждый вызов, дошедший до тула,
+// и здесь же он пишется в журнал действий (CLAB-210): новый тул без записи
+// завести нельзя.
 func add[In any](s *Server, name, description string, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
 	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Description: description},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
-			return h(ctx, in)
+			res, out, err := h(ctx, in)
+			s.recordCall(ctx, name, in, res, err)
+			return res, out, err
 		})
 }
 

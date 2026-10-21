@@ -17,6 +17,10 @@ import (
 const (
 	ctxRequestID = "request_id"
 	ctxIdentity  = "identity"
+	// Код apperr ответа с ошибкой и токен, отбитый аутентификацией, — для
+	// журнала действий (audit.go).
+	ctxErrorCode = "error_code"
+	ctxRejected  = "rejected_identity"
 
 	// ActorHeader несёт хэндл действующего лица в режиме без аутентификации
 	// (SDLC_AUTH_MODE=header). В режиме токенов игнорируется: кто пришёл,
@@ -93,6 +97,11 @@ func (s *Server) authenticate(defaultKind domain.PrincipalKind) gin.HandlerFunc 
 		if bearer, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer "); ok {
 			id, err := s.auth.Authenticate(c.Request.Context(), bearer)
 			if err != nil {
+				// Отозванный или истёкший токен журнал пишет со ссылкой на
+				// него: отказ — главный сигнал, и важно, чей он.
+				if rejected, ok := s.auth.RejectedIdentity(c.Request.Context(), bearer); ok {
+					c.Set(ctxRejected, rejected)
+				}
 				fail(c, s.log, err)
 				return
 			}
