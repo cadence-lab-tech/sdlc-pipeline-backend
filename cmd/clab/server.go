@@ -103,6 +103,54 @@ func newServerEnv() (*serverEnv, error) {
 	}, nil
 }
 
+// wrapperEnv — признак обёртки пакета (CLAB-242, R1). Скрипт пакета
+// (install.sh, upgrade.sh, backup.sh, restore.sh на обёртках CLAB-198)
+// запускает clab server с CADENCE_WRAPPER=1 в окружении exec:
+//
+//	CADENCE_WRAPPER=1 exec "$clab" server upgrade --dir "$dir" "$@"
+//
+// С ним напечатанные команды для администратора — скрипты пакета, а не
+// clab server: своего clab в PATH у него может не быть. Признак —
+// договорённость обёртки и бинаря, а не настройка: в .env он не пишется и
+// из .env не читается, только из окружения процесса. Другое значение или
+// его отсутствие — прежние подсказки clab server.
+const wrapperEnv = "CADENCE_WRAPPER"
+
+// wrapped — clab server запущен обёрткой пакета.
+func (e *serverEnv) wrapped() bool { return e.getenv(wrapperEnv) == "1" }
+
+// script — однострочная команда скрипта пакета name из каталога установки
+// dir для администратора: ./name, если clab запущен из этого каталога,
+// иначе путь к скрипту — так команда выполняется дословно из любого
+// каталога. В блоке после cdHint скрипт пишется ./name; без каталога — тоже.
+func (e *serverEnv) script(dir, name string) string {
+	if dir == "" || filepath.Clean(e.cwd) == dir {
+		return "./" + name
+	}
+	return shellQuote(filepath.Join(dir, name))
+}
+
+// packageBinary — этот clab — бинарь пакета установки dir: лежит в
+// <dir>/bin/ (CLAB-242, R2). Его заменяет upgrade вместе с остальными
+// файлами пакета, поэтому сообщения о версии для него другие: обновлять его
+// из тапа не нужно. От признака обёртки не зависит: обёртка может звать
+// внешний clab (CADENCE_CLAB), а администратор — бинарь пакета напрямую.
+// Пути сравниваются без ссылок: clab в PATH бывает ссылкой на бинарь
+// пакета, а каталог — путём через ссылку (/var на macOS).
+func (e *serverEnv) packageBinary(dir string) bool {
+	if e.self == "" || dir == "" {
+		return false
+	}
+	return filepath.Dir(realPath(e.self)) == filepath.Join(realPath(dir), "bin")
+}
+
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
+}
+
 func (e *serverEnv) say(format string, a ...any) { fmt.Fprintf(e.out, format+"\n", a...) }
 func (e *serverEnv) info(format string, a ...any) {
 	fmt.Fprintf(e.out, "▸ "+format+"\n", a...)
@@ -513,7 +561,7 @@ func (i *installation) kind() string {
 // скриптов: COMPOSE_PROJECT_NAME другой установки останавливает команду,
 // прежде чем она что-то спросит у Docker.
 func (i *installation) open(ctx context.Context) error {
-	if err := i.compatible(); err != nil {
+	if err := i.compatible(ctx); err != nil {
 		return err
 	}
 	if err := i.requireEnv(); err != nil {
