@@ -29,7 +29,11 @@ Options:
               backups/package-<old version>-<date>.tar.gz
 
 The package of the release is downloaded with its checksums.txt and verified
-before anything changes. Package files edited here stop the upgrade with their
+before anything changes: the checksum, and with cosign 3.x in PATH the
+signature of checksums.txt and of both images of the new version
+(CADENCE_VERIFY in .env or the environment: auto, the default, warns once
+without cosign, require refuses, off does not verify; docs/admin.md,
+"Verifying a release"). Package files edited here stop the upgrade with their
 list: keep settings in .env and compose changes in compose.override.yml.
 .env, compose.override.yml, backups/, secrets/ and other files of the
 directory are never touched.
@@ -55,7 +59,8 @@ version newer than this clab goes on with a warning.
 
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
-                         latest/download/<asset> (https://, http:// or file://)`
+                         latest/download/<asset> (https://, http:// or file://)
+  CADENCE_VERIFY         auto, require or off: the signatures of the release`
 
 func serverUpgrade(ctx context.Context, e *serverEnv, args []string) error {
 	var dir string
@@ -95,6 +100,11 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	e := i.e
 	oldVersion := i.version
 	backups := i.backupsDir()
+	// .env перекрывает окружение, как у всех переменных пакета (q7).
+	v, err := newVerifier(ctx, e, i.get("CADENCE_VERIFY"), nothingChanged)
+	if err != nil {
+		return err
+	}
 
 	// Локальная правка compose, которую compose не читает, молча не
 	// применяется; .env upgrade не правит, поэтому только говорит.
@@ -149,6 +159,9 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	case err != nil:
 		return fmt.Errorf("downloading %s failed: %v; nothing has changed", name, err)
 	}
+	if err := v.verifyPackage(ctx, i.releasesURL(), target, work); err != nil {
+		return err
+	}
 	newDir := filepath.Join(work, "new")
 	if err := extractTarGz(tarball, newDir, nil); err != nil {
 		return err
@@ -171,6 +184,11 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	}
 	newList = append(newList, packageManifest)
 	inNew := setOf(newList)
+	// Образы новой версии так, как их запустит compose, — до проверки
+	// внешней базы ими же, до бэкапа и до замены файлов.
+	if err := v.verifyImages(ctx, target, i.upgradeImages(newDir, target)); err != nil {
+		return err
+	}
 
 	// --- 2. файлы пакета, правленые здесь ----------------------------------------
 	// Эталон — манифест текущей версии: распакованный вместе с ней, либо — у

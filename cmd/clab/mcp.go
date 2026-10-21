@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -34,18 +35,8 @@ func cmdMCP(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	mcpURL := c.origin + "/mcp/projects/" + key
-
-	headerName, headerValue := "X-SDLC-Actor", c.actor
-	if c.token != "" {
-		headerName, headerValue = "Authorization", "Bearer "+c.token
-	}
-	server := map[string]any{
-		"type":    "http",
-		"url":     mcpURL,
-		"headers": map[string]string{headerName: headerValue},
-	}
-	config := map[string]any{"mcpServers": map[string]any{name: server}}
+	mcpURL, headerName, headerValue := c.mcpEndpoint(key)
+	config := mcpConfig(name, mcpURL, headerName, headerValue)
 
 	switch sub {
 	case "url":
@@ -57,8 +48,7 @@ func cmdMCP(ctx context.Context, c *Client, args []string) error {
 
 	// install
 	if scope == "project" && c.token != "" {
-		// .mcp.json обычно коммитят, а токен — личный.
-		return fmt.Errorf("--scope project положил бы токен в .mcp.json репозитория; используйте local или user, либо clab mcp config и ${SDLC_TOKEN} в заголовке")
+		return errProjectScopeToken
 	}
 	claude, err := exec.LookPath("claude")
 	if err != nil {
@@ -77,4 +67,31 @@ func cmdMCP(ctx context.Context, c *Client, args []string) error {
 		fmt.Printf("В агенте: /mcp__%s__work_on_task <ключ задачи>\n", strings.ReplaceAll(name, "-", "_"))
 		return nil
 	})
+}
+
+// errProjectScopeToken — отказ --scope project при входе по токену: .mcp.json
+// обычно коммитят, а токен — личный. Один текст у clab mcp install и clab
+// setup.
+var errProjectScopeToken = errors.New("--scope project положил бы токен в .mcp.json репозитория; используйте local или user, либо clab mcp config и ${SDLC_TOKEN} в заголовке")
+
+// mcpEndpoint — адрес MCP-сервера проекта и заголовок, которым агент
+// предъявляет себя: токен clab, а без него — актор заголовка.
+func (c *Client) mcpEndpoint(key string) (mcpURL, headerName, headerValue string) {
+	mcpURL = c.origin + "/mcp/projects/" + key
+	headerName, headerValue = "X-SDLC-Actor", c.actor
+	if c.token != "" {
+		headerName, headerValue = "Authorization", "Bearer "+c.token
+	}
+	return mcpURL, headerName, headerValue
+}
+
+// mcpConfig — конфигурация MCP-сервера в формате mcpServers, понятном
+// большинству агентов.
+func mcpConfig(name, mcpURL, headerName, headerValue string) map[string]any {
+	server := map[string]any{
+		"type":    "http",
+		"url":     mcpURL,
+		"headers": map[string]string{headerName: headerValue},
+	}
+	return map[string]any{"mcpServers": map[string]any{name: server}}
 }

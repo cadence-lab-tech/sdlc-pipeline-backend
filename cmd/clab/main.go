@@ -44,6 +44,7 @@ func commands() []command {
 	return []command{
 		{"auth", "вход через браузер, состояние, выход", "clab auth login [--host https://sdlc.example.com] [--days 365] [--no-browser] | clab auth status | clab auth logout | clab auth token", cmdAuth},
 		{"mcp", "подключить локального агента к MCP проекта", "clab mcp install [--project SDLC] [--name sdlc] [--scope local|user] | clab mcp config | clab mcp url", cmdMCP},
+		{"setup", "связать локальный проект с проектом: MCP и набор агента (скилы) с инстанса", "clab setup [--project SDLC] [--scope local|user] [--agent claude|other] [--name sdlc] [--dry-run] [--force] — в корне локального клона; повторный запуск обновляет набор до версии инстанса", cmdSetup},
 		{"whoami", "кто я, на каком инстансе и что могу в проекте", "clab whoami [--project SDLC]", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4] [--external PROJ-12 | --external jira:PROJ-12]", cmdTasks},
