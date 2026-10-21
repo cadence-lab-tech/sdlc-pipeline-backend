@@ -31,6 +31,7 @@ var webhookOutcomes = []string{WebhookQueued, WebhookIgnored, WebhookDuplicate,
 type API struct {
 	requests *prometheus.HistogramVec
 	webhooks *prometheus.CounterVec
+	audit    prometheus.Counter
 }
 
 // NewAPI заводит метрики api на реестре; nil-реестр — nil-метрики.
@@ -51,12 +52,17 @@ func NewAPI(r *Registry) *API {
 			Help:      "Доставки вебхуков по провайдеру и исходу.",
 		}, []string{"provider", "outcome"}),
 	}
+	m.audit = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "audit_write_failures_total",
+		Help:      "Записи журнала действий, которые не удалось сохранить.",
+	})
 	// Серии исходов заводятся нулями заранее: правило оповещения на рост
 	// bad_signature должно видеть ряд и до первой плохой доставки.
 	for _, o := range webhookOutcomes {
 		m.webhooks.WithLabelValues("github", o)
 	}
-	r.register(m.requests, m.webhooks)
+	r.register(m.requests, m.webhooks, m.audit)
 	return m
 }
 
@@ -81,6 +87,15 @@ func (m *API) WebhookDelivery(provider, outcome string) {
 		return
 	}
 	m.webhooks.WithLabelValues(provider, outcome).Inc()
+}
+
+// AuditWriteFailed учитывает несохранённую запись журнала действий: вызов
+// при этом прошёл, а след пропал — это видно только здесь и в логе.
+func (m *API) AuditWriteFailed() {
+	if m == nil {
+		return
+	}
+	m.audit.Inc()
 }
 
 // normalizeMethod держит метку method в закрытом наборе: метод присылает

@@ -60,6 +60,10 @@ func fail(c *gin.Context, log *slog.Logger, err error) {
 	body.Error.Message = e.Message
 	body.Error.Details = e.Details
 
+	// Код ошибки нужен журналу действий: по статусу его не восстановить
+	// (409 — это и conflict, и gates_not_satisfied).
+	c.Set(ctxErrorCode, string(e.Code))
+
 	if e.Code == apperr.CodeInternal {
 		log.Error("внутренняя ошибка",
 			"error", err,

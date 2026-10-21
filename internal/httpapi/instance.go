@@ -24,6 +24,7 @@ func (s *Server) WithVersion(v string) *Server {
 // смотрит в интернет.
 func (s *Server) WithMetrics(m *metrics.API) *Server {
 	s.ops = m
+	s.audit.OnFailure(m.AuditWriteFailed)
 	return s
 }
 

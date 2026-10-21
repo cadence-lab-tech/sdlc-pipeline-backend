@@ -77,16 +77,26 @@ func (s *Server) registerTools() {
 		s.release)
 }
 
-// add регистрирует тул. Через неё проходит каждый вызов, и здесь же стоит
-// белый список токена задачи (CLAB-208): тул, которого нет в перечне
-// workflow, токену задачи закрыт, даже если о нём забыли подумать.
+// add регистрирует тул. Через неё проходит каждый вызов, дошедший до тула:
+// здесь стоит белый список токена задачи (CLAB-208) — тул, которого нет в
+// перечне workflow, токену задачи закрыт, даже если о нём забыли подумать, —
+// и здесь же вызов пишется в журнал действий (CLAB-210), отказ тоже: новый
+// тул без проверки и записи завести нельзя.
 func add[In any](s *Server, name, description string, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
 	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Description: description},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
-			if err := s.executorMay(ctx, name); err != nil {
-				return fail(err)
+			var (
+				res *sdk.CallToolResult
+				out any
+				err error
+			)
+			if denied := s.executorMay(ctx, name); denied != nil {
+				res, out, err = fail(denied)
+			} else {
+				res, out, err = h(ctx, in)
 			}
-			return h(ctx, in)
+			s.recordCall(ctx, name, in, res, err)
+			return res, out, err
 		})
 }
 
