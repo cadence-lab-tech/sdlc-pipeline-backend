@@ -2,11 +2,16 @@ package httpapi
 
 import (
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -70,6 +75,72 @@ func requestMetrics(m *metrics.API) gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		m.Request(c.Request.Method, c.FullPath(), c.Writer.Status(), time.Since(start))
+	}
+}
+
+// tracerName — имя инструментирующей библиотеки в спанах (scope).
+const tracerName = "github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/httpapi"
+
+// spanMethods — закрытый набор методов в имени и атрибутах спана: метод
+// приходит от клиента, и произвольная строка в нём раздувала бы число имён
+// спанов у сборщика (semconv называет остальное _OTHER).
+var spanMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodOptions: true, http.MethodConnect: true, http.MethodTrace: true,
+}
+
+// requestTracing — серверный спан на запрос (CLAB-204). Тот же принцип, что
+// у метрик: имя и http.route — шаблон маршрута, без пути, строки запроса,
+// заголовков, адреса клиента и актора — в них ключи проектов, задач, коды
+// входа CLI и токены. Входящий traceparent принимается (спан становится
+// дочерним в трассе клиента), baggage — нет: пропагатор только TraceContext.
+// Пробы /healthz и /readyz не трассируются — healthcheck compose бьёт их
+// каждые пять секунд. Стоит до recovery: паника, превращённая в 500, тоже
+// попадает в спан статусом Error. nil — трассировки выключены: запрос
+// проходит как есть, без спана и без разбора заголовков.
+func requestTracing(tp trace.TracerProvider) gin.HandlerFunc {
+	if tp == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
+	tracer := tp.Tracer(tracerName)
+	propagator := propagation.TraceContext{}
+	return func(c *gin.Context) {
+		route := c.FullPath()
+		if route == "/healthz" || route == "/readyz" {
+			c.Next()
+			return
+		}
+		method := c.Request.Method
+		if !spanMethods[method] {
+			method = "_OTHER"
+		}
+		name := method
+		attrs := []attribute.KeyValue{
+			attribute.String("http.request.method", method),
+			attribute.String("network.protocol.version",
+				strings.TrimPrefix(c.Request.Proto, "HTTP/")),
+		}
+		if route != "" {
+			name = method + " " + route
+			attrs = append(attrs, attribute.String("http.route", route))
+		}
+
+		ctx := propagator.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
+		ctx, span := tracer.Start(ctx, name,
+			trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
+		defer span.End()
+		c.Request = c.Request.WithContext(ctx)
+
+		c.Next()
+
+		status := c.Writer.Status()
+		span.SetAttributes(attribute.Int("http.response.status_code", status))
+		// По semconv сервер помечает ошибкой только 5xx: 4xx — ошибка
+		// клиента, а не сервиса.
+		if status >= 500 {
+			span.SetStatus(codes.Error, "")
+		}
 	}
 }
 

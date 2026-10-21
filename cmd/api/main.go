@@ -23,6 +23,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/tracing"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -61,6 +62,18 @@ func run() error {
 		return err
 	}
 	log := newLogger(cfg)
+	// Трассировки — стандартные OTEL_*, а не SDLC_*: их знают сборщики и
+	// платформенные команды. Неподдерживаемое значение роняет старт до
+	// подключения к базе, как неверная настройка в config.Load; экспортёр
+	// же сети не трогает, и недоступный сборщик старт не роняет.
+	traceSettings, err := tracing.FromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	traces, err := tracing.Start(context.Background(), traceSettings, version, log)
+	if err != nil {
+		return err
+	}
 
 	// Контекст живёт до сигнала: и подключение к базе, и миграции должны
 	// прерываться по Ctrl+C, иначе контейнер приходится убивать силой.
@@ -178,7 +191,8 @@ func run() error {
 	}
 
 	handler := httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).
-		WithVersion(version).WithMetrics(apiMetrics).Handler()
+		WithVersion(version).WithMetrics(apiMetrics).
+		WithTracing(traces.Provider()).Handler()
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -210,6 +224,11 @@ func run() error {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
+	}
+	// Спаны доигранных запросов уходят после остановки сервера и в том же
+	// сроке: недоступный сборщик остановку не продлевает, хвост теряется.
+	if err := traces.Shutdown(shutdownCtx); err != nil {
+		log.Warn("трассировки: накопленные спаны не отправлены до остановки", "error", err)
 	}
 	// Метрики гасятся последними: до конца остановки Prometheus видит, что
 	// процесс ещё жив и доигрывает запросы.
