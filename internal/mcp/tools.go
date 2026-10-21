@@ -330,6 +330,7 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 		"role":         state.Role,
 		"context":      state.Context,
 		"gates_ahead":  state.GatesAhead,
+		"boundary":     state.Boundary,
 		"stage_runs":   runs,
 		"transitions":  previews,
 		"timeline":     events,
