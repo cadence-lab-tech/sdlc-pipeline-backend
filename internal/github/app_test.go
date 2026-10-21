@@ -107,11 +107,11 @@ func TestProviderPrefersMoreSpecificCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := New(srv.URL, "общий-токен-инстанса")
-	provider := NewProvider(base, app, func(ref string) string {
+	provider := NewProvider(base, app, func(ref string) (string, error) {
 		if ref == "acme" {
-			return "секрет-акме"
+			return "секрет-акме", nil
 		}
-		return ""
+		return "", nil
 	})
 	ctx := context.Background()
 	installation := int64(42)
@@ -195,7 +195,7 @@ func TestSecretValueStaysOutOfErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider := NewProvider(New(srv.URL, ""), nil, func(string) string { return "ghp_значение-секрета" })
+	provider := NewProvider(New(srv.URL, ""), nil, func(string) (string, error) { return "ghp_значение-секрета", nil })
 	client, err := provider.Client(context.Background(), Credentials{SecretRef: "repo-x"})
 	if err != nil {
 		t.Fatal(err)

@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 // Config — бакет из переменных BACKUP_S3_* (.env установки).
@@ -42,7 +43,8 @@ type Config struct {
 // DefaultKeep — сколько бэкапов остаётся в бакете по умолчанию.
 const DefaultKeep = 14
 
-// FromEnv читает BACKUP_S3_*. Бакет не задан — выгрузки нет (ok == false).
+// FromEnv читает BACKUP_S3_*, ключи — и файлами BACKUP_S3_*_FILE. Бакет не
+// задан — выгрузки нет (ok == false).
 func FromEnv(getenv func(string) string) (cfg Config, ok bool, err error) {
 	cfg.Bucket = strings.TrimSpace(getenv("BACKUP_S3_BUCKET"))
 	if cfg.Bucket == "" {
@@ -61,10 +63,18 @@ func FromEnv(getenv func(string) string) (cfg Config, ok bool, err error) {
 	if prefix := strings.Trim(strings.TrimSpace(getenv("BACKUP_S3_PREFIX")), "/"); prefix != "" {
 		cfg.Prefix = prefix + "/"
 	}
-	cfg.AccessKey = getenv("BACKUP_S3_ACCESS_KEY_ID")
-	cfg.SecretKey = getenv("BACKUP_S3_SECRET_ACCESS_KEY")
+	// Ключи — значением или файлом (решение 0052): /api backup-s3 бежит от
+	// пользователя хоста, и файл в /secrets должен читаться им.
+	src := secrets.Source{Getenv: getenv}
+	if cfg.AccessKey, err = src.Value("BACKUP_S3_ACCESS_KEY_ID"); err != nil {
+		return cfg, true, err
+	}
+	if cfg.SecretKey, err = src.Value("BACKUP_S3_SECRET_ACCESS_KEY"); err != nil {
+		return cfg, true, err
+	}
 	if cfg.AccessKey == "" || cfg.SecretKey == "" {
-		return cfg, true, errors.New("BACKUP_S3_BUCKET is set, but BACKUP_S3_ACCESS_KEY_ID or BACKUP_S3_SECRET_ACCESS_KEY is empty")
+		return cfg, true, errors.New("BACKUP_S3_BUCKET is set, but a key is empty: set BACKUP_S3_ACCESS_KEY_ID or BACKUP_S3_ACCESS_KEY_ID_FILE, " +
+			"and BACKUP_S3_SECRET_ACCESS_KEY or BACKUP_S3_SECRET_ACCESS_KEY_FILE")
 	}
 	// Как SDLC_BLOB_S3_PATH_STYLE: MinIO и совместимые умеют только
 	// path-style, AWS — оба.

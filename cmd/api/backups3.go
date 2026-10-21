@@ -34,7 +34,9 @@ Commands:
 
 Environment: BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_S3_REGION,
 BACKUP_S3_PREFIX, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
-BACKUP_S3_PATH_STYLE, BACKUP_S3_KEEP.
+BACKUP_S3_PATH_STYLE, BACKUP_S3_KEEP; the keys may come from files instead:
+BACKUP_S3_ACCESS_KEY_ID_FILE, BACKUP_S3_SECRET_ACCESS_KEY_FILE (a path
+inside the container, readable by the user it runs as).
 
 Exit status: 0 - done, 1 - failed, 2 - wrong arguments, 3 - get found no
 backup.`

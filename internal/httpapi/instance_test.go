@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/config"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -78,19 +81,24 @@ type instanceSetup struct {
 	github   bool
 	oidc     *oidcStub
 	version  string
+	// cfg — конфигурация из config.Load вместо собранной тестом.
+	cfg *config.Config
 }
 
 func instanceServer(t *testing.T, in instanceSetup) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	cfg := config.Config{
-		Env: "test", AuthMode: in.mode, Tenancy: in.tenancy, ProjectCreation: in.creation,
 		AdminToken:            secretAdminToken,
 		GitHubAppClientID:     "Iv1.client",
 		GitHubAppClientSecret: secretGitHubClient,
 		GitHubAppKeyFile:      secretAppKeyFile,
 		DatabaseURL:           "postgres://clab:" + secretDBPassword + "@db:5432/clab",
 	}
+	if in.cfg != nil {
+		cfg = *in.cfg
+	}
+	cfg.Env, cfg.AuthMode, cfg.Tenancy, cfg.ProjectCreation = "test", in.mode, in.tenancy, in.creation
 	// Так же, как собирает cmd/api.
 	auth := workflow.NewAuth(nil, log, cfg.AuthMode).
 		OpenProjectCreation(cfg.ProjectCreation == "open").
@@ -276,4 +284,51 @@ func TestInstanceHasNoSecrets(t *testing.T) {
 		}
 	}
 	walk(tree)
+}
+
+// AC-8 CLAB-200: секреты приходят файлами — каждый ValueOrFile и пароль
+// базы из перечня secrets.List, — и значений в ответе нет.
+func TestInstanceHasNoSecretsFromFiles(t *testing.T) {
+	dir := t.TempDir()
+	var values []string
+	put := func(env, value string) {
+		p := filepath.Join(dir, env)
+		if err := os.WriteFile(p, []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(env, p)
+		values = append(values, value)
+	}
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:@db:5432/clab")
+	t.Setenv("SDLC_GITHUB_APP_CLIENT_ID", "Iv1.client")
+	for _, v := range secrets.List {
+		if !v.ReadBy("api") || v.Template {
+			continue
+		}
+		switch v.Form {
+		case secrets.ValueOrFile:
+			if v.Name != secrets.DatabaseURL {
+				put(v.FileEnv(), "file-"+strings.ToLower(v.Name)+"-9c1d")
+			}
+		case secrets.FileOnly:
+			put(v.FileEnv(), "file-db-password-9c1d")
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminToken == "" || !strings.Contains(cfg.DatabaseURL, "file-db-password-9c1d") {
+		t.Fatalf("the files did not reach the config")
+	}
+	provider := newOIDCStub(t)
+	h := instanceServer(t, instanceSetup{
+		mode: "token", creation: "open", github: true, oidc: provider, version: "v0.5.0", cfg: &cfg,
+	})
+	body := get(t, h, "/v1/instance").Body.String()
+	for _, secret := range append(values, dir) {
+		if strings.Contains(body, secret) {
+			t.Fatalf("в ответе секрет %q: %s", secret, body)
+		}
+	}
 }

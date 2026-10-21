@@ -225,12 +225,18 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		// Внешнюю базу проверяют образы новой версии с файлами compose её
 		// пакета до бэкапа: база, с которой новая версия не работает,
 		// останавливает апгрейд, пока ничего не изменилось.
-		e.info("checking the external database %s with the images of %s", dbTarget(i.get("SDLC_DATABASE_URL")), target)
+		e.info("checking the external database %s with the images of %s", i.externalTarget(), target)
 		if !isFile(filepath.Join(newDir, externalDBFile)) {
 			return fmt.Errorf("the package of %s has no %s: it cannot run on an external database. Nothing has changed.", target, externalDBFile)
 		}
-		c := i.compose("--project-directory", i.dir, "-f", filepath.Join(newDir, "docker-compose.yml"),
-			"-f", filepath.Join(newDir, externalDBFile), "run", "--rm", "--no-deps", "-T", "api", "dbcheck")
+		// Оверлей секретов из COMPOSE_FILE — и здесь: без него токен
+		// администратора и другие Docker secrets не дошли бы до api, а
+		// SDLC_DATABASE_PASSWORD_FILE сбрасывает externalDBFile после него.
+		files := []string{"--project-directory", i.dir, "-f", filepath.Join(newDir, "docker-compose.yml")}
+		if strings.Contains(":"+i.get("COMPOSE_FILE")+":", ":"+secretsFile+":") && isFile(filepath.Join(newDir, secretsFile)) {
+			files = append(files, "-f", filepath.Join(newDir, secretsFile))
+		}
+		c := i.compose(append(files, "-f", filepath.Join(newDir, externalDBFile), "run", "--rm", "--no-deps", "-T", "api", "dbcheck")...)
 		c.env = append(c.env, "CADENCE_VERSION="+target)
 		if err := i.dbCheck(ctx, c); err != nil {
 			return fmt.Errorf("the external database is not ready for %s (see above). Nothing has changed.", target)

@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 // offsiteSince — первая версия, в образе которой есть /api backup-s3.
@@ -30,9 +32,25 @@ const offsiteSince = "v0.10.0"
 
 // backupS3Vars — переменные бакета. В docker compose run они уходят
 // именами (-e NAME), значения — окружением процесса docker: командную
-// строку видит любой пользователь машины (ps).
-var backupS3Vars = []string{"BACKUP_S3_BUCKET", "BACKUP_S3_ENDPOINT", "BACKUP_S3_REGION", "BACKUP_S3_PREFIX",
-	"BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY", "BACKUP_S3_PATH_STYLE", "BACKUP_S3_KEEP"}
+// строку видит любой пользователь машины (ps). Ключи — из перечня
+// секретов в обеих формах (решение 0052): путь в *_FILE — путь в
+// контейнере, файл читает /api backup-s3 от имени того, кто запустил.
+var backupS3Vars = append(append([]string{"BACKUP_S3_BUCKET", "BACKUP_S3_ENDPOINT", "BACKUP_S3_REGION", "BACKUP_S3_PREFIX"},
+	secretsOf("backup-s3")...), "BACKUP_S3_PATH_STYLE", "BACKUP_S3_KEEP")
+
+// secretsOf — имена секретов читателя reader в обеих формах.
+func secretsOf(reader string) []string {
+	var names []string
+	for _, v := range secrets.List {
+		if v.ReadBy(reader) {
+			if n := v.ValueEnv(); n != "" {
+				names = append(names, n)
+			}
+			names = append(names, v.FileEnv())
+		}
+	}
+	return names
+}
 
 // offsiteConfigured — lib.sh backup_s3_configured.
 func (i *installation) offsiteConfigured() bool { return i.get("BACKUP_S3_BUCKET") != "" }

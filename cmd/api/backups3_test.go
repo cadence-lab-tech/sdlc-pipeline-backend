@@ -88,3 +88,37 @@ func TestBackupS3PutListGet(t *testing.T) {
 		t.Fatal("the secret is printed")
 	}
 }
+
+// AC-7 CLAB-200: ключи бакета файлами — list по подставному бакету; файл,
+// который не читается, — код 1 с именем переменной и без значения.
+func TestBackupS3KeysFromFiles(t *testing.T) {
+	fake := s3test.New("bk", "us-east-1", "very-secret")
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	s3Env(t, server.URL)
+	dir := t.TempDir()
+	for name, body := range map[string]string{"id": "AKIAEXAMPLE\n", "key": "very-secret\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("BACKUP_S3_ACCESS_KEY_ID", "")
+	t.Setenv("BACKUP_S3_SECRET_ACCESS_KEY", "")
+	t.Setenv("BACKUP_S3_ACCESS_KEY_ID_FILE", filepath.Join(dir, "id"))
+	t.Setenv("BACKUP_S3_SECRET_ACCESS_KEY_FILE", filepath.Join(dir, "key"))
+	var out, errw bytes.Buffer
+	if code := backupS3([]string{"list"}, &out, &errw); code != 0 || !strings.Contains(out.String(), "no backups in s3://bk/nightly/") {
+		t.Fatalf("list with keys in files: %d %q %s", code, out.String(), errw.String())
+	}
+
+	t.Setenv("BACKUP_S3_SECRET_ACCESS_KEY_FILE", filepath.Join(dir, "missing"))
+	out.Reset()
+	errw.Reset()
+	if code := backupS3([]string{"list"}, &out, &errw); code != 1 ||
+		!strings.Contains(errw.String(), "BACKUP_S3_SECRET_ACCESS_KEY_FILE") || !strings.Contains(errw.String(), "missing") {
+		t.Fatalf("missing key file: %d %s", code, errw.String())
+	}
+	if strings.Contains(out.String()+errw.String(), "very-secret") {
+		t.Fatal("the secret is printed")
+	}
+}

@@ -144,7 +144,7 @@ func newCredentialProvider(t *testing.T, instanceToken string) (*credentialProbe
 	}
 	secrets := map[string]string{"repo-secret": "token-repo", "project-secret": "token-project"}
 	provider := github.NewProvider(github.New(p.srv.URL, instanceToken), app,
-		func(ref string) string { return secrets[ref] })
+		func(ref string) (string, error) { return secrets[ref], nil })
 	return p, provider
 }
 

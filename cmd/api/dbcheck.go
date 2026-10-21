@@ -6,9 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
@@ -25,7 +25,8 @@ func dbcheck(args []string, stdout, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", 15*time.Second, "time to connect and check")
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: /api dbcheck [--install] [--json] [--timeout 15s]\n\n"+
-			"Checks the database of SDLC_DATABASE_URL for this version of Cadence Lab: the URL and its TLS,\n"+
+			"Checks the database of SDLC_DATABASE_URL (or SDLC_DATABASE_URL_FILE, SDLC_DATABASE_PASSWORD_FILE)\n"+
+			"for this version of Cadence Lab: the URL and its TLS,\n"+
 			"the connection, the server version, the extensions vector and pgcrypto, the privileges of the\n"+
 			"role and the state of the schema. Only reads. Exit status 0 - ready, 1 - not ready.")
 		fs.PrintDefaults()
@@ -36,8 +37,17 @@ func dbcheck(args []string, stdout, stderr io.Writer) int {
 		}
 		return 2
 	}
-	report := postgres.CheckDatabase(context.Background(), os.Getenv("SDLC_DATABASE_URL"),
-		postgres.CheckOptions{Install: *install, Timeout: *timeout})
+	// Адрес — тем же разбором, что у сервиса: значением, файлом
+	// SDLC_DATABASE_URL_FILE или с паролем из SDLC_DATABASE_PASSWORD_FILE
+	// (решение 0052). Ошибка чтения — пункт url отчёта, без значения.
+	var report postgres.CheckReport
+	if dsn, err := secrets.OS().DatabaseURL(); err != nil {
+		report = postgres.FailedCheck("url", err.Error(),
+			"secrets in files: docs/admin.md, \"Secrets in files\"")
+	} else {
+		report = postgres.CheckDatabase(context.Background(), dsn,
+			postgres.CheckOptions{Install: *install, Timeout: *timeout})
+	}
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")

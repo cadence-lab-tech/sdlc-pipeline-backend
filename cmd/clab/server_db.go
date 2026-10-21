@@ -14,12 +14,19 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 const (
 	externalDBFile = "compose.external-db.yml"
+	// Оверлей секретов файлами (CLAB-200): Docker secrets пароля встроенной
+	// базы и токена администратора. В COMPOSE_FILE — до externalDBFile:
+	// тот возвращает SDLC_DATABASE_PASSWORD_FILE сервисов к значению .env.
+	secretsFile = "compose.secrets.yml"
 	// depends_on.required у compose.external-db.yml появился в Compose 2.20.
 	externalDBMinCompose = "2.20.0"
 	// Файл CA внешней базы в secrets/ установки (в контейнерах — /secrets).
@@ -36,28 +43,102 @@ func (i *installation) externalDB() bool {
 	return i.getDefault("CADENCE_DB", "bundled") == "external"
 }
 
-// checkDBMode — lib.sh check_db_mode: CADENCE_DB, SDLC_DATABASE_URL и
-// COMPOSE_FILE согласованы.
+// checkDBMode — lib.sh check_db_mode: CADENCE_DB, SDLC_DATABASE_URL (или
+// SDLC_DATABASE_URL_FILE) и COMPOSE_FILE согласованы. Файлы секретов здесь
+// не читаются: их читает тот, кому нужен адрес (dbConn).
 func (i *installation) checkDBMode() error {
 	cf := i.get("COMPOSE_FILE")
-	listed := strings.Contains(":"+cf+":", ":"+externalDBFile+":")
+	files := strings.Split(cf, ":")
+	at := func(name string) int {
+		for n, f := range files {
+			if f == name {
+				return n
+			}
+		}
+		return -1
+	}
+	listed := at(externalDBFile) >= 0
+	if i.get("SDLC_DATABASE_URL") != "" && i.get("SDLC_DATABASE_URL_FILE") != "" {
+		return errors.New("both SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE are set in .env: keep one of them")
+	}
 	switch mode := i.getDefault("CADENCE_DB", "bundled"); mode {
 	case "bundled":
 		if listed {
 			return fmt.Errorf("COMPOSE_FILE in .env ('%s') lists %s, but CADENCE_DB is bundled: set CADENCE_DB=external with SDLC_DATABASE_URL, or drop the file from COMPOSE_FILE", cf, externalDBFile)
 		}
 	case "external":
-		if i.get("SDLC_DATABASE_URL") == "" {
-			return errors.New("CADENCE_DB=external needs SDLC_DATABASE_URL in .env")
+		if i.get("SDLC_DATABASE_URL") == "" && i.get("SDLC_DATABASE_URL_FILE") == "" {
+			return errors.New("CADENCE_DB=external needs SDLC_DATABASE_URL or SDLC_DATABASE_URL_FILE in .env")
 		}
 		if !listed {
 			return fmt.Errorf("COMPOSE_FILE in .env ('%s') does not include %s for CADENCE_DB=external: add it after compose.%s.yml",
 				cf, externalDBFile, i.getDefault("CADENCE_MODE", "tls"))
 		}
+		if s := at(secretsFile); s > at(externalDBFile) {
+			return fmt.Errorf("COMPOSE_FILE in .env ('%s') lists %s after %s: put it before, otherwise the password file of the bundled database reaches the service",
+				cf, secretsFile, externalDBFile)
+		}
 	default:
 		return fmt.Errorf("CADENCE_DB in .env is '%s', expected bundled or external", mode)
 	}
 	return nil
+}
+
+// hostSecretPath — lib.sh host_secret_path: путь из переменной name — путь
+// в контейнере — как путь на этой машине. Известны только файлы secrets/
+// установки: /secrets/<файл> (каталог смонтирован в api, worker и
+// db-client) и /run/secrets/<имя> Docker secrets, у которых в
+// compose.secrets.yml и по образцу admin.md файл secrets/<имя>.
+// Путь без «.», «..» и пустых частей: ни выйти из secrets/, ни разойтись с
+// разбором lib.sh.
+func (i *installation) hostSecretPath(name, p string) (string, error) {
+	for _, prefix := range []string{"/secrets/", "/run/secrets/"} {
+		if rel, ok := strings.CutPrefix(p, prefix); ok && plainRelPath(rel) {
+			return filepath.Join(i.dir, "secrets", filepath.FromSlash(rel)), nil
+		}
+	}
+	return "", fmt.Errorf("%s is '%s': clab server reads this file on this machine and knows only the files in secrets/ of the installation "+
+		"(/secrets/<file> or /run/secrets/<name> in the containers). Move the file into secrets/ and set %s=/secrets/<file> (docs/admin.md, \"Secrets in files\")",
+		name, p, name)
+}
+
+func plainRelPath(rel string) bool {
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// secretSource — секреты так, как их видит скрипт пакета: .env поверх
+// окружения, файлы — из secrets/ установки.
+func (i *installation) secretSource() secrets.Source {
+	return secrets.Source{Getenv: i.get, Path: i.hostSecretPath}
+}
+
+// dbConn — lib.sh db_conn: адрес внешней базы без пароля и пароль — из
+// SDLC_DATABASE_URL, SDLC_DATABASE_URL_FILE или с SDLC_DATABASE_PASSWORD_FILE
+// (решение 0052).
+func (i *installation) dbConn() (safe, password string, err error) {
+	raw, err := i.secretSource().DatabaseURL()
+	if err != nil {
+		return "", "", err
+	}
+	if raw == "" {
+		return "", "", errors.New("CADENCE_DB=external needs SDLC_DATABASE_URL or SDLC_DATABASE_URL_FILE in .env")
+	}
+	safe, password = dbURLParts(raw)
+	return safe, password, nil
+}
+
+// externalTarget — lib.sh db_label: host:port/база внешней базы для
+// сообщений, а у адреса в файле — имя файла: файл ради надписи не читается.
+func (i *installation) externalTarget() string {
+	if raw := i.get("SDLC_DATABASE_URL"); raw != "" || i.get("SDLC_DATABASE_URL_FILE") == "" {
+		return dbTarget(raw)
+	}
+	return "(URL in " + i.get("SDLC_DATABASE_URL_FILE") + ")"
 }
 
 var composeVersionRe = regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+)`)
@@ -116,8 +197,8 @@ func (i *installation) dbLabel() string {
 	if !i.externalDB() {
 		return "bundled"
 	}
-	label := "external " + dbTarget(i.get("SDLC_DATABASE_URL"))
-	if u, err := url.Parse(i.get("SDLC_DATABASE_URL")); err == nil {
+	label := "external " + i.externalTarget()
+	if u, err := url.Parse(i.get("SDLC_DATABASE_URL")); err == nil && i.get("SDLC_DATABASE_URL") != "" {
 		if m := u.Query().Get("sslmode"); m != "" {
 			label += " (sslmode=" + m + ")"
 		}
@@ -134,9 +215,8 @@ func (i *installation) dbCheck(ctx context.Context, c cmdSpec) error {
 }
 
 // dbClient — lib.sh db_client: команда клиента бэкапа (db-client
-// compose.external-db.yml) с PGPASSWORD из SDLC_DATABASE_URL.
-func (i *installation) dbClient(args ...string) cmdSpec {
-	_, password := dbURLParts(i.get("SDLC_DATABASE_URL"))
+// compose.external-db.yml) с паролем базы в PGPASSWORD (dbConn).
+func (i *installation) dbClient(password string, args ...string) cmdSpec {
 	c := i.compose(append([]string{"run", "--rm", "--no-deps", "-T", "-e", "PGPASSWORD", "db-client"}, args...)...)
 	c.env = append(c.env, "PGPASSWORD="+password)
 	return c
@@ -145,8 +225,12 @@ func (i *installation) dbClient(args ...string) cmdSpec {
 // dbClientCheck — lib.sh db_client_check: клиент бэкапа (libpq) подключается
 // тем же адресом, что и сервис.
 func (i *installation) dbClientCheck(ctx context.Context) error {
-	safe, _ := dbURLParts(i.get("SDLC_DATABASE_URL"))
-	c := i.dbClient("psql", "-X", "-q", "-At", "-d", safe, "-c", "SELECT 1")
+	safe, password, err := i.dbConn()
+	if err != nil {
+		fmt.Fprintf(i.e.errw, "✗ %v\n", err)
+		return err
+	}
+	c := i.dbClient(password, "psql", "-X", "-q", "-At", "-d", safe, "-c", "SELECT 1")
 	c.stdout, c.stderr = io.Discard, i.e.errw
 	return i.e.run.run(ctx, c)
 }
