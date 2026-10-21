@@ -172,6 +172,10 @@ func (s *Server) guard(need domain.MemberRole) gin.HandlerFunc {
 			fail(c, s.log, err)
 			return
 		}
+		if err := s.readableTask(c); err != nil {
+			fail(c, s.log, err)
+			return
+		}
 		c.Next()
 	}
 }

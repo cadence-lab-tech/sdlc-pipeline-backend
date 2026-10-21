@@ -40,11 +40,17 @@ func (s *Server) search(c *gin.Context) {
 		req.TopK, _ = strconv.Atoi(c.Query("top_k"))
 	}
 
+	bound, err := s.auth.SearchBound(c.Request.Context(), identity(c))
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	res, err := s.engine.SearchContext(c.Request.Context(), c.Param("projectKey"), workflow.SearchInput{
 		Query:        req.Query,
 		Scopes:       req.Scope,
 		Repositories: req.Repositories,
 		TopK:         req.TopK,
+		Bound:        bound,
 	})
 	if err != nil {
 		fail(c, s.log, err)

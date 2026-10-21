@@ -35,8 +35,14 @@ func (s *Server) claimTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Токен задачи захватом только подтверждает аренду своего прогона.
+	onlyRun, err := s.auth.OwnRun(identity(c), c.Param("taskKey"), nil)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	res, err := s.engine.ClaimWith(c.Request.Context(), c.Param("taskKey"), actor(c).ID, req.SessionRef,
-		workflow.ClaimOptions{AllowedRoles: allowed})
+		workflow.ClaimOptions{AllowedRoles: allowed, OnlyRun: onlyRun})
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -51,8 +57,13 @@ type leaseRequest struct {
 
 // leaseTarget: прогон из тела запроса либо тот, который держит этот актор.
 func (s *Server) leaseTarget(c *gin.Context, req leaseRequest) (uuid.UUID, error) {
-	if req.StageRunID != nil {
-		return *req.StageRunID, nil
+	// Токен задачи — только свой прогон, и без явного прогона берётся он.
+	runID, err := s.auth.OwnRun(identity(c), c.Param("taskKey"), req.StageRunID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if runID != nil {
+		return *runID, nil
 	}
 	run, err := s.engine.HeldRun(c.Request.Context(), c.Param("taskKey"), actor(c).ID)
 	if err != nil {
@@ -124,6 +135,18 @@ func (s *Server) listQueue(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	if s.auth.SummaryOnly(identity(c)) {
+		// Очередь токеном задачи — сводка задач без описаний (решение 0049).
+		items := make([]gin.H, 0, len(runs))
+		for _, r := range runs {
+			items = append(items, gin.H{
+				"task": taskSummary(r.Task), "stage_run": r.Run,
+				"role_key": r.RoleKey, "role_name": r.RoleName, "claimable": r.Claimable,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"queue": items})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"queue": runs})
 }
 
@@ -139,6 +162,10 @@ func (s *Server) linkRepoRef(c *gin.Context) {
 	var req repoRefRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
+		return
+	}
+	if err := s.ownTask(c); err != nil {
+		fail(c, s.log, err)
 		return
 	}
 	ref, err := s.engine.LinkRepoRef(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
@@ -202,6 +229,10 @@ func (s *Server) resolveDrift(c *gin.Context) {
 	var req resolveDriftRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
+		return
+	}
+	if err := s.ownTask(c); err != nil {
+		fail(c, s.log, err)
 		return
 	}
 

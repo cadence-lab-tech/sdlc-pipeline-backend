@@ -148,6 +148,9 @@ type ProjectTeam struct {
 const (
 	TokenAPI     = "api"
 	TokenSession = "session"
+	// TokenTask — токен исполнителя этапа (решение 0049): привязан к прогону,
+	// живёт, пока жива его аренда, и работает только со своей задачей.
+	TokenTask = "task"
 )
 
 // CLILoginRequest — запрос входа CLI через браузер (решение 0032). CLI
@@ -232,6 +235,11 @@ type AccessToken struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	// Токен задачи (TokenKind = task): прогон, к которому он привязан, и его
+	// задача. У личных токенов пусто.
+	StageRunID *uuid.UUID `json:"stage_run_id,omitempty"`
+	TaskID     *uuid.UUID `json:"task_id,omitempty"`
+	TaskKey    *string    `json:"task_key,omitempty"`
 }
 
 type Project struct {

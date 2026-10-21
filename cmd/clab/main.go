@@ -69,7 +69,7 @@ func commands() []command {
 		{"metrics", "метрики цикла: где застревают задачи, какие гейты валятся", "clab metrics [--period 30d]", cmdMetrics},
 
 		{"me", "кто я по токену, где состою", "clab me", cmdMe},
-		{"token", "выдать, перечислить или отозвать токен", "clab token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | clab token list [--project SDLC] | clab token revoke <id>", cmdToken},
+		{"token", "выдать, перечислить или отозвать токен; токен задачи исполнителю этапа", "clab token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | clab token list [--project SDLC] | clab token revoke <id> | clab token task <ключ> (на вашу живую аренду, гаснет вместе с ней)", cmdToken},
 		{"members", "участники проекта и их уровни", "clab members [list] | clab members set user:alice agent [--roles developer,reviewer] | clab members remove user:alice", cmdMembers},
 		{"team", "команды: организации, состав, тариф (на общем инстансе), группы провайдера, права на проекты", "clab team list | clab team show acme | clab team create acme --name Acme | clab team convert <личная> --key acme | clab team plan acme [--set business] | clab team github acme | clab team add acme user:alice --role lead | clab team groups acme --set sdlc-platform | clab team grant acme --project SDLC --level maintainer [--roles reviewer]", cmdTeam},
 		{"invite", "приглашения ссылкой в команду или проект: выдать, список, отозвать", "clab invite create --team acme [--role lead] [--days 7] | clab invite create --project SDLC --level agent [--roles developer] [--days 7] | clab invite list --team acme | clab invite list --project SDLC | clab invite revoke <id>", cmdInvite},
@@ -234,11 +234,21 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 			Handle string `json:"handle"`
 		} `json:"principal"`
 		Authenticated bool `json:"authenticated"`
+		// Токен задачи (решение 0049): к какой задаче привязан SDLC_TOKEN.
+		Token *struct {
+			TokenKind string   `json:"token_kind"`
+			TaskKey   string   `json:"task_key"`
+			RoleKeys  []string `json:"role_keys"`
+		} `json:"token"`
 	}
 	if err := c.get(ctx, "/auth/me", nil, &me); err != nil {
 		return err
 	}
 	who := me.Principal.Kind + ":" + me.Principal.Handle
+	var taskToken map[string]any
+	if me.Token != nil && me.Token.TokenKind == "task" {
+		taskToken = map[string]any{"task_key": me.Token.TaskKey, "role_keys": me.Token.RoleKeys}
+	}
 
 	// /instance появилась позже /auth/me: её отсутствие — не повод молчать
 	// про всё остальное.
@@ -259,12 +269,18 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 
 	out := map[string]any{"principal": who, "authenticated": me.Authenticated, "api": c.base,
 		"instance": instance, "project": project}
+	if taskToken != nil {
+		out["task_token"] = taskToken
+	}
 	return emit(out, func() error {
 		how := "по токену"
 		if !me.Authenticated {
 			how = "по заголовку"
 		}
 		pairs := []string{"Кто:", who + " (" + how + ")", "API:", c.base}
+		if taskToken != nil {
+			pairs = append(pairs, "Токен:", "задачи "+me.Token.TaskKey+", роль "+joinOr(me.Token.RoleKeys, "—"))
+		}
 		if instance != nil {
 			line := dash(instance.Version)
 			if instance.Tenancy != "" {

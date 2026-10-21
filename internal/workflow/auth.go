@@ -207,6 +207,9 @@ type IssuedToken struct {
 }
 
 func (a *Auth) IssueToken(ctx context.Context, id Identity, in IssueTokenInput) (IssuedToken, error) {
+	if err := a.refuseTaskToken(id); err != nil {
+		return IssuedToken{}, err
+	}
 	if strings.TrimSpace(in.Name) == "" {
 		return IssuedToken{}, apperr.InvalidInput("у токена должно быть имя: по нему его потом отзывают")
 	}
@@ -627,6 +630,21 @@ func (a *Auth) Me(ctx context.Context, id Identity) (Me, error) {
 	teams, err := a.store.TeamsOf(ctx, q, id.Principal.ID)
 	if err != nil {
 		return Me{}, err
+	}
+	// Токен задачи видит участие только в проекте своей задачи и не видит
+	// команд (решение 0049 п. 5): исполнителю этапа незачем знать, где ещё
+	// состоит держатель аренды.
+	if a.Bound(id) != nil {
+		own := []domain.ProjectMember{}
+		for _, m := range memberships {
+			if id.Token.ProjectID != nil && m.ProjectID == *id.Token.ProjectID {
+				own = append(own, m)
+			}
+		}
+		return Me{
+			Mode: a.mode, Authenticated: true, Principal: id.Principal, Token: id.Token,
+			Memberships: own, Teams: []domain.TeamMember{},
+		}, nil
 	}
 	canCreate := !a.Enforced() || id.Principal.IsAdmin ||
 		(a.openProjects && id.Principal.Kind == domain.PrincipalUser && !a.single())

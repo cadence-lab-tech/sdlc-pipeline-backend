@@ -71,6 +71,10 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 	if err := s.allow(ctx, domain.MemberAgent); err != nil {
 		return fail(err)
 	}
+	// Токен задачи заводит только детей своей задачи.
+	if err := s.auth.RequireOwnTaskKey(identity(ctx), in.Parent); err != nil {
+		return fail(err)
+	}
 	key, err := projectKey(ctx)
 	if err != nil {
 		return fail(err)
@@ -229,6 +233,12 @@ func (s *Server) reportUsage(ctx context.Context, in reportUsageInput) (*sdk.Cal
 		}
 		report.StageRunID = &id
 	}
+	// Токен задачи отчитывается только о своём прогоне.
+	runID, err := s.auth.OwnRun(identity(ctx), in.TaskKey, report.StageRunID)
+	if err != nil {
+		return fail(err)
+	}
+	report.StageRunID = runID
 
 	out, err := s.engine.ReportUsage(ctx, in.TaskKey, actor(ctx).ID, report)
 	if err != nil {

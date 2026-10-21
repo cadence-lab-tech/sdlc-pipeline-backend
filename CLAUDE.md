@@ -412,6 +412,18 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
 - **Токен агента ограничивает, а не расширяет.** Привязка к проекту делает
   токен недействительным вне него даже у администратора; `role_keys` токена
   сужают захват этапов до этих ролей.
+- **Токен задачи — учётные данные исполнителя этапа** ([решение 0049](../docs/decisions/0049-stage-executor-credentials.md)).
+  `agent_tokens.kind = 'task'` со ссылкой на `stage_runs`; выпускает держатель
+  живой аренды (`Auth.IssueTaskToken`, `POST /tasks/{key}/task-token`,
+  `clab token task`). Жизнь — аренда: `TokenByHash` сверяет прогон на каждом
+  запросе, `RevokeRunTokens` гасит токены в транзакции события аренды
+  (release, протухание, повторный захват, `gating`, `FinishStageRun`).
+  Рамки — `workflow/tasktoken.go`: запись в свою задачу и свой прогон
+  (`RequireOwnTask`, `OwnRun`), чтение в круге задачи (`RequireReadable`,
+  `TaskReadCircle`), сводка списков, поиск по области (`SearchBound`).
+  REST зовёт их из `guard` и ручек записи, MCP — из `inProject`,
+  `ownTarget`, `leaseTarget`. Только в режиме `token` и только для токена
+  задачи: личный токен и сессия этих проверок не видят.
 - **Роли специалистов выдаёт участие, токен их только сужает**
   ([решение 0030](../docs/decisions/0030-member-roles-github-login-open-projects.md)).
   `project_members.role_keys` и `project_teams.role_keys` ставит администратор

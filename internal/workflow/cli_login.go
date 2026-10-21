@@ -109,6 +109,11 @@ func (a *Auth) ApproveCLILogin(ctx context.Context, id Identity, code string, ap
 	if err := a.requireLogin(id); err != nil {
 		return domain.CLILoginRequest{}, err
 	}
+	// Подтверждённый вход — это выпуск токена владельцу: токеном задачи
+	// нельзя и так (решение 0049).
+	if err := a.refuseTaskToken(id); err != nil {
+		return domain.CLILoginRequest{}, err
+	}
 	q := a.store.DB()
 	req, err := a.store.CLILoginByCode(ctx, q, NormalizeUserCode(code))
 	if err != nil {

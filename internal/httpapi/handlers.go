@@ -180,6 +180,15 @@ func (s *Server) listTasks(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	if s.auth.SummaryOnly(identity(c)) {
+		// Список проекта токеном задачи — сводка (решение 0049 п. 5).
+		items := make([]gin.H, 0, len(tasks))
+		for _, t := range tasks {
+			items = append(items, taskSummary(t))
+		}
+		c.JSON(http.StatusOK, gin.H{"tasks": items})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
@@ -204,6 +213,11 @@ func (s *Server) createTask(c *gin.Context) {
 	var req createTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
+		return
+	}
+	// Токен задачи заводит только детей своей задачи.
+	if err := s.auth.RequireOwnTaskKey(identity(c), req.ParentKey); err != nil {
+		fail(c, s.log, err)
 		return
 	}
 	// Уровень актора решает, вправе ли он завести задачу где угодно или
@@ -371,6 +385,13 @@ func (s *Server) reportUsage(c *gin.Context) {
 		}
 		in.StageRunID = &id
 	}
+	// Токен задачи отчитывается только о своём прогоне.
+	runID, err := s.auth.OwnRun(identity(c), c.Param("taskKey"), in.StageRunID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	in.StageRunID = runID
 
 	out, err := s.engine.ReportUsage(c.Request.Context(), c.Param("taskKey"), actor(c).ID, in)
 	if err != nil {
@@ -413,6 +434,10 @@ type executeTransitionRequest struct {
 func (s *Server) executeTransition(c *gin.Context) {
 	var req executeTransitionRequest
 	_ = c.ShouldBindJSON(&req)
+	if err := s.ownTask(c); err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	res, err := s.engine.Execute(c.Request.Context(),
 		c.Param("taskKey"), c.Param("transitionKey"), actor(c).ID, req.Comment)
@@ -596,8 +621,16 @@ func (s *Server) submitArtifact(c *gin.Context) {
 		return
 	}
 
+	in := agentSubmitInput(req)
+	// Токен задачи сдаёт только в свой прогон.
+	runID, err := s.auth.OwnRun(identity(c), c.Param("taskKey"), in.StageRunID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	in.StageRunID = runID
 	artifact, err := s.engine.SubmitArtifact(c.Request.Context(), c.Param("taskKey"),
-		actor(c).ID, agentSubmitInput(req))
+		actor(c).ID, in)
 	if err != nil {
 		fail(c, s.log, err)
 		return

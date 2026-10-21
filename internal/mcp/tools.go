@@ -153,6 +153,13 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 	if allowed != nil {
 		view["allowed_roles"] = allowed
 	}
+	// Исполнитель этапа видит, к какой задаче и прогону привязан его токен.
+	if b := id.TaskToken(); b != nil {
+		view["token"] = map[string]any{
+			"token_kind": id.Token.TokenKind, "task_key": b.TaskKey,
+			"stage_run_id": b.StageRunID, "role_keys": id.Token.RoleKeys,
+		}
+	}
 	return ok(view)
 }
 
@@ -275,8 +282,13 @@ func (s *Server) claimTask(ctx context.Context, in claimInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
+	// Токен задачи захватом только подтверждает аренду своего прогона.
+	onlyRun, err := s.auth.OwnRun(identity(ctx), in.TaskKey, nil)
+	if err != nil {
+		return fail(err)
+	}
 	res, err := s.engine.ClaimWith(ctx, in.TaskKey, actor(ctx).ID, in.SessionRef,
-		workflow.ClaimOptions{AllowedRoles: allowed})
+		workflow.ClaimOptions{AllowedRoles: allowed, OnlyRun: onlyRun})
 	if err != nil {
 		return fail(err)
 	}
@@ -351,6 +363,9 @@ func (s *Server) getArtifact(ctx context.Context, in artifactInput) (*sdk.CallTo
 	if err := s.artifactInProject(ctx, a); err != nil {
 		return fail(err)
 	}
+	if err := s.auth.RequireReadable(ctx, identity(ctx), a.TaskID); err != nil {
+		return fail(err)
+	}
 	content, mediaType, err := s.store.BlobContent(ctx, q, a.BlobSHA)
 	if err != nil {
 		return fail(err)
@@ -393,7 +408,7 @@ func (s *Server) submitArtifact(ctx context.Context, in submitInput) (*sdk.CallT
 	if err := s.allow(ctx, domain.MemberAgent); err != nil {
 		return fail(err)
 	}
-	taskKey, runID, err := s.resolveTarget(ctx, in.TaskKey, in.StageRunID)
+	taskKey, runID, err := s.ownTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
 	}
@@ -449,6 +464,9 @@ func (s *Server) linkRepoRef(ctx context.Context, in linkRepoRefInput) (*sdk.Cal
 		return fail(err)
 	}
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
+		return fail(err)
+	}
+	if err := s.auth.RequireOwnTaskKey(identity(ctx), in.TaskKey); err != nil {
 		return fail(err)
 	}
 	ref, err := s.engine.LinkRepoRef(ctx, in.TaskKey, actor(ctx).ID, workflow.LinkRepoRefInput{
@@ -530,6 +548,15 @@ func (s *Server) resolveDrift(ctx context.Context, in resolveDriftInput) (*sdk.C
 	if err != nil {
 		return fail(apperr.InvalidInput("signal_id не UUID"))
 	}
+	if s.auth.Bound(identity(ctx)) != nil {
+		sig, err := s.store.GetDriftSignal(ctx, s.store.DB(), id)
+		if err != nil {
+			return fail(err)
+		}
+		if err := s.auth.RequireOwnTask(identity(ctx), sig.TaskID); err != nil {
+			return fail(err)
+		}
+	}
 
 	input := workflow.ResolveDriftInput{
 		SignalID: id, Resolution: in.Resolution, Note: in.Note,
@@ -605,7 +632,7 @@ func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sd
 	if err := s.allow(ctx, domain.MemberAgent); err != nil {
 		return fail(err)
 	}
-	taskKey, runID, err := s.resolveTarget(ctx, in.TaskKey, in.StageRunID)
+	taskKey, runID, err := s.ownTarget(ctx, in.TaskKey, in.StageRunID)
 	if err != nil {
 		return fail(err)
 	}
@@ -724,6 +751,23 @@ func (s *Server) resolveTarget(ctx context.Context, taskKey, stageRunID string) 
 
 // leaseTarget находит прогон, к которому относится аренда.
 func (s *Server) leaseTarget(ctx context.Context, taskKey, stageRunID string) (uuid.UUID, error) {
+	if b := s.auth.Bound(identity(ctx)); b != nil {
+		// Токен задачи — только свой прогон; без явного берётся он, а не
+		// «первый, который держит принципал».
+		var explicit *uuid.UUID
+		if stageRunID != "" {
+			id, err := uuid.Parse(stageRunID)
+			if err != nil {
+				return uuid.Nil, apperr.InvalidInput("stage_run_id не UUID")
+			}
+			explicit = &id
+		}
+		run, err := s.auth.OwnRun(identity(ctx), taskKey, explicit)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		return *run, nil
+	}
 	if stageRunID != "" {
 		id, err := uuid.Parse(stageRunID)
 		if err != nil {
@@ -770,7 +814,23 @@ func (s *Server) inProject(ctx context.Context, taskKey string) error {
 	if task.ProjectKey != key {
 		return apperr.NotFound("задача %q не принадлежит проекту %s", taskKey, key)
 	}
-	return nil
+	// Круг чтения токена задачи — общее условие любого тула по ключу задачи:
+	// запись сверх того сужают ownTarget, leaseTarget и проверки в тулах.
+	return s.auth.RequireReadable(ctx, identity(ctx), task.ID)
+}
+
+// ownTarget — resolveTarget для записи токеном задачи: задача своя, прогон
+// свой, а без явного прогона берётся прогон токена.
+func (s *Server) ownTarget(ctx context.Context, taskKey, stageRunID string) (string, *uuid.UUID, error) {
+	key, runID, err := s.resolveTarget(ctx, taskKey, stageRunID)
+	if err != nil {
+		return "", nil, err
+	}
+	runID, err = s.auth.OwnRun(identity(ctx), key, runID)
+	if err != nil {
+		return "", nil, err
+	}
+	return key, runID, nil
 }
 
 func (s *Server) artifactInProject(ctx context.Context, a domain.Artifact) error {
@@ -805,11 +865,16 @@ func (s *Server) searchContext(ctx context.Context, in searchInput) (*sdk.CallTo
 	if err != nil {
 		return fail(err)
 	}
+	bound, err := s.auth.SearchBound(ctx, identity(ctx))
+	if err != nil {
+		return fail(err)
+	}
 	res, err := s.engine.SearchContext(ctx, key, workflow.SearchInput{
 		Query:        in.Query,
 		Scopes:       in.Scope,
 		Repositories: in.Repositories,
 		TopK:         in.TopK,
+		Bound:        bound,
 	})
 	if err != nil {
 		return fail(err)
