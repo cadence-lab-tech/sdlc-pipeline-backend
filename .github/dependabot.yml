@@ -1,0 +1,25 @@
+# Базовые образы Dockerfile (CLAB-203, решение 0051). Оба FROM закреплены
+# по digest; раз в неделю Dependabot открывает PR, если upstream
+# переопубликовал тот же тег (новый патч Go в golang:1.26-alpine, пакеты
+# Debian в distroless). PR проходит ci.yml со сборкой образа, человек сливает
+# его напрямую после зелёного CI (docs/PROCESS.md).
+#
+# Смена линии тега — не автоматом: Go 1.27 и дальше — решение человека
+# отдельной задачей, поэтому minor и major у golang игнорируются. У
+# distroless тег nonroot версии не несёт — обновляется только digest;
+# следующий debian — другое имя образа, его Dependabot не предложит.
+#
+# Только docker: gomod и github-actions — не в этой политике.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "Dependabot"
+    ignore:
+      - dependency-name: golang
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
