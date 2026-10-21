@@ -189,6 +189,35 @@ func (s *Server) guard(need domain.MemberRole) gin.HandlerFunc {
 	}
 }
 
+// executorOnly — белый список токена задачи (решение 0049 п. 3, CLAB-208)
+// на каждый маршрут группы /v1. Слой стоит на группе, а не в guard: часть
+// ручек guard не зовёт (токены, вход CLI, команды, приглашения, создание
+// проекта), и новая ручка без явной строки в перечне закрыта сама.
+func (s *Server) executorOnly() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		action := workflow.RESTAction(c.Request.Method, c.FullPath())
+		if err := s.auth.ExecutorMay(identity(c), action); err != nil {
+			fail(c, s.log, err)
+			return
+		}
+		c.Next()
+	}
+}
+
+// guardDecision — решение по гейту. Людям и личным токенам — уровень
+// maintainer, как раньше; токену задачи — agent: ему разрешён только
+// чек-лист своего этапа, и это правило проверяет DecideGate.
+func (s *Server) guardDecision() gin.HandlerFunc {
+	maintainer, agent := s.guard(domain.MemberMaintainer), s.guard(domain.MemberAgent)
+	return func(c *gin.Context) {
+		if s.auth.Bound(identity(c)) != nil {
+			agent(c)
+			return
+		}
+		maintainer(c)
+	}
+}
+
 // requireAdmin — действия администратора системы.
 func (s *Server) requireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {

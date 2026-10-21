@@ -93,8 +93,10 @@ func (s *Server) Handler() http.Handler {
 	projectAdmin := s.guard(domain.MemberAdmin)
 
 	// Журнал стоит до аутентификации: отказ 401 отбивается раньше, чем
-	// появляется актор, и тоже должен попасть в журнал.
-	v1 := r.Group("/v1", s.auditREST(), s.authenticate(domain.PrincipalUser))
+	// появляется актор, и тоже должен попасть в журнал. Белый список токена
+	// задачи — сразу после аутентификации, до guard и ручек: отказ по нему не
+	// зависит ни от уровня, ни от is_admin, и журнал его видит.
+	v1 := r.Group("/v1", s.auditREST(), s.authenticate(domain.PrincipalUser), s.executorOnly())
 	{
 		// Кто я, токены. Права на выдачу проверяет сам сервис: токен себе
 		// может любой, другому — администратор проекта или системы.
@@ -254,8 +256,9 @@ func (s *Server) Handler() http.Handler {
 		// Гейт закрывается отдельно от перехода: на переходе их несколько и
 		// закрывать их можно в любом порядке и разными людьми. Решение по
 		// гейту — за сопровождающим; human_approval движок дополнительно
-		// требует человека, а не агента.
-		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", maintainer, s.decideGate)
+		// требует человека, а не агента. Исполнитель этапа токеном задачи
+		// отмечает только чек-лист своего этапа (guardDecision, DecideGate).
+		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", s.guardDecision(), s.decideGate)
 
 		v1.GET("/workflows/:workflowID", viewer, s.getWorkflowVersion)
 		// Типы задач правятся только у черновика: у активной версии по ним уже

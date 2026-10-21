@@ -8,6 +8,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -141,6 +142,14 @@ func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPre
 // дважды. Результаты гейтов пишутся в любом случае — заблокированный переход
 // должен оставить в базе объяснение, почему он не состоялся.
 func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, comment string) (TransitionResult, error) {
+	return e.ExecuteBound(ctx, taskKey, transitionKey, actor, nil, comment)
+}
+
+// ExecuteBound — Execute с привязкой токена задачи (Auth.Bound): исполнитель
+// этапа двигает только свою задачу и только вперёд или возвратом (решение
+// человека к 0049). nil — переход человека или агента с личным токеном,
+// правила те же, что у Execute. Транспорты зовут его, а не Execute.
+func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, bound *TaskBinding, comment string) (TransitionResult, error) {
 	var res TransitionResult
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -158,6 +167,11 @@ func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, act
 		if transition.FromStatusID != nil && *transition.FromStatusID != task.StatusID {
 			return apperr.New(apperr.CodeTransitionNotAllowed,
 				"переход %q недоступен из статуса %q", transitionKey, task.StatusKey)
+		}
+		if bound != nil {
+			if err := executorTransition(bound, task, transition); err != nil {
+				return err
+			}
 		}
 
 		run, err := e.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
@@ -335,7 +349,11 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 //
 // Само по себе решение задачу не двигает: переход остаётся отдельным действием,
 // потому что гейтов на переходе несколько и закрывать их можно в любом порядке.
-func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, status string, details json.RawMessage) (GateOutcome, error) {
+//
+// bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
+// Исполнитель этапа решает только passed по чек-листу своего этапа, а
+// human_approval не закрывает, даже если держатель аренды — человек.
+func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
 	var out GateOutcome
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -362,6 +380,17 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 		run, err := e.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
 		if err != nil {
 			return err
+		}
+
+		// Токен задачи апрув не ставит, даже если аренду держит человек
+		// (/clab-run): проверка по виду токена, а не только принципала.
+		if bound != nil && gate.Type == domain.GateHumanApproval {
+			return executorRefused(bound, fmt.Sprintf("гейт %q закрывает человек", gate.Key))
+		}
+		if bound != nil {
+			if err := executorGate(bound, task, run, transition, *gate, status); err != nil {
+				return err
+			}
 		}
 
 		// Апрув человека ставит человек. Агент, представившийся человеком,

@@ -145,6 +145,10 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
+	// Токен задачи правит только свою задачу и её детей (CLAB-208).
+	if err := s.auth.RequireWriteCircle(ctx, identity(ctx), in.TaskKey, "правка постановки"); err != nil {
+		return fail(err)
+	}
 	level, err := s.level(ctx)
 	if err != nil {
 		return fail(err)
@@ -193,6 +197,9 @@ func (s *Server) linkTasks(ctx context.Context, in linkTasksInput) (*sdk.CallToo
 	rel := in.Rel
 	if rel == "" {
 		rel = domain.TaskLinkBlocks
+	}
+	if err := s.auth.RequireLink(ctx, identity(ctx), in.From, in.To, rel); err != nil {
+		return fail(err)
 	}
 	links, err := s.engine.LinkTasks(ctx, in.From, in.To, rel, in.Note, actor(ctx).ID, in.Remove)
 	if err != nil {
@@ -264,6 +271,9 @@ func (s *Server) assignTask(ctx context.Context, in assignTaskInput) (*sdk.CallT
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
+	if err := s.auth.RequireWriteCircle(ctx, identity(ctx), in.TaskKey, "назначение"); err != nil {
+		return fail(err)
+	}
 	task, err := s.engine.Assign(ctx, in.TaskKey, in.Assignee, actor(ctx).ID)
 	if err != nil {
 		return fail(err)
@@ -300,7 +310,7 @@ func (s *Server) registerWorkPrompt() {
 			{Name: "role", Description: "ключ роли, если этап адресован конкретной"},
 		},
 	}
-	s.mcp.AddPrompt(prompt, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
+	s.addPrompt(prompt, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
 		if err := requirePromptArguments(prompt, req); err != nil {
 			return nil, err
 		}

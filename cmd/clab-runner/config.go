@@ -36,12 +36,20 @@ type Config struct {
 	// каталоге раннера, как раньше, и это безопасно только при одном слоте.
 	ReposDir     string
 	WorktreesDir string
+	// Что агенту передать из окружения сверх базового списка: имена и
+	// префиксы вида AWS_* из SDLC_RUNNER_ENV. Имена SDLC_* и CLAB_* сюда не
+	// попадают — они в AgentEnvRefused, о них раннер предупреждает при старте.
+	AgentEnv        []string
+	AgentEnvRefused []string
 }
 
 // Команда по умолчанию — Claude Code: агент получает промпт work_on_task с
 // того же MCP-сервера, к которому подключён, поэтому человек и раннер
-// стартуют одинаково (решение 0025).
-const defaultCommand = `claude -p --output-format json --mcp-config {mcp_config} ` +
+// стартуют одинаково (решение 0025). --strict-mcp-config оставляет агенту
+// только сервер из mcp.json раннера: серверы из настроек Claude Code
+// сотрудника — с его личным токеном (clab mcp install) — не подключаются
+// (CLAB-213). За свою SDLC_RUNNER_COMMAND отвечает администратор.
+const defaultCommand = `claude -p --output-format json --mcp-config {mcp_config} --strict-mcp-config ` +
 	`--model {model} --allowedTools {allowed_tools} {prompt}`
 
 func loadConfig() (Config, error) {
@@ -79,6 +87,7 @@ func loadConfig() (Config, error) {
 		}
 		c.Slots = n
 	}
+	c.AgentEnv, c.AgentEnvRefused = parseAgentEnv(env("SDLC_RUNNER_ENV", ""))
 	if err := c.loadWorkspaces(); err != nil {
 		return c, err
 	}

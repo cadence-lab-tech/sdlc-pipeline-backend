@@ -542,3 +542,48 @@ func TestMCPOverHTTPAndTokenKind(t *testing.T) {
 		t.Fatalf("вид токена задачи: %+v", task)
 	}
 }
+
+// Отказ белого списка токена задачи (CLAB-208) пишется в журнал (CLAB-210)
+// по обоим каналам: слой executorOnly стоит после auditREST, а обёртка add
+// пишет вызов и тогда, когда executorMay его отбил.
+func TestExecutorDenialsAreAudited(t *testing.T) {
+	f := newAuditFixture(t)
+	for _, path := range []string{"/v1/tasks/SDLC-1/transitions/start", "/v1/tasks/SDLC-1/claim"} {
+		if rec := f.do("POST", path, f.root, map[string]any{}); rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	rec := f.do("POST", "/v1/tasks/SDLC-1/task-token", f.root, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("токен задачи: %d %s", rec.Code, rec.Body)
+	}
+	var issued struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := f.do("PATCH", "/v1/tasks/SDLC-1/scope", issued.Token,
+		map[string]any{"properties": map[string]any{"multi_repo": true}}); rec.Code != http.StatusForbidden {
+		t.Fatalf("область токеном задачи: %d %s", rec.Code, rec.Body)
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sdlc_put_role","arguments":{"key":"analyst","instructions":"x"}}}`
+	req := httptest.NewRequest("POST", "/mcp/projects/SDLC", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+issued.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	mrec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(mrec, req)
+	if !strings.Contains(mrec.Body.String(), "действие человека, не исполнителя этапа") {
+		t.Fatalf("тул токеном задачи: %d %s", mrec.Code, mrec.Body)
+	}
+
+	got := f.rows("a.token_kind = 'task' AND a.outcome = 'forbidden'")
+	if len(got) != 2 ||
+		got[0].Channel != "rest" || got[0].Action != "PATCH /v1/tasks/:taskKey/scope" || s(got[0].Task) != "SDLC-1" ||
+		got[0].Status == nil || *got[0].Status != http.StatusForbidden ||
+		got[1].Channel != "mcp" || got[1].Action != "sdlc_put_role" {
+		t.Fatalf("отказы токена задачи в журнале: %+v", got)
+	}
+}
