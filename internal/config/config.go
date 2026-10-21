@@ -2,7 +2,8 @@
 //
 // Всё конфигурируется переменными с префиксом SDLC_, потому что сервис
 // разворачивается в контейнере: файл конфигурации там пришлось бы монтировать
-// отдельно, а секрет подключения к базе всё равно приходит окружением.
+// отдельно. Секреты — исключение наполовину: каждый из перечня
+// secrets.List приходит и файлом, X_FILE (Docker и k8s secrets, решение 0052).
 package config
 
 import (
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 type Config struct {
@@ -206,11 +208,14 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	// Секреты — значением или файлом (CLAB-200, решение 0052); первая ошибка
+	// чтения останавливает старт до сети и базы.
+	sec := &secretReader{src: secrets.OS()}
 	c := Config{
 		HTTPAddr:              env("SDLC_HTTP_ADDR", ":8080"),
 		ShutdownTimeout:       15 * time.Second,
 		RequestTimeout:        30 * time.Second,
-		DatabaseURL:           env("SDLC_DATABASE_URL", ""),
+		DatabaseURL:           sec.databaseURL(),
 		MaxConns:              10,
 		ConnectTimeout:        30 * time.Second,
 		AutoMigrate:           true,
@@ -222,10 +227,10 @@ func Load() (Config, error) {
 		GitHubAPIURL:          env("SDLC_GITHUB_API_URL", "https://api.github.com"),
 		GitHubAppID:           env("SDLC_GITHUB_APP_ID", ""),
 		GitHubAppKeyFile:      env("SDLC_GITHUB_APP_KEY_FILE", ""),
-		GitHubToken:           env("SDLC_GITHUB_TOKEN", ""),
+		GitHubToken:           sec.value("SDLC_GITHUB_TOKEN"),
 		GitHubWebURL:          env("SDLC_GITHUB_URL", "https://github.com"),
 		GitHubAppClientID:     env("SDLC_GITHUB_APP_CLIENT_ID", ""),
-		GitHubAppClientSecret: env("SDLC_GITHUB_APP_CLIENT_SECRET", ""),
+		GitHubAppClientSecret: sec.value("SDLC_GITHUB_APP_CLIENT_SECRET"),
 		GitHubAppSlug:         env("SDLC_GITHUB_APP_SLUG", ""),
 		ProjectCreation:       env("SDLC_PROJECT_CREATION", "open"),
 		Tenancy:               env("SDLC_TENANCY", "shared"),
@@ -239,12 +244,12 @@ func Load() (Config, error) {
 		EmbeddingModel:        env("SDLC_EMBEDDINGS_MODEL", ""),
 		EmbeddingBatch:        96,
 		EmbeddingURL:          strings.TrimRight(env("SDLC_EMBEDDINGS_URL", ""), "/"),
-		EmbeddingAPIKey:       env("SDLC_EMBEDDINGS_API_KEY", ""),
+		EmbeddingAPIKey:       sec.value("SDLC_EMBEDDINGS_API_KEY"),
 		VoyageAPIURL:          env("SDLC_VOYAGE_API_URL", ""),
-		VoyageAPIKey:          env("SDLC_VOYAGE_API_KEY", ""),
+		VoyageAPIKey:          sec.value("SDLC_VOYAGE_API_KEY"),
 		AuthMode:              env("SDLC_AUTH_MODE", ""),
 		AdminHandle:           env("SDLC_ADMIN_HANDLE", "admin"),
-		AdminToken:            env("SDLC_ADMIN_TOKEN", ""),
+		AdminToken:            sec.value("SDLC_ADMIN_TOKEN"),
 		BootstrapTeam:         env("SDLC_BOOTSTRAP_TEAM", ""),
 		BootstrapTeamName:     env("SDLC_BOOTSTRAP_TEAM_NAME", ""),
 		OIDCIssuer:            env("SDLC_OIDC_ISSUER", ""),
@@ -258,9 +263,9 @@ func Load() (Config, error) {
 			Region:       env("SDLC_BLOB_S3_REGION", env("AWS_REGION", "")),
 			Bucket:       env("SDLC_BLOB_S3_BUCKET", ""),
 			Prefix:       env("SDLC_BLOB_S3_PREFIX", ""),
-			AccessKey:    env("SDLC_BLOB_S3_ACCESS_KEY_ID", env("AWS_ACCESS_KEY_ID", "")),
-			SecretKey:    env("SDLC_BLOB_S3_SECRET_ACCESS_KEY", env("AWS_SECRET_ACCESS_KEY", "")),
-			SessionToken: env("SDLC_BLOB_S3_SESSION_TOKEN", env("AWS_SESSION_TOKEN", "")),
+			AccessKey:    sec.valueOr("SDLC_BLOB_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+			SecretKey:    sec.valueOr("SDLC_BLOB_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+			SessionToken: sec.valueOr("SDLC_BLOB_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
 		},
 		BlobInlineMaxBytes: 256 << 10,
 		BlobMaxBytes:       64 << 20,
@@ -285,7 +290,7 @@ func Load() (Config, error) {
 		// несколько проходов.
 		EmbeddingCacheGCLimit:    10_000,
 		EmbeddingCacheTouchAfter: time.Hour,
-		GitHubWebhookSecret:      env("SDLC_GITHUB_WEBHOOK_SECRET", ""),
+		GitHubWebhookSecret:      sec.value("SDLC_GITHUB_WEBHOOK_SECRET"),
 		IndexPollInterval:        15 * time.Second,
 		IndexRetainRuns:          5,
 		LogLevel:                 env("SDLC_LOG_LEVEL", "info"),
@@ -293,8 +298,11 @@ func Load() (Config, error) {
 		Env:                      env("SDLC_ENV", "development"),
 	}
 
+	if sec.err != nil {
+		return c, sec.err
+	}
 	if c.DatabaseURL == "" {
-		return c, fmt.Errorf("SDLC_DATABASE_URL не задан")
+		return c, fmt.Errorf("SDLC_DATABASE_URL не задан (ни значением, ни файлом SDLC_DATABASE_URL_FILE)")
 	}
 
 	var err error
@@ -628,6 +636,34 @@ func checkListenAddr(key, addr string) error {
 		return fmt.Errorf("%s: порт %q вне 1-65535", key, port)
 	}
 	return nil
+}
+
+// secretReader читает секреты перечня secrets.List и запоминает первую
+// ошибку: Load собирает конфигурацию одним литералом, и проверка идёт после
+// него, до любой другой.
+type secretReader struct {
+	src secrets.Source
+	err error
+}
+
+func (r *secretReader) keep(v string, err error) string {
+	if err != nil && r.err == nil {
+		r.err = err
+	}
+	return v
+}
+
+func (r *secretReader) value(name string) string { return r.keep(r.src.Value(name)) }
+
+func (r *secretReader) databaseURL() string { return r.keep(r.src.DatabaseURL()) }
+
+// valueOr — секрет, а при пустых обеих его формах — запасная переменная
+// AWS_*: её имя не наше, и формы _FILE у неё нет.
+func (r *secretReader) valueOr(name, fallback string) string {
+	if v := r.value(name); v != "" {
+		return v
+	}
+	return env(fallback, "")
 }
 
 func env(key, def string) string {

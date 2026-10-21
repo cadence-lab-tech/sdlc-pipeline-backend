@@ -84,7 +84,8 @@ func TestServerBackupUpload(t *testing.T) {
 		t.Fatalf("upload: %d %s", code, errw)
 	}
 	put := "docker compose run --rm --no-deps -T --user 1000:1000 -e BACKUP_S3_BUCKET -e BACKUP_S3_ENDPOINT -e BACKUP_S3_REGION " +
-		"-e BACKUP_S3_PREFIX -e BACKUP_S3_ACCESS_KEY_ID -e BACKUP_S3_SECRET_ACCESS_KEY -e BACKUP_S3_PATH_STYLE -e BACKUP_S3_KEEP " +
+		"-e BACKUP_S3_PREFIX -e BACKUP_S3_ACCESS_KEY_ID -e BACKUP_S3_ACCESS_KEY_ID_FILE -e BACKUP_S3_SECRET_ACCESS_KEY " +
+		"-e BACKUP_S3_SECRET_ACCESS_KEY_FILE -e BACKUP_S3_PATH_STYLE -e BACKUP_S3_KEEP " +
 		"-v " + filepath.Join(dir, "backups") + ":/backups api backup-s3 put /backups/cadence-v0.10.0-20261018-030000.sql.gz"
 	if !r.called(put) {
 		t.Fatalf("no put: %v", r.calls)

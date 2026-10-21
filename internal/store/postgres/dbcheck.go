@@ -99,6 +99,17 @@ func (r *CheckReport) add(name, status, detail, hint string) {
 	}
 }
 
+// FailedCheck — отчёт, который не дошёл до адреса: адрес не собрался из
+// окружения (файл секрета не читается, обе формы заданы).
+func FailedCheck(name, detail, hint string) CheckReport {
+	r := CheckReport{OK: true}
+	if latest, err := LatestMigration(); err == nil {
+		r.ImageSchemaVersion = latest
+	}
+	r.add(name, CheckFail, detail, hint)
+	return r
+}
+
 // CheckDatabase проверяет базу по адресу: параметры адреса и TLS, связь,
 // версию сервера, расширения, права роли и состояние схемы.
 func CheckDatabase(ctx context.Context, rawURL string, o CheckOptions) CheckReport {

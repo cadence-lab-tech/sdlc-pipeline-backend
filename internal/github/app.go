@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 type App struct {
@@ -339,12 +341,12 @@ func (r CredentialRefs) Resolve() (Credentials, CredentialSource) {
 type Provider struct {
 	base   *Client
 	app    *App
-	secret func(ref string) string
+	secret func(ref string) (string, error)
 }
 
-func NewProvider(base *Client, app *App, secret func(ref string) string) *Provider {
+func NewProvider(base *Client, app *App, secret func(ref string) (string, error)) *Provider {
 	if secret == nil {
-		secret = func(string) string { return "" }
+		secret = func(string) (string, error) { return "", nil }
 	}
 	return &Provider{base: base, app: app, secret: secret}
 }
@@ -353,24 +355,31 @@ func NewProvider(base *Client, app *App, secret func(ref string) string) *Provid
 func (p *Provider) HasApp() bool { return p != nil && p.app != nil }
 
 // SecretFromEnv переводит имя секрета в токен. В базе лежит имя, а не сам
-// токен: секретов в базе нет. Основное имя — SDLC_GITHUB_TOKEN_<NAME>;
-// голое имя переменной остаётся ради конфигураций, заведённых до приложения.
-func SecretFromEnv(ref string) string {
+// токен: секретов в базе нет. Основное имя — SDLC_GITHUB_TOKEN_<NAME>, оно
+// же файлом SDLC_GITHUB_TOKEN_<NAME>_FILE (решение 0052); обе формы сразу —
+// ошибка. Голое имя переменной остаётся ради конфигураций, заведённых до
+// приложения, и файловой формы не получает.
+func SecretFromEnv(ref string) (string, error) {
 	name := strings.Map(func(r rune) rune {
 		if r == '-' || r == '.' || r == '/' {
 			return '_'
 		}
 		return r
 	}, strings.ToUpper(ref))
-	if token := os.Getenv("SDLC_GITHUB_TOKEN_" + name); token != "" {
-		return token
+	token, err := secrets.OS().Value(secrets.GitHubTokenOf + name)
+	if err != nil || token != "" {
+		return token, err
 	}
-	return os.Getenv(name)
+	return os.Getenv(name), nil
 }
 
 func (p *Provider) Client(ctx context.Context, creds Credentials) (*Client, error) {
 	if creds.SecretRef != "" {
-		if token := p.secret(creds.SecretRef); token != "" {
+		token, err := p.secret(creds.SecretRef)
+		if err != nil {
+			return nil, fmt.Errorf("github: секрет %q: %w", creds.SecretRef, err)
+		}
+		if token != "" {
 			return p.base.WithToken(token), nil
 		}
 		// Имя есть, а секрета нет — это ошибка конфигурации, и молча ходить

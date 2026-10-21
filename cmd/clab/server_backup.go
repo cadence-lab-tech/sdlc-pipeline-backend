@@ -146,6 +146,13 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 	if err := i.checkDBMode(); err != nil {
 		return "", err
 	}
+	if i.externalDB() {
+		// Файл адреса или пароля читается до дампа: путь вне secrets/ или
+		// нечитаемый файл — отказ, а не пустой дамп.
+		if _, _, err := i.dbConn(); err != nil {
+			return "", err
+		}
+	}
 	if !i.externalDB() && !i.running(ctx, "postgres") {
 		return "", errors.New("the postgres container is not running: nothing to back up")
 	}
@@ -157,7 +164,7 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 	// клиент другой версии ломает дамп. Встроенная база — её же контейнер,
 	// внешняя — клиент бэкапа с pg_dump старшей поддерживаемой версии.
 	if i.externalDB() {
-		i.e.info("dumping the external database %s to %s", dbTarget(i.get("SDLC_DATABASE_URL")), dump)
+		i.e.info("dumping the external database %s to %s", i.externalTarget(), dump)
 	} else {
 		i.e.info("dumping the database to %s", dump)
 	}
@@ -206,19 +213,24 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 // dumpTo — pg_dump в контейнере postgres или в клиенте бэкапа внешней базы,
 // сжатый в файл с правами 600.
 func (i *installation) dumpTo(ctx context.Context, dump string) error {
+	var c cmdSpec
+	if i.externalDB() {
+		// Адрес до файла дампа: файл секрета, который не читается, —
+		// отказ без пустого дампа.
+		safe, password, err := i.dbConn()
+		if err != nil {
+			return err
+		}
+		c = i.dbClient(password, append([]string{"pg_dump", "-d", safe}, dumpOptions...)...)
+	} else {
+		c = i.compose(append([]string{"exec", "-T", "postgres", "pg_dump",
+			"-U", i.getDefault("POSTGRES_USER", "sdlc"), "-d", i.getDefault("POSTGRES_DB", "sdlc")}, dumpOptions...)...)
+	}
 	f, err := os.OpenFile(dump, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	gz := gzip.NewWriter(f)
-	var c cmdSpec
-	if i.externalDB() {
-		safe, _ := dbURLParts(i.get("SDLC_DATABASE_URL"))
-		c = i.dbClient(append([]string{"pg_dump", "-d", safe}, dumpOptions...)...)
-	} else {
-		c = i.compose(append([]string{"exec", "-T", "postgres", "pg_dump",
-			"-U", i.getDefault("POSTGRES_USER", "sdlc"), "-d", i.getDefault("POSTGRES_DB", "sdlc")}, dumpOptions...)...)
-	}
 	c.stdout, c.stderr = gz, i.e.errw
 	runErr := i.e.run.run(ctx, c)
 	gzErr := gz.Close()

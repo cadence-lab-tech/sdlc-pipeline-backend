@@ -165,7 +165,7 @@ func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 	e := i.e
 	if i.externalDB() {
 		// До остановки: недоступная база оставляет стек работать.
-		e.info("checking the external database %s", dbTarget(i.get("SDLC_DATABASE_URL")))
+		e.info("checking the external database %s", i.externalTarget())
 		if err := i.dbClientCheck(ctx); err != nil {
 			return errors.New("the backup client cannot connect to the external database (see above); nothing was changed")
 		}
@@ -188,7 +188,11 @@ func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 // dbResetSQL, затем сам дамп.
 func (i *installation) loadExternal(ctx context.Context, dump string) error {
 	e := i.e
-	e.info("loading %s into %s (one transaction)", filepath.Base(dump), dbTarget(i.get("SDLC_DATABASE_URL")))
+	e.info("loading %s into %s (one transaction)", filepath.Base(dump), i.externalTarget())
+	safe, password, err := i.dbConn()
+	if err != nil {
+		return err
+	}
 	f, err := os.Open(dump)
 	if err != nil {
 		return err
@@ -198,8 +202,7 @@ func (i *installation) loadExternal(ctx context.Context, dump string) error {
 	if err != nil {
 		return err
 	}
-	safe, _ := dbURLParts(i.get("SDLC_DATABASE_URL"))
-	c := i.dbClient("psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-d", safe)
+	c := i.dbClient(password, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-d", safe)
 	c.stdin = io.MultiReader(strings.NewReader(dbResetSQL), filterTransactionTimeout(gz))
 	c.stdout, c.stderr = io.Discard, e.errw
 	if err := e.run.run(ctx, c); err != nil {
