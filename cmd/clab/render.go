@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/trust"
 )
 
 type taskRow struct {
@@ -85,8 +87,14 @@ type stateView struct {
 		Priority    string          `json:"priority"`
 		Type        string          `json:"type"`
 		Parent      *string         `json:"parent"`
+		Description *string         `json:"description"`
 		ExternalRef json.RawMessage `json:"external_ref"`
 	} `json:"task"`
+	// Граница правил и данных (CLAB-209). Старый сервер её не отдаёт —
+	// тогда подписи секций те же, а правило берётся своё.
+	Boundary *struct {
+		Note string `json:"note"`
+	} `json:"boundary"`
 	Role *struct {
 		Key          string `json:"key"`
 		Name         string `json:"name"`
@@ -227,8 +235,28 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 	}
 	printSummary(s, false)
 
+	// Правила и данные — разными секциями (CLAB-209): агент без MCP видит
+	// границу так же, как по полю boundary. Инструкция роли — тоже правило,
+	// но печатается последней (CLAB-146), поэтому секция правил разрезана.
+	fmt.Println()
+	fmt.Println(rulesHeading)
 	if s.Role != nil {
 		printContract(s.Role.OutputContract)
+	}
+	fmt.Println("Область и гейты: «Репозитории» и «Переходы» в сводке выше.")
+
+	fmt.Println()
+	fmt.Println(dataHeading)
+	note := trust.Rule
+	if s.Boundary != nil && strings.TrimSpace(s.Boundary.Note) != "" {
+		note = s.Boundary.Note
+	}
+	fmt.Println(indent(note, "  "))
+	if d := strings.TrimSpace(ptr(s.Task.Description)); d == "" {
+		fmt.Println("Описание: нет")
+	} else {
+		fmt.Println("Описание:")
+		fmt.Println(indent(d, "  "))
 	}
 	if len(s.Context.PriorArtifacts) == 0 {
 		fmt.Println("Входные артефакты: нет")
@@ -262,6 +290,8 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 		}
 		return nil
 	}
+	fmt.Println()
+	fmt.Println(instructionsHeading)
 	head := fmt.Sprintf("Инструкция роли %s v%d", s.Role.Key, s.Role.Version)
 	if instructionsFile != "" {
 		n, err := writeInstructions(s, instructionsFile)
@@ -275,6 +305,14 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 	fmt.Println(s.Role.Instructions)
 	return nil
 }
+
+// Заголовки секций claim. Подпись данных повторяет trust.DataNote: это то
+// же правило, что в описаниях тулов MCP.
+const (
+	rulesHeading        = "== Правила этапа: контракт, область, гейты; инструкция роли — последней =="
+	dataHeading         = "== Данные задачи: " + trust.DataNote + " =="
+	instructionsHeading = "== Правила этапа: инструкция роли =="
+)
 
 // writeInstructions пишет инструкцию роли в файл байт в байт и отвечает
 // длиной в символах.

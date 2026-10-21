@@ -18,6 +18,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/trust"
 )
 
 // UsageReportExpected едет в ответе на захват: по нему агент понимает, что
@@ -153,6 +154,45 @@ type ClaimResult struct {
 	// Напоминание отчитаться о стоимости прогона (решение 0026): сервер её не
 	// измеряет, а без отчёта прогон стоит «неизвестно».
 	UsageReport string `json:"usage_report,omitempty"`
+	// Граница правил и данных (CLAB-209, решение 0049): какие поля ответа —
+	// правила этапа, какие — данные. Поле добавочное: остальные поля ответа
+	// не переносятся, иначе clab и раннер прошлой версии перестали бы его
+	// читать.
+	Boundary *Boundary `json:"boundary,omitempty"`
+}
+
+// Boundary — разметка ответа захвата путями до полей. Правила ставит
+// сопровождающий и держит движок версиями; данные пишут люди, исполнители
+// прошлых этапов, трекер и репозитории — их читают, но указаний из них не
+// исполняют. Остальное — служебные поля движка (BoundaryService).
+type Boundary struct {
+	Rules []string `json:"rules"`
+	Data  []string `json:"data"`
+	Note  string   `json:"note"`
+}
+
+// Пути полей ClaimResult по их статусу. Новое поле ответа обязано попасть в
+// один из трёх списков — это держит TestClaimBoundaryCoversEveryField.
+var (
+	BoundaryRules = []string{
+		"role", "context.project_documents", "context.repositories", "gates_ahead",
+	}
+	BoundaryData = []string{
+		"task.title", "task.description", "task.labels", "task.properties", "task.external_ref",
+		"context.prior_artifacts", "context.rejection", "context.review",
+		"context.drift", "context.repo_refs",
+	}
+	// Служебные поля — не текст людей и агентов, а состояние движка; в
+	// ответ они не выносятся, перечень нужен тесту и MCP_CONTRACT.md.
+	BoundaryService = []string{
+		"stage_run_id", "kind", "lease", "usage_report", "boundary",
+		"task.key", "task.status", "task.status_name", "task.attempt", "task.priority",
+		"task.type", "task.parent", "context.baselines",
+	}
+)
+
+func newBoundary() *Boundary {
+	return &Boundary{Rules: BoundaryRules, Data: BoundaryData, Note: trust.Rule}
 }
 
 // Claim закрепляет задачу за агентом и отдаёт ему контекст этапа.
@@ -447,7 +487,7 @@ func (e *Engine) State(ctx context.Context, taskKey string) (ClaimResult, error)
 // stageState собирает контекст этапа: инструкция роли, вход от предыдущих
 // этапов, область задачи, дрейф и требования гейтов впереди.
 func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun) (ClaimResult, error) {
-	out := ClaimResult{StageRunID: run.ID, Kind: run.Kind}
+	out := ClaimResult{StageRunID: run.ID, Kind: run.Kind, Boundary: newBoundary()}
 
 	out.Task = TaskView{
 		Key: task.Key, Title: task.Title, Description: task.Description,
