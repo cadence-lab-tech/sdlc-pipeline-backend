@@ -2,7 +2,10 @@
 # migrations/embed.go, поэтому образ поднимает базу сам — отдельный шаг с
 # миграциями в compose не нужен и не может разъехаться с версией сервиса.
 # Go 1.26: не ниже 1.25 требует MCP SDK (github.com/modelcontextprotocol/go-sdk),
-# 1.26 — golang.org/x/net и x/crypto с исправлениями безопасности (CLAB-169).
+# 1.26 — golang.org/x/net и x/crypto с исправлениями безопасности (CLAB-169),
+# патч не ниже go1.26.10 — crypto/x509, GO-2026-6809 (CLAB-224). Строка
+# toolchain в go.mod здесь не действует (образ ставит GOTOOLCHAIN=local): Go
+# берётся из плавающего тега golang:1.26-alpine, поэтому локально — --pull.
 #
 # Образ версии выходит под linux/amd64 и linux/arm64 (release.yml). Этап
 # сборки закреплён за платформой сборщика ($BUILDPLATFORM), а целевую
