@@ -170,28 +170,43 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 
 // getRaw читает ответ как есть: содержимое документа приезжает сырым телом.
 func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
+	raw, _, err := c.getContent(ctx, path)
+	return raw, err
+}
+
+// getContent — getRaw вместе с типом содержимого из ответа. Ошибка домена
+// приходит конвертом {"error":{code,message}}, как у do: по коду CI и
+// агент отличают «нет доступа» от «нет такого».
+func (c *Client) getContent(ctx context.Context, path string) ([]byte, string, error) {
 	if err := c.requireHost(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	c.authorize(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	c.checkServerVersion(resp)
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode >= 300 {
-		return nil, &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+		var envelope struct {
+			Error APIError `json:"error"`
+		}
+		if json.Unmarshal(raw, &envelope) == nil && envelope.Error.Code != "" {
+			envelope.Error.Status = resp.StatusCode
+			return nil, "", &envelope.Error
+		}
+		return nil, "", &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
 	}
-	return raw, nil
+	return raw, resp.Header.Get("Content-Type"), nil
 }
 
 // project — какой проект имеется в виду: флаг, SDLC_PROJECT, иначе проект,

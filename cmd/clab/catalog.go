@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -101,28 +102,88 @@ func cmdToken(ctx context.Context, c *Client, args []string) error {
 // его отдают исполнителю этапа через SDLC_TOKEN. Без --json печатается
 // только сам токен — одной строкой, чтобы его можно было взять в переменную:
 // TOKEN=$(clab token task CLAB-12).
+//
+// С --config-dir (CLAB-222) токен не печатается вовсе: он ложится конфигом
+// clab в каталог — хост вызвавшего и токен задачи, — и исполнитель ходит
+// с CLAB_CONFIG_DIR=<каталог>. Так токен не попадает ни в вывод, ни в
+// промпт саб-агента: оркестратору /clab-run достаточно передать путь.
 func tokenTask(ctx context.Context, c *Client, args []string) error {
 	key, rest := popTask(args)
-	if _, err := flags("token task", rest, func(*flag.FlagSet) {}); err != nil {
+	var configDirFlag string
+	if _, err := flags("token task", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&configDirFlag, "config-dir", "", "записать токен конфигом clab в этот каталог (для CLAB_CONFIG_DIR исполнителя), а не печатать")
+	}); err != nil {
 		return err
 	}
 	if key == "" {
-		return fmt.Errorf("clab token task <ключ задачи>")
+		return fmt.Errorf("clab token task <ключ задачи> [--config-dir <каталог>]")
+	}
+	var dir string
+	if configDirFlag != "" {
+		var err error
+		if dir, err = taskConfigDir(configDirFlag); err != nil {
+			return err
+		}
 	}
 	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+url.PathEscape(key)+"/task-token", nil, &out); err != nil {
 		return err
 	}
-	return emit(out, func() error {
-		var issued struct {
-			Token string `json:"token"`
-		}
-		if err := decode(out, &issued); err != nil {
-			return err
-		}
-		fmt.Println(issued.Token)
+	var issued struct {
+		Token  string `json:"token"`
+		Record struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"record"`
+		TaskKey        string `json:"task_key"`
+		Role           string `json:"role"`
+		LeaseExpiresAt string `json:"lease_expires_at"`
+	}
+	if err := decode(out, &issued); err != nil {
+		return err
+	}
+	if dir == "" {
+		return emit(out, func() error {
+			fmt.Println(issued.Token)
+			return nil
+		})
+	}
+
+	cfg := Config{DefaultHost: c.host, Hosts: map[string]HostConfig{
+		c.host: {URL: c.origin, Token: issued.Token, TokenID: issued.Record.ID, Handle: "task:" + issued.TaskKey},
+	}}
+	if err := saveConfigAt(dir, cfg); err != nil {
+		return err
+	}
+	// MkdirAll не меняет права существующего каталога, а в нём — токен.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("каталог конфига: %w", err)
+	}
+	written := map[string]any{"token_id": issued.Record.ID, "task_key": issued.TaskKey, "role": issued.Role,
+		"lease_expires_at": issued.LeaseExpiresAt, "host": c.host, "config_dir": dir,
+		"config_path": filepath.Join(dir, "config.json")}
+	return emit(written, func() error {
+		kv("Токен задачи:", issued.Record.ID+" ("+issued.TaskKey+", роль "+dash(issued.Role)+")",
+			"Конфиг:", filepath.Join(dir, "config.json"),
+			"Аренда до:", dash(issued.LeaseExpiresAt),
+			"Отзыв:", "clab token revoke "+issued.Record.ID)
+		fmt.Printf("\nКоманды исполнителя: env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=%s clab …\n", dir)
 		return nil
 	})
+}
+
+// taskConfigDir — абсолютный путь каталога для конфига токена задачи. Свой
+// каталог конфига человека не годится: запись затёрла бы его вход.
+func taskConfigDir(raw string) (string, error) {
+	dir, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("--config-dir: %w", err)
+	}
+	own, err := filepath.Abs(configDir())
+	if err == nil && filepath.Clean(own) == filepath.Clean(dir) {
+		return "", fmt.Errorf("--config-dir %s — каталог вашего собственного конфига clab: токен задачи затёр бы вход; укажите отдельный каталог", dir)
+	}
+	return dir, nil
 }
 
 func cmdMembers(ctx context.Context, c *Client, args []string) error {

@@ -69,19 +69,24 @@ func loadConfig() (Config, error) {
 }
 
 // saveConfig пишет конфиг с правами только для владельца: в нём токен.
-func saveConfig(cfg Config) error {
-	if err := os.MkdirAll(configDir(), 0o700); err != nil {
+func saveConfig(cfg Config) error { return saveConfigAt(configDir(), cfg) }
+
+// saveConfigAt — то же в заданный каталог: так clab token task --config-dir
+// пишет конфиг исполнителя этапа, не трогая конфиг человека.
+func saveConfigAt(dir string, cfg Config) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("каталог конфига: %w", err)
 	}
+	path := filepath.Join(dir, "config.json")
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := configPath() + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("запись конфига: %w", err)
 	}
-	return os.Rename(tmp, configPath())
+	return os.Rename(tmp, path)
 }
 
 // normalizeHost принимает «sdlc.example.com», «https://sdlc.example.com» или
