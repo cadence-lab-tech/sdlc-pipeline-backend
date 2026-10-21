@@ -10,7 +10,8 @@
 //
 //	SDLC_API_URL          адрес API, обязателен: https://<хост>/v1; конфиг
 //	                      clab auth login раннер не читает
-//	SDLC_TOKEN            токен раннера; он же уезжает запущенному агенту
+//	SDLC_TOKEN            токен раннера: очередь, захват, аренда, отчёт о
+//	                      стоимости; агенту не передаётся
 //	SDLC_ACTOR            кто действует в режиме заголовка (отладка)
 //	SDLC_PROJECT          проект, за которым следит раннер
 //	SDLC_RUNNER_ROLES     роли через запятую; пусто — любые, какие даёт токен
@@ -25,6 +26,25 @@
 //	                      одного слота не дадут
 //	SDLC_RUNNER_WORKTREES куда класть рабочие копии задач (по умолчанию
 //	                      <SDLC_RUNNER_REPOS>/.worktrees)
+//	SDLC_RUNNER_ENV       что ещё передать агенту из окружения раннера: имена
+//	                      и префиксы через запятую, GH_TOKEN,AWS_*. Имена
+//	                      SDLC_* и CLAB_* не передаются никогда — о них
+//	                      раннер предупреждает при старте
+//
+// Агент получает не токен раннера, а токен задачи (решение 0049): после
+// захвата раннер выпускает его на захваченный прогон, кладёт в mcp.json и в
+// конфиг clab агента (CLAB_CONFIG_DIR — временный каталог) и отзывает, когда
+// агент закончил; сам токен гаснет с арендой. Окружение агента — по списку
+// разрешённых, без наследования: PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
+// TERM, TZ, LANG, LC_*, XDG_*, прокси (HTTP_PROXY, HTTPS_PROXY, NO_PROXY и
+// в нижнем регистре), SSL_CERT_FILE, SSL_CERT_DIR, NODE_EXTRA_CA_CERTS,
+// SSH_AUTH_SOCK, ANTHROPIC_*, CLAUDE_*, плюс SDLC_RUNNER_ENV; SDLC_API_URL,
+// SDLC_PROJECT, SDLC_TOKEN (токен задачи) и CLAB_CONFIG_DIR задаёт раннер.
+// Команда по умолчанию запускает Claude Code с --strict-mcp-config: агент
+// видит только сервер из mcp.json раннера, не серверы из настроек
+// сотрудника. За свою SDLC_RUNNER_COMMAND отвечает администратор. Сервер
+// без выпуска токена задачи (до v0.11.0) — агент работает токеном раннера,
+// в журнале предупреждение.
 package main
 
 import (
@@ -55,6 +75,10 @@ func main() {
 		"repos", cfg.ReposDir, "worktrees", cfg.WorktreesDir)
 	if cfg.ReposDir == "" {
 		log.Warn("SDLC_RUNNER_REPOS не задан: агент работает в каталоге раннера, без рабочей копии задачи")
+	}
+	if len(cfg.AgentEnvRefused) > 0 {
+		log.Warn("SDLC_RUNNER_ENV: имена SDLC_* и CLAB_* агенту не передаются, раннер задаёт их сам",
+			"ignored", cfg.AgentEnvRefused)
 	}
 
 	if err := r.run(ctx); err != nil {
