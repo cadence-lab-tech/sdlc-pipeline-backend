@@ -2,7 +2,7 @@ module github.com/cadence-lab-tech/sdlc-pipeline-backend
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/gin-gonic/gin v1.10.1
