@@ -143,7 +143,8 @@ func run() error {
 		"blob_gc_dry_run", cfg.BlobGCDryRun,
 		"embedding_cache_gc_enabled", cfg.EmbeddingCacheGCEnabled,
 		"embedding_cache_gc_interval", cfg.EmbeddingCacheGCInterval,
-		"embedding_cache_gc_dry_run", cfg.EmbeddingCacheGCDryRun)
+		"embedding_cache_gc_dry_run", cfg.EmbeddingCacheGCDryRun,
+		"audit_retention_days", cfg.AuditRetentionDays)
 
 	leaseTicker := time.NewTicker(cfg.LeaseSweepInterval)
 	defer leaseTicker.Stop()
@@ -174,6 +175,15 @@ func run() error {
 		embedGC = embedGCTicker.C
 	}
 
+	// Уборка журнала действий по сроку (CLAB-210). Срок 0 — хранить вечно:
+	// тикера нет, nil-канал в select молчит всегда.
+	var auditGC <-chan time.Time
+	if cfg.AuditRetentionDays > 0 {
+		auditGCTicker := time.NewTicker(auditGCInterval)
+		defer auditGCTicker.Stop()
+		auditGC = auditGCTicker.C
+	}
+
 	sweepLeases(ctx, engine, log, system.ID, m)
 	refreshState(ctx, store, log, m)
 	if cfg.IndexEnabled {
@@ -200,6 +210,8 @@ func run() error {
 			collectBlobs(ctx, store, log, cfg, m)
 		case <-embedGC:
 			evictEmbeddings(ctx, store, log, cfg, m)
+		case <-auditGC:
+			purgeAudit(ctx, store, log, cfg.AuditRetentionDays, m)
 		}
 	}
 }
@@ -298,6 +310,44 @@ func collectBlobs(ctx context.Context, store *postgres.Store, log *slog.Logger, 
 		"inline_bytes", stats.InlineBytes, "external_bytes", stats.ExternalBytes,
 		"skipped", stats.Skipped, "busy", stats.Busy,
 		"failed", stats.Failed, "dry_run", cfg.BlobGCDryRun)
+}
+
+// Уборка журнала: раз в час, пачками по auditGCBatch, не больше
+// auditGCMaxBatches пачек за проход. Хвост после долгого простоя или после
+// уменьшения срока разбирается за несколько проходов, а тик не затягивается.
+const (
+	auditGCInterval   = time.Hour
+	auditGCBatch      = 10_000
+	auditGCMaxBatches = 20
+)
+
+// purgeAudit удаляет записи журнала действий старше срока хранения.
+// Первого прохода на старте нет — тот же довод, что у блобов: место
+// освобождается не срочно. Ошибка прохода воркер не роняет.
+func purgeAudit(ctx context.Context, store *postgres.Store, log *slog.Logger, days int, m *metrics.Worker) {
+	var total int64
+	err := m.Job(ctx, jobAuditGC, func() error {
+		total = 0
+		before := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+		for range auditGCMaxBatches {
+			n, err := store.PurgeAudit(ctx, store.DB(), before, auditGCBatch)
+			if err != nil {
+				return err
+			}
+			total += n
+			if n < auditGCBatch {
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		logJobError(ctx, log, "уборка журнала действий", err)
+		return
+	}
+	if total > 0 {
+		log.Info("уборка журнала действий", "deleted", total, "retention_days", days)
+	}
 }
 
 // evictEmbeddings вытесняет из кэша эмбеддингов то, чем давно не
@@ -495,11 +545,12 @@ const (
 	jobBlobGC       = "blob_gc"
 	jobEmbedCacheGC = "embed_cache_gc"
 	jobOpsState     = "ops_state"
+	jobAuditGC      = "audit_gc"
 )
 
 var workerJobs = []string{jobLeaseSweep, jobIndexEnqueue, jobIndexRun, jobDrift,
 	jobIndexPrune, jobRepoRefSync, jobKnowledge, jobEmbedRefresh, jobOverlaps,
-	jobBlobGC, jobEmbedCacheGC, jobOpsState}
+	jobBlobGC, jobEmbedCacheGC, jobOpsState, jobAuditGC}
 
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo
