@@ -110,7 +110,7 @@ func TestDependenciesClosedHoldsEpicUntilChildrenClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := engine.DecideGate(ctx, epic.Key, "breakdown_done", "human_approval",
-		human.ID, domain.GateResultPassed, nil); err != nil {
+		human.ID, nil, domain.GateResultPassed, nil); err != nil {
 		t.Fatal(err)
 	}
 	res, err := engine.Execute(ctx, epic.Key, "breakdown_done", system.ID, "")

@@ -293,7 +293,7 @@ func TestTokensAndPermissions(t *testing.T) {
 
 	// Апрув человека агент поставить не может даже в режиме заголовка.
 	agent := mustActor(t, store, "agent:analyst-bot")
-	_, err = engine.DecideGate(ctx, "SDLC-1", "analysis_done", "human_approval", agent.ID,
+	_, err = engine.DecideGate(ctx, "SDLC-1", "analysis_done", "human_approval", agent.ID, nil,
 		domain.GateResultPassed, json.RawMessage(`{}`))
 	if apperr.As(err).Code != apperr.CodeForbidden {
 		t.Fatalf("агент поставил human_approval: %v", err)
@@ -429,7 +429,7 @@ func TestHumanApprovalExpiresOnSubmission(t *testing.T) {
 
 	// Апрув до сдачи — и сдача после него.
 	if _, err := engine.DecideGate(ctx, task.Key, "analysis_done", "human_approval",
-		human.ID, domain.GateResultPassed, nil); err != nil {
+		human.ID, nil, domain.GateResultPassed, nil); err != nil {
 		t.Fatal(err)
 	}
 	if g := gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval"); g.Status != domain.GateResultPassed {
@@ -452,7 +452,7 @@ func TestHumanApprovalExpiresOnSubmission(t *testing.T) {
 
 	// Повторный апрув после сдачи открывает гейт.
 	if _, err := engine.DecideGate(ctx, task.Key, "analysis_done", "human_approval",
-		human.ID, domain.GateResultPassed, nil); err != nil {
+		human.ID, nil, domain.GateResultPassed, nil); err != nil {
 		t.Fatal(err)
 	}
 	g = gateOutcome(t, ctx, engine, task, "analysis_done", "human_approval")

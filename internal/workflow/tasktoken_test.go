@@ -334,7 +334,7 @@ func TestTaskTokenReviewAndForwardTransition(t *testing.T) {
 
 	// Апрув человека, повторный захват этапа — новый токен, переход вперёд.
 	if _, err := w.engine.DecideGate(ctx, "SDLC-1", "analysis_done", "human_approval",
-		w.admin.Principal.ID, domain.GateResultPassed, json.RawMessage(`{}`)); err != nil {
+		w.admin.Principal.ID, nil, domain.GateResultPassed, json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	w.claim(t, w.pool, "SDLC-1")
