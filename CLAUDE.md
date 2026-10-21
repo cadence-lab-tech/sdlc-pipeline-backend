@@ -81,6 +81,10 @@ internal/
   metrics/          метрики эксплуатации api и воркера (Prometheus) и их
                     отдельный слушатель SDLC_METRICS_ADDR
 migrations/         схема и сиды; embed.go встраивает их в бинарник
+agentkit/           набор агента для пользователей: скилы и саб-агент Claude Code
+                    на английском, встроены в api (go:embed), отдаёт их
+                    GET /v1/agent-kit, ставит clab setup (решение 0050);
+                    kit_test.go держит набор без привязки к нашему инстансу
 dev/                docker-compose для локального запуска, e2e.sh;
                     history-cleanup/ — разовая чистка истории от devops/
 deploy/             продовый стек: compose за Caddy, deploy.sh, дампы

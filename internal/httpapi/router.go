@@ -86,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 	// Сведения об инстансе (CLAB-87): версия, профиль и способы входа одним
 	// открытым запросом — его читают и страница входа, и clab version.
 	r.GET("/v1/instance", s.instance)
+	// Набор агента (CLAB-232, решение 0050): скилы и саб-агент той же версии,
+	// что сервер, для clab setup и страницы /docs. Открытая, как /instance.
+	r.GET("/v1/agent-kit", s.agentKit)
 
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)

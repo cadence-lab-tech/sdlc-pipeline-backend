@@ -10,3 +10,6 @@ docs/
 .DS_Store
 .idea/
 .vscode/
+# Набор агента (agentkit/) встроен в api через go:embed — его markdown нужен
+# сборке, хоть *.md выше и касается только корня.
+!agentkit/**
