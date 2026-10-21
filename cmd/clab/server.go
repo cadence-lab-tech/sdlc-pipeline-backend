@@ -58,6 +58,10 @@ type serverEnv struct {
 	portBusy   func(host string, port int) bool
 	lookupHost func(host string) ([]string, error)
 	localAddrs func() []string
+
+	// Отвечает ли адрес по HTTP (ghcr.io для проверки подписей): в тестах
+	// подменяется, сети в верстаке нет.
+	reachable func(ctx context.Context, rawURL string) bool
 }
 
 func newServerEnv() (*serverEnv, error) {
@@ -95,6 +99,7 @@ func newServerEnv() (*serverEnv, error) {
 		portBusy:   realPortBusy,
 		lookupHost: net.LookupHost,
 		localAddrs: realLocalAddrs,
+		reachable:  realReachable,
 	}, nil
 }
 
