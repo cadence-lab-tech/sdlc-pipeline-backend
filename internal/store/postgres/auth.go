@@ -74,16 +74,20 @@ func (s *Store) SetAdmin(ctx context.Context, q Querier, id uuid.UUID, admin boo
 const tokenSelect = `
 	SELECT t.id, t.principal_id, p.handle, p.kind, t.kind, t.project_id, pr.key,
 	       t.name, t.token_prefix, t.role_keys, t.created_at,
-	       t.expires_at, t.last_used_at, t.revoked_at
+	       t.expires_at, t.last_used_at, t.revoked_at,
+	       t.stage_run_id, sr.task_id, tk.key
 	FROM agent_tokens t
 	JOIN principals p ON p.id = t.principal_id
-	LEFT JOIN projects pr ON pr.id = t.project_id`
+	LEFT JOIN projects pr ON pr.id = t.project_id
+	LEFT JOIN stage_runs sr ON sr.id = t.stage_run_id
+	LEFT JOIN tasks tk ON tk.id = sr.task_id`
 
 func scanToken(row interface{ Scan(...any) error }) (domain.AccessToken, error) {
 	var t domain.AccessToken
 	err := row.Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.TokenKind, &t.ProjectID, &t.ProjectKey,
 		&t.Name, &t.Prefix, &t.RoleKeys, &t.CreatedAt,
-		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt)
+		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt,
+		&t.StageRunID, &t.TaskID, &t.TaskKey)
 	if t.RoleKeys == nil {
 		t.RoleKeys = []string{}
 	}
@@ -102,6 +106,8 @@ type CreateTokenInput struct {
 	RoleKeys  []string
 	ExpiresAt *time.Time
 	CreatedBy uuid.UUID
+	// Прогон токена задачи (Kind = task); у личных токенов nil.
+	StageRunID *uuid.UUID
 }
 
 func (s *Store) CreateToken(ctx context.Context, q Querier, in CreateTokenInput) (domain.AccessToken, error) {
@@ -114,11 +120,11 @@ func (s *Store) CreateToken(ctx context.Context, q Querier, in CreateTokenInput)
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `
 		INSERT INTO agent_tokens (principal_id, project_id, name, token_hash, token_prefix,
-		                          role_keys, expires_at, created_by, kind)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		                          role_keys, expires_at, created_by, kind, stage_run_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`,
 		in.PrincipalID, in.ProjectID, in.Name, in.TokenHash, in.Prefix,
-		in.RoleKeys, in.ExpiresAt, in.CreatedBy, in.Kind).Scan(&id)
+		in.RoleKeys, in.ExpiresAt, in.CreatedBy, in.Kind, in.StageRunID).Scan(&id)
 	if err != nil {
 		return domain.AccessToken{}, translate(err)
 	}
@@ -135,24 +141,42 @@ func (s *Store) GetToken(ctx context.Context, q Querier, id uuid.UUID) (domain.A
 
 // TokenByHash — резолв предъявленного токена. Отозванный и протухший не
 // отдаются вовсе: для middleware это одно и то же «токен недействителен».
+//
+// Токен задачи (решение 0049) своего срока не имеет: он жив, пока его прогон
+// не завершён и аренду держит владелец токена. Проверка идёт здесь, на каждом
+// запросе, а не только отзывом на событиях аренды: воркер протухших ходит
+// раз в проход, и до него токен истёкшей аренды не должен работать.
 func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain.AccessToken, domain.Principal, error) {
 	var t domain.AccessToken
 	var p domain.Principal
+	var run struct {
+		State        *string
+		FinishedAt   *time.Time
+		ClaimedBy    *uuid.UUID
+		LeaseExpires *time.Time
+		Now          time.Time
+	}
 	err := q.QueryRow(ctx, `
 		SELECT t.id, t.principal_id, p.handle, p.kind, t.kind, t.project_id, pr.key,
 		       t.name, t.token_prefix, t.role_keys, t.created_at,
 		       t.expires_at, t.last_used_at, t.revoked_at,
+		       t.stage_run_id, sr.task_id, tk.key,
+		       sr.state, sr.finished_at, sr.claimed_by, sr.lease_expires_at, now(),
 		       p.id, p.kind, p.handle, p.display_name, p.email, p.is_admin, p.created_at
 		FROM agent_tokens t
 		JOIN principals p ON p.id = t.principal_id
 		LEFT JOIN projects pr ON pr.id = t.project_id
+		LEFT JOIN stage_runs sr ON sr.id = t.stage_run_id
+		LEFT JOIN tasks tk ON tk.id = sr.task_id
 		WHERE t.token_hash = $1
-		  AND t.revoked_at IS NULL
+		  AND (t.kind = 'task' OR t.revoked_at IS NULL)
 		  AND (t.expires_at IS NULL OR t.expires_at > now())
 		  AND p.disabled_at IS NULL`, hash,
 	).Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.TokenKind, &t.ProjectID, &t.ProjectKey,
 		&t.Name, &t.Prefix, &t.RoleKeys, &t.CreatedAt,
 		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt,
+		&t.StageRunID, &t.TaskID, &t.TaskKey,
+		&run.State, &run.FinishedAt, &run.ClaimedBy, &run.LeaseExpires, &run.Now,
 		&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.IsAdmin, &p.CreatedAt)
 	if err != nil {
 		if isNoRows(err) {
@@ -163,7 +187,85 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 	if t.RoleKeys == nil {
 		t.RoleKeys = []string{}
 	}
+	if t.TokenKind == domain.TokenTask {
+		reason := ""
+		switch {
+		case t.RevokedAt != nil:
+			reason = "отозван"
+		case run.FinishedAt != nil:
+			reason = "этап завершён"
+		case run.State == nil || !leaseState(*run.State):
+			reason = "аренда снята"
+		case run.ClaimedBy == nil || *run.ClaimedBy != t.PrincipalID:
+			reason = "аренда снята или перешла другому"
+		case run.LeaseExpires == nil || !run.LeaseExpires.After(run.Now):
+			reason = "аренда истекла"
+		}
+		if reason != "" {
+			return t, p, apperr.New(apperr.CodeUnauthenticated, "токен задачи погас: %s", reason).
+				WithDetails(map[string]any{"token_id": t.ID, "token_kind": t.TokenKind})
+		}
+	}
 	return t, p, nil
+}
+
+// TaskReadCircle — задачи, которые читает токен задачи (решение 0049 п. 5):
+// сама задача, её дети, все предки по parent_id и задачи, связанные через
+// task_links в любую сторону и любым rel. Одним запросом: круг считается на
+// каждое чтение токеном задачи.
+func (s *Store) TaskReadCircle(ctx context.Context, q Querier, taskID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, `
+		WITH RECURSIVE ancestors(id) AS (
+		    SELECT parent_id FROM tasks WHERE id = $1 AND parent_id IS NOT NULL
+		    UNION
+		    SELECT t.parent_id FROM tasks t JOIN ancestors a ON t.id = a.id
+		    WHERE t.parent_id IS NOT NULL
+		)
+		SELECT $1::uuid
+		UNION SELECT id FROM tasks WHERE parent_id = $1
+		UNION SELECT id FROM ancestors
+		UNION SELECT to_task_id FROM task_links WHERE from_task_id = $1
+		UNION SELECT from_task_id FROM task_links WHERE to_task_id = $1`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, id)
+	}
+	return out, translate(rows.Err())
+}
+
+// leaseState — состояния прогона, в которых у него может быть живая аренда.
+// gating сюда не входит: пока идёт перепроверка, работать в этапе некому.
+func leaseState(state string) bool {
+	switch state {
+	case "claimed", "in_progress", "submitted":
+		return true
+	}
+	return false
+}
+
+// RevokeRunTokens гасит живые токены задачи на прогонах: аренда снята,
+// протухла, перехвачена или этап закрыт. Зовётся в той же транзакции, что
+// и событие аренды, — иначе между ними токен успел бы сработать.
+func (s *Store) RevokeRunTokens(ctx context.Context, q Querier, runIDs ...uuid.UUID) (int64, error) {
+	if len(runIDs) == 0 {
+		return 0, nil
+	}
+	tag, err := q.Exec(ctx, `
+		UPDATE agent_tokens SET revoked_at = now()
+		WHERE stage_run_id = ANY($1) AND revoked_at IS NULL`, runIDs)
+	if err != nil {
+		return 0, translate(err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // TouchToken отмечает использование. Раз в минуту, не на каждый запрос:
@@ -176,10 +278,14 @@ func (s *Store) TouchToken(ctx context.Context, q Querier, id uuid.UUID) error {
 }
 
 // ListTokens — токены принципала либо все токены проекта.
+//
+// Погасшие токены задачи не отдаются: их выпускают на каждый захват, и
+// список личных токенов иначе зарос бы ими за неделю работы раннера.
 func (s *Store) ListTokens(ctx context.Context, q Querier, principalID *uuid.UUID, projectID *uuid.UUID) ([]domain.AccessToken, error) {
 	rows, err := q.Query(ctx, tokenSelect+`
 		WHERE ($1::uuid IS NULL OR t.principal_id = $1)
 		  AND ($2::uuid IS NULL OR t.project_id = $2)
+		  AND NOT (t.kind = 'task' AND t.revoked_at IS NOT NULL)
 		ORDER BY t.revoked_at NULLS FIRST, t.created_at DESC`, principalID, projectID)
 	if err != nil {
 		return nil, translate(err)

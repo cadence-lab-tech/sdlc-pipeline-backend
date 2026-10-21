@@ -238,6 +238,9 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/tasks/:taskKey/claim", agent, s.claimTask)
 		v1.POST("/tasks/:taskKey/heartbeat", agent, s.heartbeat)
 		v1.POST("/tasks/:taskKey/release", agent, s.releaseTask)
+		// Токен задачи для исполнителя этапа (решение 0049): выпускает
+		// держатель живой аренды, права — те же, что у захвата.
+		v1.POST("/tasks/:taskKey/task-token", agent, s.issueTaskToken)
 		v1.GET("/tasks/:taskKey/repo-refs", viewer, s.listRepoRefs)
 		v1.POST("/tasks/:taskKey/repo-refs", agent, s.linkRepoRef)
 		v1.GET("/tasks/:taskKey/drift", viewer, s.getDrift)

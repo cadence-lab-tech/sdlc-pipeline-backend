@@ -228,11 +228,15 @@ func (e *Engine) spawnReviews(ctx context.Context, tx pgx.Tx, task domain.Task, 
 		return nil
 	}
 	// Этап переходит в gating: работать в нём некому, пока идёт перепроверка.
-	_, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE stage_runs SET state = 'gating', claimed_by = NULL, claimed_at = NULL,
 		       lease_expires_at = NULL, agent_session_ref = NULL
-		WHERE id = $1 AND finished_at IS NULL`, run.ID)
-	return translateExec(err)
+		WHERE id = $1 AND finished_at IS NULL`, run.ID); err != nil {
+		return translateExec(err)
+	}
+	// Аренда снята — токены задачи этого прогона гаснут вместе с ней.
+	_, err := e.store.RevokeRunTokens(ctx, tx, run.ID)
+	return err
 }
 
 // reviewStale — сдавал ли исполнитель что-нибудь после того, как ревью

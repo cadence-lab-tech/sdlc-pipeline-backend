@@ -381,7 +381,13 @@ func (s *Store) FinishStageRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, 
 		UPDATE stage_runs
 		SET state = $2, outcome = $3, finished_at = now(), lease_expires_at = NULL
 		WHERE id = $1`, runID, state, outcome)
-	return translate(err)
+	if err != nil {
+		return translate(err)
+	}
+	// Закрытый этап — погасшие токены задачи (решение 0049): переход вперёд,
+	// возврат и закрытие перепроверки проходят здесь.
+	_, err = s.RevokeRunTokens(ctx, tx, runID)
+	return err
 }
 
 func (s *Store) SetTaskStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, terminal bool) error {

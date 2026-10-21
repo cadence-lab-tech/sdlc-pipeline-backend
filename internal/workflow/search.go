@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/embed"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
@@ -17,6 +19,16 @@ type SearchInput struct {
 	// owner/name; сужает поиск по коду. На артефакты и документы не влияет.
 	Repositories []string
 	TopK         int
+	// Рамки токена задачи (Auth.SearchBound); nil — без рамок.
+	Bound *SearchBound
+}
+
+// SearchBound — рамки поиска исполнителя этапа (решение 0049 п. 5): код
+// только репозиториев области его задачи, артефакты только задач его круга
+// чтения. Проектные документы — правила, их читать можно всем.
+type SearchBound struct {
+	Repositories []string
+	TaskIDs      []uuid.UUID
 }
 
 type SearchResult struct {
@@ -58,6 +70,14 @@ func (e *Engine) SearchContext(ctx context.Context, projectKey string, in Search
 		Repositories: in.Repositories,
 		TopK:         in.TopK,
 	}
+	if in.Bound != nil {
+		// Запрошенные репозитории вне области отбрасываются, а не расширяют
+		// её; без запроса — вся область задачи.
+		q.Repositories = boundRepositories(in.Repositories, in.Bound.Repositories)
+		q.RestrictRepositories = true
+		q.TaskIDs = in.Bound.TaskIDs
+		q.RestrictTasks = true
+	}
 
 	if e.embedder != nil {
 		vectors, err := e.embedder.Embed(ctx, []string{in.Query}, embed.KindQuery)
@@ -89,4 +109,23 @@ func (e *Engine) SearchContext(ctx context.Context, projectKey string, in Search
 		out.Scopes = []string{postgres.ScopeCode, postgres.ScopeArtifacts, postgres.ScopeDocuments}
 	}
 	return out, nil
+}
+
+// boundRepositories — запрошенное, пересечённое с областью; пусто — область.
+func boundRepositories(requested, scope []string) []string {
+	if len(requested) == 0 {
+		return append([]string{}, scope...)
+	}
+	// Имя — как в области: поиск сравнивает owner/name точно.
+	allowed := map[string]string{}
+	for _, r := range scope {
+		allowed[strings.ToLower(r)] = r
+	}
+	out := []string{}
+	for _, r := range requested {
+		if name, ok := allowed[strings.ToLower(strings.TrimSpace(r))]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }

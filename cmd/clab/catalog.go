@@ -90,9 +90,39 @@ func cmdToken(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 		return print(map[string]any{"revoked": id})
+	case "task":
+		return tokenTask(ctx, c, rest)
 	default:
-		return fmt.Errorf("clab token create|list|revoke")
+		return fmt.Errorf("clab token create|list|revoke|task")
 	}
+}
+
+// tokenTask выпускает токен задачи держателю живой аренды (решение 0049):
+// его отдают исполнителю этапа через SDLC_TOKEN. Без --json печатается
+// только сам токен — одной строкой, чтобы его можно было взять в переменную:
+// TOKEN=$(clab token task CLAB-12).
+func tokenTask(ctx context.Context, c *Client, args []string) error {
+	key, rest := popTask(args)
+	if _, err := flags("token task", rest, func(*flag.FlagSet) {}); err != nil {
+		return err
+	}
+	if key == "" {
+		return fmt.Errorf("clab token task <ключ задачи>")
+	}
+	var out json.RawMessage
+	if err := c.post(ctx, "/tasks/"+url.PathEscape(key)+"/task-token", nil, &out); err != nil {
+		return err
+	}
+	return emit(out, func() error {
+		var issued struct {
+			Token string `json:"token"`
+		}
+		if err := decode(out, &issued); err != nil {
+			return err
+		}
+		fmt.Println(issued.Token)
+		return nil
+	})
 }
 
 func cmdMembers(ctx context.Context, c *Client, args []string) error {

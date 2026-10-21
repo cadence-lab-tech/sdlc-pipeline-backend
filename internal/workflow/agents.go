@@ -210,6 +210,9 @@ type ClaimOptions struct {
 	// Ограничение живёт в токене (agent_tokens.role_keys): токен ревьюера
 	// не должен позволять забрать этап разработчика.
 	AllowedRoles []string
+	// Прогон токена задачи (решение 0049): захват им — подтверждение своей
+	// аренды, и забрать он может только этот прогон. nil — любой.
+	OnlyRun *uuid.UUID
 }
 
 // ClaimWith — захват с ограничениями из токена.
@@ -221,8 +224,18 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		if err != nil {
 			return err
 		}
-		target, err := e.claimTarget(ctx, tx, task)
-		if err != nil {
+		var target domain.StageRun
+		if opts.OnlyRun != nil {
+			// Не claimTarget: тот выбрал бы свободную перепроверку вперёд
+			// занятой, а токен прогона ревью работает только со своим.
+			target, err = e.store.GetStageRun(ctx, tx, *opts.OnlyRun)
+			if err != nil {
+				return err
+			}
+			if target.TaskID != task.ID {
+				return apperr.Forbidden("токен задачи привязан к другой задаче")
+			}
+		} else if target, err = e.claimTarget(ctx, tx, task); err != nil {
 			return err
 		}
 		run, err := e.store.LockStageRun(ctx, tx, target.ID)
@@ -243,6 +256,17 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		// стоил бы дороже, чем перерасход, который его вызвал.
 		if err := e.budgetAllows(ctx, tx, task.ProjectID); err != nil {
 			return err
+		}
+
+		// Новая аренда — новые токены задачи. Подтверждение живой аренды тем
+		// же принципалом токены не трогает: этим захватом их и предъявляют.
+		// Иначе (аренды не было, протухла, снята) токены прошлой аренды
+		// гаснут: без этого они ожили бы вместе с новой арендой того же
+		// принципала, не дождавшись воркера.
+		if !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now())) {
+			if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
+				return err
+			}
 		}
 
 		expires := time.Now().Add(e.leaseTTL)
@@ -419,6 +443,9 @@ func (e *Engine) Release(ctx context.Context, runID, actor uuid.UUID, note strin
 		}
 		if !ok {
 			return leaseLost(run, actor)
+		}
+		if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
+			return err
 		}
 		return e.store.AppendEvent(ctx, tx, run.TaskID, &run.ID, domain.EventStageReleased, actor,
 			map[string]any{"note": note, "attempt": run.Attempt, "kind": run.Kind})
@@ -739,6 +766,13 @@ func (e *Engine) ExpireLeases(ctx context.Context, system uuid.UUID, limit int) 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		expired, err := e.store.ExpireLeases(ctx, tx, limit)
 		if err != nil {
+			return err
+		}
+		ids := make([]uuid.UUID, 0, len(expired))
+		for _, run := range expired {
+			ids = append(ids, run.ID)
+		}
+		if _, err := e.store.RevokeRunTokens(ctx, tx, ids...); err != nil {
 			return err
 		}
 		for _, run := range expired {
