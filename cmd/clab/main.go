@@ -68,6 +68,7 @@ func commands() []command {
 		{"drift", "открытые расхождения задачи", "clab drift SDLC-42", cmdDrift},
 		{"resolve-drift", "закрыть сигнал дрейфа", "clab resolve-drift <signal-id> --resolution resolved [--note ...]", cmdResolveDrift},
 		{"metrics", "метрики цикла: где застревают задачи, какие гейты валятся", "clab metrics [--period 30d]", cmdMetrics},
+		{"audit", "журнал действий: кто, каким токеном, каким тулом или ручкой, с каким исходом", "clab audit SDLC-42 | clab audit --project [SDLC] [--task SDLC-42] | clab audit --instance — фильтры: [--principal user:alice] [--token <id|префикс>] [--channel mcp|rest] [--action sdlc_submit_artifact] [--outcome forbidden] [--since 2026-10-01] [--until 2026-10-21] [--limit 50] [--cursor <курсор>]", cmdAudit},
 
 		{"me", "кто я по токену, где состою", "clab me", cmdMe},
 		{"token", "выдать, перечислить или отозвать токен; токен задачи исполнителю этапа", "clab token create --name ci [--for agent:bot] [--project SDLC] [--roles reviewer] [--days 90] | clab token list [--project SDLC] | clab token revoke <id> | clab token task <ключ> [--config-dir <каталог>] (на вашу живую аренду, гаснет вместе с ней; с --config-dir токен не печатается, а пишется конфигом clab в каталог — для CLAB_CONFIG_DIR исполнителя)", cmdToken},
