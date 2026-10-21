@@ -37,13 +37,20 @@ type Server struct {
 	version string
 	// Метрики эксплуатации (CLAB-126); nil — выключены, методы nil-безопасны.
 	ops *metrics.API
+	// Журнал действий (CLAB-210): один писатель на процесс, общий с MCP.
+	audit *workflow.Audit
 }
 
 func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg, log: log, store: store, engine: engine,
 		authoring: authoring, auth: auth, mcp: mcpServer,
+		audit: workflow.NewAudit(store, log),
 	}
+	if mcpServer != nil {
+		mcpServer.UseAudit(s.audit)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -85,7 +92,9 @@ func (s *Server) Handler() http.Handler {
 	maintainer := s.guard(domain.MemberMaintainer)
 	projectAdmin := s.guard(domain.MemberAdmin)
 
-	v1 := r.Group("/v1", s.authenticate(domain.PrincipalUser))
+	// Журнал стоит до аутентификации: отказ 401 отбивается раньше, чем
+	// появляется актор, и тоже должен попасть в журнал.
+	v1 := r.Group("/v1", s.auditREST(), s.authenticate(domain.PrincipalUser))
 	{
 		// Кто я, токены. Права на выдачу проверяет сам сервис: токен себе
 		// может любой, другому — администратор проекта или системы.
@@ -271,6 +280,12 @@ func (s *Server) Handler() http.Handler {
 		v1.PATCH("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", maintainer, s.updateGate)
 		v1.DELETE("/workflows/:workflowID/transitions/:transitionKey/gates/:gateKey", maintainer, s.deleteGate)
 
+		// Журнал действий (CLAB-210): задача и проект — сопровождающему,
+		// записи без проекта — администратору системы.
+		v1.GET("/tasks/:taskKey/audit", maintainer, s.taskAudit)
+		v1.GET("/projects/:projectKey/audit", maintainer, s.projectAudit)
+		v1.GET("/audit", s.requireAdmin(), s.instanceAudit)
+
 		v1.GET("/artifacts/:artifactID/content", viewer, s.getArtifactContent)
 		v1.POST("/artifacts/:artifactID/approve", maintainer, s.approveArtifact)
 	}
@@ -281,7 +296,8 @@ func (s *Server) Handler() http.Handler {
 	// Уровень прав каждый тул проверяет сам: у них он разный.
 	if s.mcp != nil {
 		handler := s.mcp.Handler()
-		group := r.Group("/mcp/projects/:projectKey", s.authenticate(domain.PrincipalAgent))
+		// Вызовы тулов пишет обёртка тулов; здесь — только отказ 401 до тула.
+		group := r.Group("/mcp/projects/:projectKey", s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent))
 		group.Any("", s.serveMCP(handler))
 		group.Any("/*rest", s.serveMCP(handler))
 	}
@@ -295,6 +311,7 @@ func (s *Server) serveMCP(h http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := mcp.WithProject(c.Request.Context(), c.Param("projectKey"))
 		ctx = mcp.WithIdentity(ctx, identity(c))
+		ctx = mcp.WithRequestID(ctx, c.GetString(ctxRequestID))
 		h.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
 	}
 }

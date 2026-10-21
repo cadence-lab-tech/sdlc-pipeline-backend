@@ -862,3 +862,34 @@ func TestMetricsAddrValidated(t *testing.T) {
 		}
 	}
 }
+
+// Срок хранения журнала действий (CLAB-210, критерии 19–20): 180 дней по
+// умолчанию, 0 — хранить вечно, отрицательное и не число — отказ старта с
+// именем переменной.
+func TestAuditRetentionDays(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AuditRetentionDays != 180 {
+		t.Fatalf("срок по умолчанию %d", c.AuditRetentionDays)
+	}
+
+	t.Setenv("SDLC_AUDIT_RETENTION_DAYS", "0")
+	if c, err = Load(); err != nil || c.AuditRetentionDays != 0 {
+		t.Fatalf("0 — хранить вечно: %d, %v", c.AuditRetentionDays, err)
+	}
+	t.Setenv("SDLC_AUDIT_RETENTION_DAYS", "30")
+	if c, err = Load(); err != nil || c.AuditRetentionDays != 30 {
+		t.Fatalf("30: %d, %v", c.AuditRetentionDays, err)
+	}
+	for _, bad := range []string{"-1", "abc", "1.5"} {
+		t.Setenv("SDLC_AUDIT_RETENTION_DAYS", bad)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "SDLC_AUDIT_RETENTION_DAYS") {
+			t.Fatalf("%q: ошибка без имени переменной: %v", bad, err)
+		}
+	}
+}
