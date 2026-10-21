@@ -7,9 +7,11 @@
 // считает otlp и пошёл бы на localhost:4318 у каждой установки, а заодно
 // тянет gRPC- и Prometheus-экспортёры.
 //
-// Адрес, заголовки, TLS, таймаут, сжатие, выборку и пакетную отправку SDK
-// читает из стандартных OTEL_* сам; здесь — только решение «включать ли»,
-// отказ на том, чего api не умеет, ресурс с версией сборки и журнал.
+// Адрес, TLS, таймаут, сжатие, выборку и пакетную отправку SDK читает из
+// стандартных OTEL_* сам; здесь — решение «включать ли», отказ на том, чего
+// api не умеет, ресурс с версией сборки и журнал. Заголовки экспортёра — секрет
+// перечня secrets.List (CLAB-235): они читаются здесь, значением или файлом
+// X_FILE, разбираются своим строгим разбором и уходят в экспортёр опцией.
 //
 // Пакет импортирует только cmd/api: SDK и экспортёр не должны попадать в
 // воркер и clab (их SBOM и govulncheck).
@@ -31,13 +33,15 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 // DefaultServiceName — service.name, если OTEL_SERVICE_NAME не задан.
 const DefaultServiceName = "cadence-api"
 
-// Переменные, которые читает само решение о включении. Остальные OTEL_*
-// (заголовки, TLS, выборка, ресурс) читает SDK.
+// Переменные, которые читает само решение о включении, и заголовки.
+// Остальные OTEL_* (TLS, выборка, ресурс) читает SDK.
 const (
 	envSDKDisabled     = "OTEL_SDK_DISABLED"
 	envExporter        = "OTEL_TRACES_EXPORTER"
@@ -45,6 +49,8 @@ const (
 	envTracesEndpoint  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	envProtocol        = "OTEL_EXPORTER_OTLP_PROTOCOL"
 	envTracesProtocol  = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
+	envHeaders         = "OTEL_EXPORTER_OTLP_HEADERS"
+	envTracesHeaders   = "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
 	protocolHTTPProto  = "http/protobuf"
 	defaultTracesPath  = "/v1/traces"
 	defaultSDKEndpoint = "https://localhost:4318" + defaultTracesPath
@@ -54,9 +60,10 @@ const (
 type Settings struct {
 	Enabled bool
 	// Endpoint — адрес приёма спанов для строки журнала: без userinfo,
-	// строки запроса и фрагмента. Заголовков (OTEL_EXPORTER_OTLP_HEADERS,
-	// там бывают ключи APM) здесь нет и быть не должно.
+	// строки запроса и фрагмента. Заголовков здесь нет и быть не должно.
 	Endpoint string
+	// Headers — заголовки экспортёра; при печати — только число.
+	Headers Headers
 }
 
 // FromEnv решает, включены ли трассировки. Ошибка — значение, которого api
@@ -64,6 +71,13 @@ type Settings struct {
 // настройками, — молча работать без трассировок, когда их просили, хуже.
 func FromEnv(getenv func(string) string) (Settings, error) {
 	get := func(k string) string { return strings.TrimSpace(getenv(k)) }
+
+	// Заголовки — тоже и при выключенных трассировках, и первыми: неверная
+	// строка не должна дойти до разбора SDK, который печатает её куски.
+	headers, err := headersFromEnv(secrets.Source{Getenv: getenv})
+	if err != nil {
+		return Settings{}, err
+	}
 
 	exporter := strings.ToLower(get(envExporter))
 	switch exporter {
@@ -96,7 +110,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	if base == "" && traces == "" && exporter != "otlp" {
 		return Settings{}, nil
 	}
-	return Settings{Enabled: true, Endpoint: logEndpoint(base, traces)}, nil
+	return Settings{Enabled: true, Endpoint: logEndpoint(base, traces), Headers: headers}, nil
 }
 
 // checkEndpoint отбивает адрес, который SDK понял бы не так: без схемы
@@ -149,7 +163,11 @@ func Start(ctx context.Context, s Settings, version string, log *slog.Logger) (*
 	otel.SetErrorHandler(newErrorHandler(log, errorLogInterval))
 	otel.SetLogger(logr.FromSlogHandler(log.Handler()))
 
-	exp, err := otlptracehttp.New(ctx)
+	var opts []otlptracehttp.Option
+	if s.Headers.set {
+		opts = append(opts, otlptracehttp.WithHeaders(s.Headers.clone()))
+	}
+	exp, err := otlptracehttp.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("экспортёр OTLP: %w", err)
 	}

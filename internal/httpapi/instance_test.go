@@ -19,6 +19,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oidc"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/tracing"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
@@ -287,7 +288,8 @@ func TestInstanceHasNoSecrets(t *testing.T) {
 }
 
 // AC-8 CLAB-200: секреты приходят файлами — каждый ValueOrFile и пароль
-// базы из перечня secrets.List, — и значений в ответе нет.
+// базы из перечня secrets.List, — и значений в ответе нет. AC-11 CLAB-235:
+// среди них заголовки OTLP, их читают трассировки api.
 func TestInstanceHasNoSecretsFromFiles(t *testing.T) {
 	dir := t.TempDir()
 	var values []string
@@ -307,7 +309,10 @@ func TestInstanceHasNoSecretsFromFiles(t *testing.T) {
 		}
 		switch v.Form {
 		case secrets.ValueOrFile:
-			if v.Name != secrets.DatabaseURL {
+			switch {
+			case v.Via == secrets.ViaTracing:
+				put(v.FileEnv(), "x-key=file-"+strings.ToLower(v.Name)+"-9c1d")
+			case v.Name != secrets.DatabaseURL:
 				put(v.FileEnv(), "file-"+strings.ToLower(v.Name)+"-9c1d")
 			}
 		case secrets.FileOnly:
@@ -320,6 +325,11 @@ func TestInstanceHasNoSecretsFromFiles(t *testing.T) {
 	}
 	if cfg.AdminToken == "" || !strings.Contains(cfg.DatabaseURL, "file-db-password-9c1d") {
 		t.Fatalf("the files did not reach the config")
+	}
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+	traces, err := tracing.FromEnv(os.Getenv)
+	if err != nil || traces.Headers.Len() == 0 {
+		t.Fatalf("the header files did not reach the tracing settings: %v", err)
 	}
 	provider := newOIDCStub(t)
 	h := instanceServer(t, instanceSetup{
