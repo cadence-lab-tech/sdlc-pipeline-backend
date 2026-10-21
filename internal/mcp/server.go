@@ -30,6 +30,7 @@ type ctxKey int
 const (
 	keyProject ctxKey = iota
 	keyIdentity
+	keyRequestID
 )
 
 // WithProject кладёт в контекст проект, к которому привязано подключение.
@@ -42,6 +43,17 @@ func WithProject(ctx context.Context, projectKey string) context.Context {
 // WithIdentity кладёт в контекст того, кто пришёл: принципала и токен.
 func WithIdentity(ctx context.Context, id workflow.Identity) context.Context {
 	return context.WithValue(ctx, keyIdentity, id)
+}
+
+// WithRequestID кладёт в контекст идентификатор HTTP-запроса: по нему запись
+// журнала связывается с логом процесса.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, keyRequestID, id)
+}
+
+func requestID(ctx context.Context) string {
+	id, _ := ctx.Value(keyRequestID).(string)
+	return id
 }
 
 func projectKey(ctx context.Context) (string, error) {
@@ -67,7 +79,9 @@ type Server struct {
 	engine    *workflow.Engine
 	authoring *workflow.Authoring
 	auth      *workflow.Auth
-	mcp       *sdk.Server
+	// Журнал действий: каждый вызов тула пишется обёрткой add.
+	audit *workflow.Audit
+	mcp   *sdk.Server
 }
 
 // NewServer поднимает MCP-сервер. version — версия сборки (-X main.version):
@@ -76,7 +90,8 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 	if version == "" {
 		version = "dev"
 	}
-	s := &Server{log: log, store: store, engine: engine, authoring: authoring, auth: auth}
+	s := &Server{log: log, store: store, engine: engine, authoring: authoring, auth: auth,
+		audit: workflow.NewAudit(store, log)}
 	s.mcp = sdk.NewServer(&sdk.Implementation{
 		Name:    ServerName,
 		Title:   "Cadence Lab",
@@ -89,6 +104,17 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 	s.registerWorkPrompt()
 	return s
 }
+
+// UseAudit подменяет писателя журнала общим с REST: у процесса один писатель
+// и один счётчик сбоев записи.
+func (s *Server) UseAudit(a *workflow.Audit) {
+	if a != nil {
+		s.audit = a
+	}
+}
+
+// Audit — писатель журнала этого сервера.
+func (s *Server) Audit() *workflow.Audit { return s.audit }
 
 // allow проверяет уровень прав актора в проекте подключения. Правило одно
 // с REST (решение 0011): тул и ручка — одно действие с одними правами.
