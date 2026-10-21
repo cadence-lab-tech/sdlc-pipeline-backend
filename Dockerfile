@@ -5,7 +5,14 @@
 # 1.26 — golang.org/x/net и x/crypto с исправлениями безопасности (CLAB-169),
 # патч не ниже go1.26.10 — crypto/x509, GO-2026-6809 (CLAB-224). Строка
 # toolchain в go.mod здесь не действует (образ ставит GOTOOLCHAIN=local): Go
-# берётся из плавающего тега golang:1.26-alpine, поэтому локально — --pull.
+# берётся из базового образа.
+#
+# Базовые образы закреплены по digest (CLAB-203, решение 0051): тег — для
+# человека, Docker тянет по digest, поэтому сборка локально, в CI и в релизе
+# идёт на одной базе без --pull. Digest внутри той же линии тега раз в
+# неделю обновляет Dependabot (.github/dependabot.yml) отдельным PR; смена
+# линии (Go 1.27, debian следующей версии) — решение человека отдельной
+# задачей.
 #
 # Образ версии выходит под linux/amd64 и linux/arm64 (release.yml). Этап
 # сборки закреплён за платформой сборщика ($BUILDPLATFORM), а целевую
@@ -13,7 +20,7 @@
 # arm64-половина сборки на amd64-раннере шла бы через QEMU, которого в CI
 # нет, и падала. Обычный `docker build` (make image, deploy.yml) ничего не
 # замечает: BuildKit подставляет в TARGETOS/TARGETARCH платформу хоста.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
 
 WORKDIR /src
 
@@ -49,7 +56,13 @@ RUN mkdir -p /out/license && if [ -f LICENSE ]; then cp LICENSE /out/license/; f
 # делается самим бинарником (api healthcheck). В этом этапе только COPY —
 # никаких RUN: он выполняется под целевой платформой, и команда внутри него
 # потребовала бы эмуляции.
-FROM gcr.io/distroless/static-debian12:nonroot
+#
+# debian13, а не debian12: distroless на debian12 не получает обновлений
+# Debian LTS, и свежий digest static-debian12 несёт находки tzdata
+# DLA-4792-1 и ca-certificates DLA-4845-1; static-debian13 их не имеет
+# (trivy, 2026-10-21). uid/gid nonroot — те же 65532, том /blobs прежних
+# установок остаётся доступен.
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
 
 WORKDIR /
 COPY --from=build /out/api /api
