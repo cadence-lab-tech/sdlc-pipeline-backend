@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
 )
@@ -25,6 +26,13 @@ func (s *Server) WithVersion(v string) *Server {
 func (s *Server) WithMetrics(m *metrics.API) *Server {
 	s.ops = m
 	s.audit.OnFailure(m.AuditWriteFailed)
+	return s
+}
+
+// WithTracing подключает серверный спан на запрос (CLAB-204); nil —
+// трассировки выключены, и слой пропускает запрос как есть.
+func (s *Server) WithTracing(tp trace.TracerProvider) *Server {
+	s.tracer = tp
 	return s
 }
 
