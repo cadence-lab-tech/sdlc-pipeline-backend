@@ -186,6 +186,10 @@ func TestStarterTokenContainerFails(t *testing.T) {
 		name, fail, body, want string
 	}{
 		{name: "docker refuses", fail: "docker: Error response from daemon: pull access denied for alpine", want: "pull access denied"},
+		// Как docker на деле: причина, пустая строка и подсказка --help.
+		{name: "docker refuses with the hint", fail: "Unable to find image 'alpine:3' locally\n" +
+			"docker: Error response from daemon: failed to resolve reference \"docker.io/library/alpine:3\": network is unreachable\n\n" +
+			"Run 'docker run --help' for more information", want: "network is unreachable"},
 		{name: "empty output", body: "\n", want: "it read nothing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

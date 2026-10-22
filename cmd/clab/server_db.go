@@ -180,10 +180,17 @@ func (i *installation) readSecretFile(ctx context.Context) func(string) ([]byte,
 }
 
 // lastLine — последняя непустая строка вывода, не длиннее 300 байт: причина
-// отказа docker без простыни.
+// отказа docker без простыни. Подсказка docker run «Run 'docker run --help'
+// for more information», которой docker заканчивает отказ, пропускается:
+// причина — строка перед ней.
 func lastLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	l := strings.TrimSpace(lines[len(lines)-1])
+	l := ""
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !(strings.HasPrefix(line, "Run '") && strings.HasSuffix(line, "for more information")) {
+			l = line
+		}
+	}
 	if len(l) > 300 {
 		l = l[:300] + "…"
 	}
