@@ -7,7 +7,8 @@
 // контейнер файлами и не видны ни в .env, ни в docker inspect.
 //
 // List — единственный перечень секретов: из него читают config.Load,
-// offsite.FromEnv, github.SecretFromEnv и clab server, по нему сверяется
+// offsite.FromEnv, github.SecretFromEnv, tracing.FromEnv и clab server, по
+// нему сверяется
 // таблица «Secrets in files» в docs/admin.md пакета и маскирует support-bundle
 // (CLAB-138). Новая секретная переменная — строка здесь; Value отказывает в
 // чтении имени, которого в перечне нет.
@@ -51,7 +52,14 @@ type Var struct {
 	Template bool
 	// Readers — кто читает: api, worker, dbcheck, backup-s3, postgres.
 	Readers []string
+	// Via — какой разбор читателя принимает переменную, если не общий
+	// (config.Load у api, воркера и dbcheck): ViaTracing — трассировки api.
+	Via string
 }
+
+// ViaTracing — переменную разбирает tracing.FromEnv api, а не config.Load
+// (CLAB-235): заголовки OTLP.
+const ViaTracing = "tracing"
 
 // ValueEnv — имя формы значением, пусто, если её нет.
 func (v Var) ValueEnv() string {
@@ -102,6 +110,9 @@ var List = []Var{
 	{Name: "SDLC_BLOB_S3_ACCESS_KEY_ID", Readers: []string{"api", "worker"}},
 	{Name: "SDLC_BLOB_S3_SECRET_ACCESS_KEY", Readers: []string{"api", "worker"}},
 	{Name: "SDLC_BLOB_S3_SESSION_TOKEN", Readers: []string{"api", "worker"}},
+	// Заголовки экспортёра трассировок (CLAB-235): в них ключи APM.
+	{Name: "OTEL_EXPORTER_OTLP_HEADERS", Readers: []string{"api"}, Via: ViaTracing},
+	{Name: "OTEL_EXPORTER_OTLP_TRACES_HEADERS", Readers: []string{"api"}, Via: ViaTracing},
 	{Name: "BACKUP_S3_ACCESS_KEY_ID", Readers: []string{"backup-s3"}},
 	{Name: "BACKUP_S3_SECRET_ACCESS_KEY", Readers: []string{"backup-s3"}},
 	{Name: "POSTGRES_PASSWORD", Form: Image, Readers: []string{"postgres"}},

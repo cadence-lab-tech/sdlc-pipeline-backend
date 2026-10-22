@@ -12,6 +12,7 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/github"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/offsite"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/tracing"
 )
 
 const marker = "Mk7fileValue42"
@@ -71,13 +72,18 @@ func TestEverySecretReadsFromFile(t *testing.T) {
 				t.Fatal("a secret without readers")
 			}
 			// api, worker и dbcheck читают одним разбором (config.Load и
-			// Source.DatabaseURL): одна проверка на всех.
-			viaConfig, viaOffsite := false, false
+			// Source.DatabaseURL): одна проверка на всех. Заголовки OTLP
+			// api разбирает трассировками (Via), а не config.Load.
+			viaConfig, viaOffsite, viaTracing := false, false, false
 			for _, r := range v.Readers {
-				switch r {
-				case "api", "worker", "dbcheck":
+				switch {
+				case r == "api" && v.Via == secrets.ViaTracing:
+					viaTracing = true
+				case v.Via != "":
+					t.Fatalf("reader %q via %q: teach this test to read it", r, v.Via)
+				case r == "api", r == "worker", r == "dbcheck":
 					viaConfig = true
-				case "backup-s3":
+				case r == "backup-s3":
 					viaOffsite = true
 				default:
 					t.Fatalf("unknown reader %q: teach this test to read it", r)
@@ -88,6 +94,9 @@ func TestEverySecretReadsFromFile(t *testing.T) {
 			}
 			if viaOffsite {
 				checkOffsite(t, v)
+			}
+			if viaTracing {
+				checkTracing(t, v)
 			}
 		})
 	}
@@ -184,6 +193,38 @@ func checkOffsite(t *testing.T, v secrets.Var) {
 	env[v.ValueEnv()] = marker
 	if _, _, err := offsite.FromEnv(func(k string) string { return env[k] }); err == nil ||
 		!strings.Contains(err.Error(), v.FileEnv()) || strings.Contains(err.Error(), marker) {
+		t.Fatalf("both forms: %v", err)
+	}
+}
+
+// checkTracing — заголовки OTLP у трассировок api (CLAB-235): значение и
+// файл с \n и \r\n дают одни заголовки экспортёру, обе формы — отказ с
+// обоими именами и без значения.
+func checkTracing(t *testing.T, v secrets.Var) {
+	t.Helper()
+	if v.Form != secrets.ValueOrFile || v.Template {
+		t.Fatalf("form %d of %s: teach this test to read it", v.Form, v.Name)
+	}
+	read := func(env map[string]string) (tracing.Settings, error) {
+		env["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector:4318"
+		return tracing.FromEnv(func(k string) string { return env[k] })
+	}
+	byValue, err := read(map[string]string{v.ValueEnv(): "api-key=" + marker})
+	if err != nil || byValue.Headers.Get("api-key") != marker {
+		t.Fatalf("%s is not read by tracing.FromEnv: %v", v.Name, err)
+	}
+	for _, tail := range []string{"\n", "\r\n"} {
+		byFile, err := read(map[string]string{v.FileEnv(): file(t, "api-key="+marker+tail)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(byValue, byFile) {
+			t.Fatalf("%s: the file gives other headers", v.FileEnv())
+		}
+	}
+	_, err = read(map[string]string{v.ValueEnv(): "api-key=" + marker, v.FileEnv(): file(t, "api-key="+marker)})
+	if err == nil || !strings.Contains(err.Error(), v.ValueEnv()+" ") || !strings.Contains(err.Error(), v.FileEnv()) ||
+		strings.Contains(err.Error(), marker) {
 		t.Fatalf("both forms: %v", err)
 	}
 }
