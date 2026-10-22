@@ -11,7 +11,7 @@
                         ┌─ caddy (80/443, TLS сам) ─┐
   https://<домен>/ ─────┤  /v1 /mcp /webhooks ──────┼── api      Go :8080 ──┐
                         │  остальное ───────────────┼── ui       статика    │
-                        └───────────────────────────┘   worker   Go        ├── postgres 17 + pgvector
+                        └───────────────────────────┘   worker   Go        ├── postgres 18 + pgvector
                                                                             │
                                                              S3-хранилище ◄─┘  содержимое артефактов
 ```
@@ -28,6 +28,7 @@
 | `deploy/Caddyfile` | TLS и маршрутизация; правки доезжают выкладкой — `deploy.sh` делает `caddy reload` |
 | `deploy/deploy.sh` | выкладка на сервере, она же откат: `backend <тег>` или `frontend <тег>` |
 | `deploy/backup.sh` | дамп базы с ротацией, cron 03:00 |
+| `deploy/postgres/major-upgrade.sh` | переезд базы на новую мажорную версию PostgreSQL перед `postgres` (раздел 7); копия файла пакета self-hosted |
 | `deploy/.env.example` | шаблон `/opt/sdlc/.env`; собирает `devops/bin/bootstrap-env.sh` |
 | `Dockerfile` | образ api, воркера и CLI |
 | `.github/workflows/deploy.yml` | сборка образа в GHCR и выкладка `backend` |
@@ -166,3 +167,40 @@ gh workflow run deploy.yml -R cadence-lab-tech/sdlc-pipeline-backend -f tag=<sha
 ```bash
 gunzip -c backups/sdlc-<дата>.sql.gz | docker compose exec -T postgres psql -U sdlc -d sdlc
 ```
+
+## 7. Переезд на PostgreSQL 18
+
+С CLAB-237 база — `pgvector/pgvector:pg18-trixie` (PostgreSQL 18, Debian 13),
+данные в томе `sdlc_postgres` (`/var/lib/postgresql/18/docker`). Прежний
+кластер 17 лежит в томе `sdlc_pgdata`; первая выкладка `main` с этим
+compose переносит его тем же механизмом, что пакет self-hosted (раздел
+«PostgreSQL 18» в `docs/admin.md` пакета): `up -d` в `deploy.sh` ждёт
+одноразовые `pg-upgrade-dump` (`pg_dumpall` образом 17) и `pg-upgrade-load`
+(загрузка в новый кластер 18), и только потом поднимает `postgres`, api и
+воркер. Простой — на время дампа и загрузки, место — размер базы плюс
+сжатый дамп.
+
+Перед слиянием — ручной бэкап и проверка места:
+
+```bash
+cd /opt/sdlc && ./backup.sh
+docker compose exec -T postgres psql -U sdlc -d postgres -Atc "SELECT pg_size_pretty(sum(pg_database_size(oid))) FROM pg_database"
+df -h "$(docker info -f '{{.DockerRootDir}}')"
+```
+
+После выкладки:
+
+```bash
+docker compose exec -T postgres psql -U sdlc -d sdlc -Atc 'SHOW server_version'   # 18.x
+docker compose logs pg-upgrade-dump pg-upgrade-load
+docker compose logs postgres api worker | grep -i 'collation version mismatch'   # пусто
+```
+
+Переезд упал — выкладка красная, `postgres` на половине данных не
+поднимается, `sdlc_pgdata` не тронут; следующий `up -d` начинает переезд
+заново, а кластер 18, если он уже стоял на месте, откладывает в
+`cadence-upgrade/replaced-<время>` тома `sdlc_postgres`. Откат на 17: прежний `docker-compose.yml` (revert и выкладка или руками
+на машине) и `docker compose up -d` — 17 поднимается на `sdlc_pgdata` с
+данными на момент переезда; записанное после — из бэкапа. Когда откат больше
+не нужен: `docker compose rm -f pg-upgrade-dump && docker volume rm
+sdlc_pgdata`.

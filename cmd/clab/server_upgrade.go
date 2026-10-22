@@ -271,6 +271,10 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 	} else if !i.running(ctx, "postgres") {
 		return errors.New("the stack is not running; start it before upgrading so that a backup can be taken:\n" +
 			"  export CADENCE_VERSION=$(cat VERSION) && docker compose up -d")
+	} else if err := i.checkPostgresMove(ctx, newDir, target); err != nil {
+		// Новая мажорная версия встроенной базы: предупреждение и место — до
+		// бэкапа, пока ничего не изменилось (CLAB-237).
+		return err
 	}
 	e.info("backup of %s", oldVersion)
 	backup, err := i.backup(ctx)

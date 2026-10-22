@@ -10,16 +10,49 @@
 name: sdlc
 
 services:
-  postgres:
-    # Тот же образ, что в dev/: схема требует pgvector.
+  # Переезд с PostgreSQL 17 на 18 тем же механизмом, что в пакете
+  # self-hosted (CLAB-237, docs/admin.md пакета, «PostgreSQL 18»): два
+  # одноразовых сервиса перед postgres. pg-upgrade-dump образом 17 снимает
+  # pg_dumpall с прежнего тома pgdata, pg-upgrade-load грузит его в новый
+  # кластер 18 в томе postgres и ставит метку последней; postgres ждёт обоих.
+  # После переезда и на каждом следующем `up -d` оба выходят сразу. Том
+  # pgdata только читается и остаётся для отката; скрипт —
+  # deploy/postgres/major-upgrade.sh, копия файла пакета (deploy.yml
+  # кладёт его в /opt/sdlc/postgres).
+  pg-upgrade-dump:
     image: pgvector/pgvector:pg17
+    entrypoint: ["bash", "/cadence/major-upgrade.sh", "dump"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - postgres:/target
+      - ./postgres/major-upgrade.sh:/cadence/major-upgrade.sh:ro
+
+  pg-upgrade-load:
+    image: pgvector/pgvector:pg18-trixie
+    entrypoint: ["bash", "/cadence/major-upgrade.sh", "load"]
+    depends_on:
+      pg-upgrade-dump:
+        condition: service_completed_successfully
+    volumes:
+      - postgres:/var/lib/postgresql
+      - ./postgres/major-upgrade.sh:/cadence/major-upgrade.sh:ro
+
+  postgres:
+    # Тот же образ, что в dev/ и в пакете: схема требует pgvector. Данные —
+    # в /var/lib/postgresql/18/docker тома postgres: раскладка образов 18+.
+    image: pgvector/pgvector:pg18-trixie
     restart: unless-stopped
+    depends_on:
+      pg-upgrade-load:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -176,6 +209,11 @@ services:
     depends_on: [api, ui]
 
 volumes:
+  # База: PostgreSQL 18.
+  postgres:
+  # База PostgreSQL 17 до CLAB-237: читается один раз при переезде, остаётся
+  # для отката. Удалить, когда откат больше не нужен:
+  #   docker compose rm -f pg-upgrade-dump && docker volume rm sdlc_pgdata
   pgdata:
   # Вынесенное содержимое при пустом SDLC_BLOB_S3_BUCKET; общий для api и воркера.
   blobs:
