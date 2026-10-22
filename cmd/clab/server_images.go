@@ -10,7 +10,10 @@ package main
 // платформами, аттестациями BuildKit, подписью cosign и OpenVEX в OCI-layout
 // и обратно, а cosign save/load 3.1.3 referrers теряет (спайк CLAB-202).
 // Подписи проверяет тот же внешний cosign, что у install и upgrade (0054);
-// без сети — по trusted_root.json, который save кладёт в архив.
+// без сети — по trusted_root.json, который save кладёт в архив. Обратно из
+// архива load берёт только образ и проверенные бандлы Sigstore, без
+// --referrers: остальное, что лежит в архиве рядом с образом, никуда не
+// попадает (F3 тестирования, 0059).
 //
 // Загрузка без своего реестра идёт через временный реестр на 127.0.0.1:
 // docker load не сохраняет digest, а docker pull по digest из реестра и
@@ -41,8 +44,10 @@ import (
 
 const (
 	// helperImage — образ, который clab server запускает сам, а не compose:
-	// одноразовый контейнер тома blobs у backup и restore. Он входит в
-	// перечень образов версии.
+	// одноразовый контейнер тома blobs у backup и restore и чтение файла
+	// secrets/, недоступного пользователю (readSecretFile, CLAB-252). Один
+	// на все такие запуски: он входит в перечень образов версии, и архив
+	// air-gap несёт ровно то, что clab запускает.
 	helperImage = "alpine:3"
 
 	regctlMinVersion = "v0.9.2" // проверено спайком CLAB-202
@@ -139,9 +144,9 @@ Usage: clab server images load FILE [--registry HOST[/PATH]]
 
 Options:
   --registry HOST[/PATH]  also copy our two images into this registry (with
-                          the same digests, signatures and OpenVEX), for
-                          CADENCE_REGISTRY or image.registry of Helm; the
-                          credentials are those of docker login
+                          the same digests and their verified signature and
+                          OpenVEX), for CADENCE_REGISTRY or image.registry of
+                          Helm; the credentials are those of docker login
 
 It verifies the signature of checksums.txt of the release and of both our
 images offline, with trusted_root.json of the archive, in a temporary
@@ -151,6 +156,12 @@ Docker or your registry. Without --registry the images are pulled from the
 temporary registry into Docker and tagged as the compose files name them:
 the pin by digest is then found locally with the containerd image store of
 Docker; the classic overlay2 storage cannot keep it, and load refuses there.
+
+Only the images and the Sigstore bundles it verified (the signature and the
+OpenVEX of our images) leave the archive. Any other referrer in it - an
+unsigned OpenVEX, an in-toto statement, a signature of a platform manifest,
+or every bundle when signatures are not verified - goes nowhere, and one line
+names it; it does not change the outcome.
 
 The release goes to download/vX.Y.Z/ next to FILE: the mirror of the
 releases for clab server install, get-cadence.sh and upgrade.sh
@@ -299,7 +310,7 @@ func versionImages(ctx context.Context, e *serverEnv, dir string, env []string, 
 			env = append(env, m[1]+"=placeholder-of-clab-server-images")
 			continue
 		}
-		(&verifier{e: e}).tail(errb.String())
+		(&verifier{e: e}).tail(ctx, errb.String())
 		return nil, c, fmt.Errorf("could not read the images of %s from the compose files of its package (see above)", version)
 	}
 }
@@ -447,7 +458,7 @@ func regctl(ctx context.Context, e *serverEnv, env []string, args ...string) (st
 	var out, errb bytes.Buffer
 	err := e.run.run(ctx, cmdSpec{name: "regctl", args: args, env: env, stdout: &out, stderr: &errb})
 	if err != nil {
-		(&verifier{e: e}).tail(errb.String() + out.String())
+		(&verifier{e: e}).tail(ctx, errb.String()+out.String())
 	}
 	return out.String(), err
 }
@@ -650,7 +661,7 @@ func sigstoreRoot(ctx context.Context, e *serverEnv, work string) (string, error
 		stdout: io.Discard, stderr: &errb}
 	root := filepath.Join(tuf, "tuf-repo-cdn.sigstore.dev", "targets", trustedRootAsset)
 	if err := e.run.run(ctx, c); err != nil || !isFile(root) {
-		(&verifier{e: e}).tail(errb.String())
+		(&verifier{e: e}).tail(ctx, errb.String())
 		return "", fmt.Errorf("cosign initialize could not fetch trusted_root.json of Sigstore (see above): check that tuf-repo-cdn.sigstore.dev is reachable from this host. %s", nothingSaved)
 	}
 	return root, nil
@@ -753,8 +764,24 @@ func writeArchive(tree, output string) (string, int64, error) {
 
 var registryPattern = regexp.MustCompile(`^[A-Za-z0-9.-]+(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 
-func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
+func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 	var registry string
+	// Наши образы, уже скопированные в реестр администратора: их не
+	// вернуть, и отказ называет их.
+	var pushed []string
+	// Прерванный load говорит только «interrupted»: оборванный вызов
+	// docker, regctl или cosign — не причина отказа (O4 тестирования).
+	// Docker уборка возвращает в исходное, реестр администратора — нет.
+	defer func() {
+		if err == nil || !interrupted(ctx, e) {
+			return
+		}
+		if len(pushed) > 0 {
+			err = fmt.Errorf("interrupted. Already copied: %s. Nothing was loaded into Docker.", strings.Join(pushed, ", "))
+			return
+		}
+		err = fmt.Errorf("interrupted. %s", nothingLoaded)
+	}()
 	pos, err := parseServerArgs(args, nil, map[string]*string{"--registry": &registry})
 	if err != nil {
 		return err
@@ -827,7 +854,10 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 		root = ""
 	}
 	// Без корня проверить без сети нечем: require отказывает до действий,
-	// auto говорит один раз.
+	// auto говорит один раз. Прерванному load говорить о режиме нечего.
+	if ctx.Err() != nil {
+		return fmt.Errorf("interrupted. %s", nothingLoaded)
+	}
 	skip, err := v.skip(version)
 	if err != nil {
 		return err
@@ -867,9 +897,11 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 		byRef[img.Ref] = img
 	}
 	type loadImage struct {
-		r      imageRef
-		layout string
-		digest string
+		r       imageRef
+		layout  string // каталог OCI-layout образа в архиве
+		tag     string // тег образа в нём
+		digest  string
+		bundles []string // бандлы Sigstore образа, перенесённые во временный реестр
 	}
 	var plan []loadImage
 	for _, img := range images {
@@ -878,7 +910,7 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 		if !ok || (r.digest != "" && a.Digest != r.digest) {
 			return fmt.Errorf("the archive does not hold %s, which the package of %s runs: the archive is broken or altered. %s", img, version, nothingLoaded)
 		}
-		plan = append(plan, loadImage{r: r, layout: filepath.Join(tree, filepath.FromSlash(a.Layout)) + ":" + a.Tag, digest: a.Digest})
+		plan = append(plan, loadImage{r: r, layout: filepath.Join(tree, filepath.FromSlash(a.Layout)), tag: a.Tag, digest: a.Digest})
 	}
 	// Наши — первыми: на них видно, держит ли хранилище Docker pin.
 	sort.SliceStable(plan, func(i, j int) bool { return plan[i].r.ours() && !plan[j].r.ours() })
@@ -901,12 +933,35 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 	// regctl registry set: конфиг regctl администратора не пишется, а его
 	// настройки (TLS своего реестра) и docker login работают для --registry.
 	host := "--host=reg=" + reg.addr + ",tls=disabled"
-	for _, img := range plan {
+	// Из архива дальше идут только образ и бандлы Sigstore нашего образа,
+	// которые сейчас проверятся (решение человека по F3 тестирования,
+	// правило «в реестр только проверенное», 0059): копирование без
+	// --referrers, бандлы — по одному. Остальные referrers архива не
+	// попадают ни во временный реестр, ни к администратору.
+	var dropped []archiveReferrer
+	for i := range plan {
+		img := &plan[i]
 		e.info("copying %s into the temporary registry", img.r.named())
-		if _, err := regctl(ctx, e, nil, "image", "copy", host, "--referrers", "ocidir://"+img.layout, reg.addr+"/"+img.r.path+":"+img.r.tag); err != nil {
+		if _, err := regctl(ctx, e, nil, "image", "copy", host, "ocidir://"+img.layout+":"+img.tag, reg.addr+"/"+img.r.path+":"+img.r.tag); err != nil {
 			return fmt.Errorf("regctl could not copy %s from the archive into the temporary registry (see above). %s", img.r.named(), nothingLoaded)
 		}
+		refs, err := archiveReferrers(ctx, e, img.layout, img.digest)
+		if err != nil {
+			return fmt.Errorf("regctl could not read the referrers of %s in the archive (see above): the archive is broken or altered. %s", img.r.named(), nothingLoaded)
+		}
+		for _, ref := range refs {
+			ref.repo = img.r.repo()
+			if !img.r.ours() || skip || ref.subject != img.digest || !strings.HasPrefix(ref.ArtifactType, sigstoreBundleType) {
+				dropped = append(dropped, ref)
+				continue
+			}
+			if _, err := regctl(ctx, e, nil, "image", "copy", host, "ocidir://"+img.layout+"@"+ref.Digest, reg.addr+"/"+img.r.path+"@"+ref.Digest); err != nil {
+				return fmt.Errorf("regctl could not copy the Sigstore bundle %s of %s from the archive into the temporary registry (see above). %s", ref.Digest, img.r.named(), nothingLoaded)
+			}
+			img.bundles = append(img.bundles, ref.Digest)
+		}
 	}
+	reportDropped(e, dropped)
 	if !skip {
 		for _, img := range plan {
 			if !img.r.ours() {
@@ -919,19 +974,26 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 	}
 
 	// --- 4. в свой реестр ----------------------------------------------------------
-	var pushed []string
+	// Образ и проверенные бандлы, каждый своим вызовом: --referrers взял бы
+	// и то, что regctl сам приписывает образу.
 	for _, img := range plan {
 		if registry == "" || !img.r.ours() {
 			continue
 		}
 		dst := registry + "/" + img.r.repo() + ":" + img.r.tag
 		e.info("copying %s to %s", img.r.named(), dst)
-		if _, err := regctl(ctx, e, nil, "image", "copy", host, "--referrers", "--digest-tags", reg.addr+"/"+img.r.path+"@"+img.digest, dst); err != nil {
-			done := ""
-			if len(pushed) > 0 {
-				done = " Already copied: " + strings.Join(pushed, ", ") + "."
+		copies := [][2]string{{reg.addr + "/" + img.r.path + "@" + img.digest, dst}}
+		for _, b := range img.bundles {
+			copies = append(copies, [2]string{reg.addr + "/" + img.r.path + "@" + b, registry + "/" + img.r.repo() + "@" + b})
+		}
+		for _, c := range copies {
+			if _, err := regctl(ctx, e, nil, "image", "copy", host, c[0], c[1]); err != nil {
+				done := ""
+				if len(pushed) > 0 {
+					done = " Already copied: " + strings.Join(pushed, ", ") + "."
+				}
+				return fmt.Errorf("regctl could not copy %s to %s (see above): check that the registry is reachable and docker login to it is done.%s Nothing was loaded into Docker.", img.r.named(), registry, done)
 			}
-			return fmt.Errorf("regctl could not copy %s to %s (see above): check that the registry is reachable and docker login to it is done.%s Nothing was loaded into Docker.", img.r.named(), registry, done)
 		}
 		pushed = append(pushed, dst+"@"+img.digest)
 		e.ok("%s@%s in %s", dst, img.digest, registry)
@@ -965,15 +1027,18 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 		}
 		src := reg.addr + "/" + img.r.path + "@" + img.digest
 		hadNamed := dockerImagePresent(ctx, e, named)
-		if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"pull", "-q", src}, stdout: io.Discard, stderr: e.errw}); err != nil {
+		var errb bytes.Buffer
+		if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"pull", "-q", src}, stdout: io.Discard, stderr: &errb}); err != nil {
 			undo()
+			(&verifier{e: e}).tail(ctx, errb.String())
 			return fmt.Errorf("docker could not pull %s from the temporary registry (see above). %s", named, nothingLoaded)
 		}
-		err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"tag", src, named}, stdout: io.Discard, stderr: e.errw})
+		err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"tag", src, named}, stdout: io.Discard, stderr: &errb})
 		// Ссылка временного реестра — только своя, под ней ничего не жило.
 		_ = e.run.run(context.WithoutCancel(ctx), cmdSpec{name: "docker", args: []string{"rmi", src}, stdout: io.Discard, stderr: io.Discard})
 		if err != nil {
 			undo()
+			(&verifier{e: e}).tail(ctx, errb.String())
 			return fmt.Errorf("docker could not tag %s (see above). %s", named, nothingLoaded)
 		}
 		if !hadNamed {
@@ -1060,7 +1125,7 @@ func verifyArchiveImage(ctx context.Context, e *serverEnv, v *verifier, host, ve
 		err := e.run.run(ctx, cmdSpec{name: "cosign", args: append(args, "--offline", "--trusted-root", root,
 			"--certificate-identity", identity, "--certificate-oidc-issuer", verifyIssuer, target), stdout: &stdout, stderr: &stderr})
 		if err != nil {
-			v.tail(stderr.String())
+			v.tail(ctx, stderr.String())
 		}
 		return stdout.String(), err
 	}
@@ -1095,6 +1160,90 @@ func verifyArchiveImage(ctx context.Context, e *serverEnv, v *verifier, host, ve
 	}
 	e.ok("the OpenVEX of %s is signed by %s (verified offline with %s of the archive)", target, identity, trustedRootAsset)
 	return nil
+}
+
+// archiveReferrer — referrer образа в OCI-layout архива.
+type archiveReferrer struct {
+	Digest       string `json:"digest"`
+	ArtifactType string `json:"artifactType"`
+	subject      string // манифест, к которому он приложен: индекс образа или манифест внутри него
+	repo         string
+}
+
+// archiveReferrers — referrers образа с digest в OCI-layout dir: индекса и
+// каждого манифеста внутри него (платформы, аттестации BuildKit). Манифест,
+// который сам входит в индекс, — часть образа под подписанным digest, а не
+// приложение к нему: regctl показывает аттестации BuildKit referrers
+// платформенных манифестов, но едут они с образом при любом копировании, и
+// в отброшенные они не идут.
+func archiveReferrers(ctx context.Context, e *serverEnv, dir, digest string) ([]archiveReferrer, error) {
+	raw, err := regctl(ctx, e, nil, "manifest", "get", "ocidir://"+dir+"@"+digest, "--format", "raw-body")
+	if err != nil {
+		return nil, err
+	}
+	var index struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal([]byte(raw), &index); err != nil {
+		return nil, fmt.Errorf("the manifest of %s is not JSON: %v", digest, err)
+	}
+	subjects := []string{digest}
+	inside := map[string]bool{}
+	for _, m := range index.Manifests {
+		subjects = append(subjects, m.Digest)
+		inside[m.Digest] = true
+	}
+	var refs []archiveReferrer
+	for _, subject := range subjects {
+		out, err := regctl(ctx, e, nil, "artifact", "list", "ocidir://"+dir+"@"+subject, "--format", "{{json .Descriptors}}")
+		if err != nil {
+			return nil, err
+		}
+		var descs []archiveReferrer
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &descs); err != nil {
+			return nil, fmt.Errorf("the referrers of %s are not JSON: %v", subject, err)
+		}
+		for _, d := range descs {
+			if inside[d.Digest] {
+				continue
+			}
+			d.subject = subject
+			refs = append(refs, d)
+		}
+	}
+	return refs, nil
+}
+
+// reportDropped — одна строка о referrers архива, которые load не
+// перенёс: какого они типа и у каких образов. На исход load она не влияет.
+func reportDropped(e *serverEnv, dropped []archiveReferrer) {
+	if len(dropped) == 0 {
+		return
+	}
+	type key struct{ typ, repo string }
+	count := map[key]int{}
+	var order []key
+	for _, d := range dropped {
+		k := key{d.ArtifactType, d.repo}
+		if k.typ == "" {
+			k.typ = "no artifactType"
+		}
+		if count[k] == 0 {
+			order = append(order, k)
+		}
+		count[k]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, k := range order {
+		n := ""
+		if count[k] > 1 {
+			n = fmt.Sprintf(" ×%d", count[k])
+		}
+		parts = append(parts, fmt.Sprintf("%s%s of %s", k.typ, n, k.repo))
+	}
+	e.warn("not carried from the archive, not a verified Sigstore bundle of the release: %s", strings.Join(parts, ", "))
 }
 
 // writeMirror — ассеты релиза из архива в каталог зеркала релизов.

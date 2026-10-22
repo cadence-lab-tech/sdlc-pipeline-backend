@@ -94,7 +94,9 @@ func newVerifier(ctx context.Context, e *serverEnv, value, nothing string) (*ver
 		v.why = "cosign 3.x is not installed"
 	} else {
 		var out bytes.Buffer
-		_ = e.run.run(ctx, cmdSpec{name: "cosign", args: []string{"version"}, stdout: &out, stderr: &out})
+		if err := e.run.run(ctx, cmdSpec{name: "cosign", args: []string{"version"}, stdout: &out, stderr: &out}); err != nil && interrupted(ctx, e) {
+			return nil, fmt.Errorf("interrupted. %s", nothing)
+		}
 		ver := ""
 		if m := cosignGitVersion.FindStringSubmatch(out.String()); m != nil {
 			ver = m[1]
@@ -156,8 +158,12 @@ func (v *verifier) runCosign(ctx context.Context, args ...string) (string, error
 }
 
 // tail — последние строки ответа внешней команды перед отказом, как
-// tail -n 5 у скриптов.
-func (v *verifier) tail(s string) {
+// tail -n 5 у скриптов. Прерванной команде сказать нечего: её ответ на
+// Ctrl-C — не причина отказа (O4 тестирования CLAB-202).
+func (v *verifier) tail(ctx context.Context, s string) {
+	if interrupted(ctx, v.e) {
+		return
+	}
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) > 5 {
 		lines = lines[len(lines)-5:]
@@ -165,6 +171,23 @@ func (v *verifier) tail(s string) {
 	if text := strings.Join(lines, "\n"); strings.TrimSpace(text) != "" {
 		fmt.Fprintln(v.e.errw, text)
 	}
+}
+
+// interruptGrace — сколько ждать отмены контекста после отказа внешней
+// команды. Ctrl-C терминала приходит всей группе процессов переднего
+// плана: дочерняя команда умирает от него и отвечает ошибкой чуть раньше,
+// чем signal.NotifyContext отменит ctx.
+const interruptGrace = 300 * time.Millisecond
+
+// interrupted — команду прервали (SIGINT, SIGTERM). Зовётся на пути отказа:
+// прерванная команда говорит «interrupted», а не причину, которую ей
+// приписал бы оборванный вызов (O4 тестирования CLAB-202).
+func interrupted(ctx context.Context, e *serverEnv) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	e.sleep(interruptGrace)
+	return ctx.Err() != nil
 }
 
 // verifyPackage — lib.sh verify_package: подпись dir/checksums.txt версии
@@ -196,7 +219,7 @@ func (v *verifier) verifyPackage(ctx context.Context, releases, version, dir str
 		}
 	}
 	if err != nil {
-		v.tail(out)
+		v.tail(ctx, out)
 		return fmt.Errorf("the signature of checksums.txt of %s did not verify for %s: the release is altered or not ours.\n"+
 			"  Do not use it and report it privately (SECURITY.md). %s", version, verifyPackageIdentity, v.nothing)
 	}
@@ -234,7 +257,7 @@ func (v *verifier) mirrorRoot(ctx context.Context, releases, version, dir string
 // корню root (clab server images load).
 func (v *verifier) verifyChecksumsOffline(ctx context.Context, version, dir, root string) error {
 	if out, err := v.cosignBlob(ctx, dir, root); err != nil {
-		v.tail(out)
+		v.tail(ctx, out)
 		return fmt.Errorf("the signature of checksums.txt of %s in the archive did not verify for %s: the archive is altered or not ours.\n"+
 			"  Do not use it and report it privately (SECURITY.md). %s", version, verifyPackageIdentity, v.nothing)
 	}
@@ -249,7 +272,7 @@ func (v *verifier) verifyImageOffline(ctx context.Context, version, repo, target
 	out, err := v.runCosign(ctx, "verify", "--offline", "--trusted-root", root, "--certificate-identity", identity,
 		"--certificate-oidc-issuer", verifyIssuer, target)
 	if err != nil {
-		v.tail(out)
+		v.tail(ctx, out)
 		return fmt.Errorf("the signature of %s (%s %s) did not verify for %s: the image is altered or not ours.\n"+
 			"  Do not run it and report it privately (SECURITY.md). %s", target, repo, version, identity, v.nothing)
 	}
@@ -302,7 +325,7 @@ func composeImages(ctx context.Context, e *serverEnv, c cmdSpec) ([]string, erro
 	var out, errb bytes.Buffer
 	c.stdout, c.stderr = &out, &errb
 	if err := e.run.run(ctx, c); err != nil {
-		(&verifier{e: e}).tail(errb.String())
+		(&verifier{e: e}).tail(ctx, errb.String())
 		return nil, err
 	}
 	var images []string
@@ -392,7 +415,7 @@ func (v *verifier) verifyImages(ctx context.Context, version string, c cmdSpec) 
 				v.e.warn("images not verified: ghcr.io is unreachable from this host (a registry mirror in a closed network?); verify them where it is reachable: docs/admin.md, \"Verifying a release\"")
 				return nil
 			}
-			v.tail(out)
+			v.tail(ctx, out)
 			return fmt.Errorf("the signature of %s (%s %s) did not verify for %s: the image is altered or not ours.\n"+
 				"  Do not run it and report it privately (SECURITY.md). %s", target, repo, version, identity, v.nothing)
 		}

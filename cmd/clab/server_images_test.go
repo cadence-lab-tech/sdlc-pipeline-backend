@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -73,11 +74,41 @@ func publishAirgap(t *testing.T, releases, v string, root bool) {
 	}
 }
 
-// fakeRef — бандл Sigstore, приложенный к образу: его тип и проверяется ли
-// он identity версии.
+// fakeRef — referrer образа в архиве: бандл Sigstore (typ пуст) с типом
+// содержимого pred и тем, проверяется ли он identity версии, или referrer
+// другого artifactType; child — приложен к платформенному манифесту, а не
+// к индексу.
 type fakeRef struct {
-	pred string
-	bad  bool
+	pred  string
+	bad   bool
+	typ   string
+	child bool
+}
+
+func (f fakeRef) artifactType() string {
+	if f.typ == "" {
+		return "application/vnd.dev.sigstore.bundle.v0.3+json"
+	}
+	return f.typ
+}
+
+// fakeChild, fakeAttestation — манифесты внутри индекса образа в архиве:
+// платформа и аттестация BuildKit к ней, которую regctl показывает её
+// referrer.
+const (
+	fakeChild       = "sha256:child"
+	fakeAttestation = "sha256:attestation"
+)
+
+// layoutRepo — образ ссылки на OCI-layout архива или реестр.
+func layoutRepo(ref string) string {
+	name, _, _ := strings.Cut(ref, "@")
+	for _, repo := range verifyImageRepos {
+		if strings.Contains(name, "_"+repo+"_") {
+			return repo
+		}
+	}
+	return refRepo(ref)
 }
 
 const signPredicate = "https://sigstore.dev/cosign/sign/v1"
@@ -104,7 +135,9 @@ type imagesRunner struct {
 	late         map[string]string     // контейнеры, которые демон покажет на следующем docker ps
 	onDockerRun  func(c cmdSpec) error // хук docker run временного реестра; nil — контейнер создан
 	onRun        func(c cmdSpec)       // хук на каждую команду
-	refs         map[string][]fakeRef  // бандлы Sigstore образа во временном реестре: repo → бандлы
+	onCall       func(c cmdSpec) error // хук на каждую команду: не nil — её ответ (SIGINT посреди вызова)
+	refs         map[string][]fakeRef  // referrers образа в архиве: repo → referrers
+	regRefs      map[string][]fakeRef  // referrers, перенесённые во временный реестр
 	containerd   bool
 	arch         string
 	regctlVer    string
@@ -119,7 +152,7 @@ type imagesRunner struct {
 func newImagesRunner() *imagesRunner {
 	r := newFakeRunner()
 	r.cosign = true
-	return &imagesRunner{fakeRunner: r, local: map[string]string{}, containers: map[string]string{}, late: map[string]string{}, refs: defaultRefs(),
+	return &imagesRunner{fakeRunner: r, local: map[string]string{}, containers: map[string]string{}, late: map[string]string{}, refs: defaultRefs(), regRefs: map[string][]fakeRef{},
 		containerd: true, arch: "amd64", regctlVer: "v0.9.2", pushed: map[string]string{}}
 }
 
@@ -132,6 +165,12 @@ func (r *imagesRunner) record(c cmdSpec) {
 func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 	if r.onRun != nil {
 		r.onRun(c)
+	}
+	if r.onCall != nil {
+		if err := r.onCall(c); err != nil {
+			r.record(c)
+			return err
+		}
 	}
 	args := strings.Join(c.args, " ")
 	write := func(s string) {
@@ -171,7 +210,7 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 			}
 			r.record(c)
 			var good []string
-			for _, ref := range r.refs[refRepo(target)] {
+			for _, ref := range r.regRefs[refRepo(target)] {
 				if !ref.bad && (c.args[0] == "verify" || ref.pred == openvexPredicate) {
 					good = append(good, `{"critical":{"type":"`+ref.pred+`"}}`)
 				}
@@ -317,12 +356,36 @@ func (r *imagesRunner) regctl(c cmdSpec, write func(string), fail func(string) e
 		if r.onRegctlCopy != nil && strings.HasPrefix(src, "ocidir://") {
 			r.onRegctlCopy()
 		}
+		// Referrer из архива во временный реестр — по своему digest.
+		if _, d, ok := strings.Cut(src, "@sha256:ref"); ok && strings.HasPrefix(src, "ocidir://") {
+			repo := layoutRepo(src)
+			n, _ := strconv.Atoi(d)
+			r.regRefs[repo] = append(r.regRefs[repo], r.refs[repo][n])
+		}
 		r.pushed[dst] = src
 		return nil
+	case strings.HasPrefix(args, "manifest get ocidir://"):
+		write(`{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"` + fakeChild + `"},{"digest":"` + fakeAttestation + `"}]}` + "\n")
+		return nil
 	case strings.HasPrefix(args, "artifact list "):
+		// В архиве — referrers r.refs, во временном реестре — r.regRefs.
+		ref := c.args[len(c.args)-3]
+		refs := r.refs[layoutRepo(ref)]
+		if !strings.HasPrefix(ref, "ocidir://") {
+			ref = c.args[len(c.args)-1]
+			refs = r.regRefs[refRepo(ref)]
+		}
+		_, subject, _ := strings.Cut(ref, "@")
 		var descs []string
-		for _, ref := range r.refs[refRepo(c.args[len(c.args)-1])] {
-			descs = append(descs, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.dev.sigstore.bundle.v0.3+json","annotations":{"`+predicateAnnotation+`":"`+ref.pred+`"}}`)
+		if subject == fakeChild {
+			descs = append(descs, `{"digest":"`+fakeAttestation+`","artifactType":"application/vnd.docker.attestation.manifest.v1+json"}`)
+		}
+		for i, ref := range refs {
+			if ref.child != (subject == fakeChild) || subject == fakeAttestation {
+				continue
+			}
+			descs = append(descs, fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:ref%d","artifactType":%q,"annotations":{%q:%q}}`,
+				i, ref.artifactType(), predicateAnnotation, ref.pred))
 		}
 		if descs == nil {
 			write("null\n")
@@ -831,8 +894,21 @@ func TestImagesLoad(t *testing.T) {
 		!strings.Contains(out, "server install --version v0.13.0") || !strings.Contains(out, "./upgrade.sh v0.13.0") {
 		t.Errorf("next:\n%s", out)
 	}
-	if regs := f.r.callsWith("regctl image copy --host=reg=" + testRegAddr + ",tls=disabled --referrers ocidir://"); len(regs) != 6 {
+	// Образы — без --referrers, бандлы — по одному (F3, 0059); аттестация
+	// BuildKit внутри индекса — часть образа, отброшенной не названа.
+	regs := f.r.callsWith("regctl image copy --host=reg=" + testRegAddr + ",tls=disabled ocidir://")
+	bundles := 0
+	for _, c := range regs {
+		if strings.Contains(c, "@sha256:ref") {
+			bundles++
+		}
+	}
+	if len(regs) != 10 || bundles != 4 || len(f.r.callsWith("regctl image copy --referrers")) != 0 ||
+		len(f.r.regRefs["sdlc-pipeline-backend"]) != 2 || len(f.r.regRefs["sdlc-pipeline-frontend"]) != 2 {
 		t.Errorf("copies into the temporary registry: %v", f.r.callsWith("regctl"))
+	}
+	if strings.Contains(f.errw.String(), "not carried") {
+		t.Errorf("dropped in a genuine archive:\n%s", f.errw)
 	}
 	// Подписи — до того, как что-то попало в Docker.
 	calls := f.r.calls
@@ -896,8 +972,16 @@ func TestImagesLoadRegistry(t *testing.T) {
 		!strings.Contains(out, "CADENCE_REGISTRY=reg.example:5443/cadence CADENCE_RELEASES_URL=") {
 		t.Errorf("output:\n%s", out)
 	}
-	if push := f.r.callsWith("regctl image copy --host=reg=" + testRegAddr + ",tls=disabled --referrers --digest-tags " + testRegAddr); len(push) != 2 {
+	// Образ и два его проверенных бандла, без --referrers и --digest-tags.
+	if push := f.r.callsWith("regctl image copy --host=reg=" + testRegAddr + ",tls=disabled " + testRegAddr); len(push) != 6 {
 		t.Errorf("pushes: %v", f.r.callsWith("regctl"))
+	}
+	for _, img := range []string{"sdlc-pipeline-backend", "sdlc-pipeline-frontend"} {
+		for _, b := range []string{"sha256:ref0", "sha256:ref1"} {
+			if src := f.r.pushed["reg.example:5443/cadence/"+img+"@"+b]; src != testRegAddr+"/cadence-lab-tech/"+img+"@"+b {
+				t.Errorf("bundle %s of %s: %q", b, img, src)
+			}
+		}
 	}
 	f.clean()
 
@@ -938,7 +1022,7 @@ func TestImagesLoadTampered(t *testing.T) {
 				!strings.Contains(f.errw.String(), c.want) {
 				t.Errorf("code %d\n%s", code, f.errw)
 			}
-			if len(f.r.local) != 0 || len(f.r.pushed) > 6 {
+			if len(f.r.local) != 0 {
 				t.Errorf("loaded: %v %v", f.r.local, f.r.pushed)
 			}
 			for dst := range f.r.pushed {
@@ -1001,7 +1085,7 @@ func TestImagesLoadVEX(t *testing.T) {
 	f, p := loadSetup(t, nil)
 	f.r.onRun = func(c cmdSpec) {
 		if len(c.args) > 0 && c.args[0] == "verify-attestation" {
-			f.r.refs["sdlc-pipeline-backend"] = []fakeRef{{pred: signPredicate}, {pred: openvexPredicate, bad: true}}
+			f.r.regRefs["sdlc-pipeline-backend"] = []fakeRef{{pred: signPredicate}, {pred: openvexPredicate, bad: true}}
 		}
 	}
 	if code := f.images("load", p); code != 1 || !strings.Contains(f.errw.String(), "the OpenVEX of "+testRegAddr) || len(f.r.local) != 0 {
@@ -1010,11 +1094,123 @@ func TestImagesLoadVEX(t *testing.T) {
 	f.clean()
 }
 
+// F3 тестирования, правило «в реестр только проверенное» (решение
+// человека, 0059): из архива дальше идут только образ и проверенные бандлы
+// Sigstore; любой другой referrer — подложенный OpenVEX не бандлом
+// (in-toto, неподписанный от oras attach), бандл на платформенном
+// манифесте, бандлы без проверки — не попадает ни во временный реестр, ни
+// к администратору и назван одной строкой; исход load он не меняет.
+func TestImagesLoadForeignReferrers(t *testing.T) {
+	sign, vex := fakeRef{pred: signPredicate}, fakeRef{pred: openvexPredicate}
+	for name, c := range map[string]struct {
+		vars    map[string]string
+		refs    []fakeRef // backend
+		carried int       // бандлов backend у администратора
+		line    string
+	}{
+		"in-toto VEX next to it (vex_relabeled)": {nil, []fakeRef{sign, vex, {pred: openvexPredicate, typ: "application/vnd.in-toto+json"}}, 2,
+			"application/vnd.in-toto+json of sdlc-pipeline-backend"},
+		"unsigned OpenVEX (vex_oras)": {nil, []fakeRef{sign, vex, {typ: "application/vnd.openvex+json"}, {typ: "application/vnd.openvex+json"}}, 2,
+			"application/vnd.openvex+json ×2 of sdlc-pipeline-backend"},
+		"bundle on a platform manifest": {nil, []fakeRef{sign, vex, {pred: openvexPredicate, child: true}}, 2,
+			"application/vnd.dev.sigstore.bundle.v0.3+json of sdlc-pipeline-backend"},
+		"signatures not verified (off)": {map[string]string{"CADENCE_VERIFY": "off"}, []fakeRef{sign, vex}, 0,
+			"application/vnd.dev.sigstore.bundle.v0.3+json ×2 of sdlc-pipeline-backend, application/vnd.dev.sigstore.bundle.v0.3+json ×2 of sdlc-pipeline-frontend"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, p := loadSetup(t, c.vars)
+			f.r.refs["sdlc-pipeline-backend"] = c.refs
+			if code := f.images("load", p, "--registry", "reg.example/cadence"); code != 0 {
+				t.Fatalf("code %d\n%s", code, f.errw)
+			}
+			if got := countLines(f.errw.String(), "! not carried from the archive, not a verified Sigstore bundle of the release: "+c.line); got != 1 {
+				t.Errorf("the line of the dropped:\n%s", f.errw)
+			}
+			want := 0
+			if c.vars == nil {
+				want = 2
+			}
+			if len(f.r.regRefs["sdlc-pipeline-backend"]) != want {
+				t.Errorf("in the temporary registry: %v", f.r.regRefs)
+			}
+			carried := 0
+			for dst, src := range f.r.pushed {
+				if !strings.HasPrefix(dst, "reg.example/cadence/sdlc-pipeline-backend@") {
+					continue
+				}
+				carried++
+				n, _ := strconv.Atoi(strings.TrimPrefix(dst, "reg.example/cadence/sdlc-pipeline-backend@sha256:ref"))
+				if ref := c.refs[n]; ref.typ != "" || ref.child || !strings.HasSuffix(src, "@sha256:ref"+strconv.Itoa(n)) {
+					t.Errorf("carried %s from %s: %+v", dst, src, ref)
+				}
+			}
+			if carried != c.carried {
+				t.Errorf("carried %d, want %d: %v", carried, c.carried, f.r.pushed)
+			}
+			f.clean()
+		})
+	}
+}
+
+// O4 тестирования: SIGINT в любой точке load — только «interrupted»: ни
+// причины, которую приписал бы оборванный вызов, ни его ответа на сигнал;
+// Docker в исходном, временного реестра нет.
+func TestImagesLoadInterruptedAnywhere(t *testing.T) {
+	for _, point := range []string{"docker compose version", "docker info", "regctl version", "cosign verify-blob",
+		"docker version", "docker image inspect", "regctl image copy", "regctl manifest get", "regctl artifact list",
+		"cosign verify --offline", "cosign verify-attestation", "docker pull", "docker tag", "docker compose --project-directory", "cosign version"} {
+		t.Run(point, func(t *testing.T) {
+			f, p := loadSetup(t, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			hit := false
+			f.r.onCall = func(c cmdSpec) error {
+				if hit || c.detach || !strings.HasPrefix(c.String(), point) {
+					return nil
+				}
+				hit = true
+				cancel()
+				if c.stderr != nil {
+					io.WriteString(c.stderr, "Error: context canceled\n")
+				}
+				return exitErr(130)
+			}
+			code := runServer(ctx, f.e, []string{"images", "load", p})
+			if !hit {
+				t.Fatalf("%s is not called: %v", point, f.r.calls)
+			}
+			if msg := f.errw.String(); code != 1 || msg != "✗ interrupted. "+nothingLoaded+"\n" {
+				t.Errorf("code %d:\n%s", code, msg)
+			}
+			f.clean()
+			if len(f.r.local) != 0 {
+				t.Errorf("left in Docker: %v", f.r.local)
+			}
+		})
+	}
+	// В реестр администратора уже ушёл backend — его и называет.
+	f, p := loadSetup(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.r.onCall = func(c cmdSpec) error {
+		if strings.HasPrefix(c.String(), "regctl image copy") && strings.Contains(c.String(), " reg.example/cadence/sdlc-pipeline-frontend:") {
+			cancel()
+			return exitErr(130)
+		}
+		return nil
+	}
+	if code := runServer(ctx, f.e, []string{"images", "load", p, "--registry", "reg.example/cadence"}); code != 1 ||
+		f.errw.String() != "✗ interrupted. Already copied: reg.example/cadence/sdlc-pipeline-backend:v0.13.0@"+testBackendPin+". Nothing was loaded into Docker.\n" {
+		t.Errorf("registry: %d\n%s", code, f.errw)
+	}
+	f.clean()
+}
+
 // OpenVEX обязателен с той версии, с которой его прикладывает release.yml:
 // у frontend — с v0.13.0 (CLAB-234), раньше его отсутствие — не подмена.
 func TestArchiveVEXSince(t *testing.T) {
 	f, _ := loadSetup(t, nil)
-	f.r.refs["sdlc-pipeline-frontend"] = []fakeRef{{pred: signPredicate}}
+	f.r.regRefs["sdlc-pipeline-frontend"] = []fakeRef{{pred: signPredicate}}
 	ctx := context.Background()
 	v, err := newVerifier(ctx, f.e, "auto", nothingLoaded)
 	if err != nil {

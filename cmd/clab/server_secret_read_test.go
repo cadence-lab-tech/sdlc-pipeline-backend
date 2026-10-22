@@ -31,7 +31,7 @@ func newSecretRunner(files map[string]string) *secretRunner {
 
 func (r *secretRunner) run(ctx context.Context, c cmdSpec) error {
 	args := strings.Join(c.args, " ")
-	if c.name != "docker" || !strings.HasPrefix(args, "run ") || !strings.Contains(args, " "+secretReaderImage+" cat ") {
+	if c.name != "docker" || !strings.HasPrefix(args, "run ") || !strings.Contains(args, " "+helperImage+" cat ") {
 		return r.fakeRunner.run(ctx, c)
 	}
 	r.fakeRunner.mu.Lock()
