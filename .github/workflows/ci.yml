@@ -33,7 +33,9 @@ jobs:
     timeout-minutes: 20
     services:
       # Тот же образ, что в dev/docker-compose.yml: миграциям нужны pgcrypto
-      # и vector. База выделенная — тест сносит в ней схему public целиком.
+      # и vector. sdlc_test — база-вход: тестовые пакеты заводят рядом свои
+      # базы (internal/testdb) и идут параллельно, make test-integration
+      # сносит их после прогона.
       postgres:
         image: pgvector/pgvector:pg17
         env:
