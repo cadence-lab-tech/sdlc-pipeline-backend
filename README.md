@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-mark-dark.svg">
+  <img src="docs/assets/logo-mark-light.svg" alt="Cadence Lab" height="48">
+</picture>
+
 # Cadence Lab — Backend
 
 Go-сервис, ведущий задачи по настраиваемому циклу разработки: REST API для UI,
