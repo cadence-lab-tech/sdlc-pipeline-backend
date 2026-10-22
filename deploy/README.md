@@ -198,7 +198,8 @@ docker compose logs postgres api worker | grep -i 'collation version mismatch'  
 
 Переезд упал — выкладка красная, `postgres` на половине данных не
 поднимается, `sdlc_pgdata` не тронут; следующий `up -d` начинает переезд
-заново. Откат на 17: прежний `docker-compose.yml` (revert и выкладка или руками
+заново, а кластер 18, если он уже стоял на месте, откладывает в
+`cadence-upgrade/replaced-<время>` тома `sdlc_postgres`. Откат на 17: прежний `docker-compose.yml` (revert и выкладка или руками
 на машине) и `docker compose up -d` — 17 поднимается на `sdlc_pgdata` с
 данными на момент переезда; записанное после — из бэкапа. Когда откат больше
 не нужен: `docker compose rm -f pg-upgrade-dump && docker volume rm

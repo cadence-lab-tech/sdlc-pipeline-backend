@@ -23,9 +23,10 @@
 # rollback to the previous version runs on it. The mark is the state of the
 # old cluster after the dump (pg_controldata): when the old cluster changes
 # after the move - a rollback started the previous version on it and wrote
-# to it - the next `up` moves it again, and the cluster of the earlier move
-# is replaced. A move that did not finish (out of space, interrupted) leaves
-# no mark: the next `up` starts it over.
+# to it - the next `up` moves it again; the cluster of the earlier move is
+# not deleted but kept aside in /var/lib/postgresql/cadence-upgrade/replaced-*
+# of the new volume. A move that did not finish (out of space, interrupted)
+# leaves no mark: the next `up` starts it over.
 #
 # Exit codes: 0 done or nothing to do, 1 the move failed - postgres does not
 # start, and `docker compose up` fails with it.
@@ -47,6 +48,7 @@ state() {
 # The temporary server listens on a socket of its own, never on the network.
 socket=""
 server=""
+moving=false
 start_server() {
   server="$1"
   socket="$(mktemp -d)"
@@ -66,7 +68,8 @@ on_exit() {
   if [ -n "$server" ]; then
     gosu postgres pg_ctl -D "$server" -w -t 600 -m fast stop >/dev/null 2>&1 || true
   fi
-  [ "$rc" = 0 ] || log "the move failed; the old volume is as it was, and the next 'docker compose up' starts the move over"
+  [ "$rc" = 0 ] || [ "$moving" = false ] ||
+    log "the move failed; the old volume is as it was, and the next 'docker compose up' starts the move over"
 }
 trap on_exit EXIT
 
@@ -89,13 +92,20 @@ dump() {
     log "the dump of PostgreSQL $PG_MAJOR is there already; it is loaded next"
     return 0
   fi
-  # Two servers on one data directory destroy it. The old postgres container
-  # is stopped by compose before this one starts (its image changed); if it
-  # still answers, nothing is touched.
+  # Two servers on one data directory destroy it. On an upgrade compose stops
+  # the old postgres container before this one starts (its image changes);
+  # if a PostgreSQL still answers, nothing is touched.
   if pg_isready -q -h postgres -p 5432 -t 3 >/dev/null 2>&1; then
+    if [ -f "$work/done" ]; then
+      # PostgreSQL 18 runs, and the old cluster changed after the move.
+      die "the old volume changed after its data was moved, and PostgreSQL 18 runs on the moved data. Nothing is touched.
+  If the previous version wrote to it after a rollback and you upgrade again, stop postgres (docker compose stop postgres) and run docker compose up -d: the data is moved again, and the current PostgreSQL 18 cluster is kept aside.
+  To keep PostgreSQL 18 as it is, remove the old volume (docs/admin.md, \"PostgreSQL 18\")."
+    fi
     die "a PostgreSQL answers at postgres:5432: stop it first (docker compose stop postgres), then run docker compose up -d again"
   fi
 
+  moving=true
   log "moving the data of PostgreSQL $PG_MAJOR to PostgreSQL 18: dumping it (the old volume stays as it is)"
   rm -rf "$work/pending"
   mkdir -p "$work/pending"
@@ -132,6 +142,7 @@ load() {
   fi
   user="$(cat "$work/pending/user")"
   staging="$work/staging"
+  moving=true
   log "loading the dump into a new PostgreSQL $PG_MAJOR cluster"
   rm -rf "$staging"
   mkdir -p "$staging"
@@ -142,15 +153,21 @@ load() {
   # access are those of the old cluster: its pg_hba.conf, and the password in
   # the dump.
   # shellcheck disable=SC2086 # POSTGRES_INITDB_ARGS is a list of arguments
-  gosu postgres initdb -D "$staging" --username="$user" ${POSTGRES_INITDB_ARGS:-} >/dev/null
+  gosu postgres initdb -D "$staging" --username="$user" --auth=trust ${POSTGRES_INITDB_ARGS:-} >/dev/null
   install -o postgres -g postgres -m 600 "$work/pending/pg_hba.conf" "$staging/pg_hba.conf"
   start_server "$staging"
   gunzip -c "$work/pending/dump.sql.gz" |
     gosu postgres psql -X -q -v ON_ERROR_STOP=1 -h "$socket" -U "$user" -d postgres >/dev/null
   stop_server
-  # The data directory now: a cluster of an earlier move whose old cluster
-  # has changed since, or one postgres created while no move was done.
-  rm -rf "$PGDATA"
+  # The data directory now - a cluster of an earlier move whose old cluster
+  # has changed since, or one postgres created while no move was done - is
+  # kept aside, not deleted: it may hold data written after it.
+  if [ -e "$PGDATA" ]; then
+    local aside
+    aside="$work/replaced-$(date -u +%Y%m%d-%H%M%S)"
+    mv "$PGDATA" "$aside"
+    log "the cluster that was in $PGDATA is kept in $aside (docs/admin.md, \"PostgreSQL 18\")"
+  fi
   mkdir -p "$(dirname "$PGDATA")"
   chown postgres:postgres "$(dirname "$PGDATA")"
   mv "$staging" "$PGDATA"
