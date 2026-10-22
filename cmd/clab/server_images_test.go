@@ -1226,6 +1226,22 @@ func TestImagesLoadInterruptedAnywhere(t *testing.T) {
 		t.Errorf("registry: %d\n%s", code, f.errw)
 	}
 	f.clean()
+	// Образ backend уже у администратора, его бандл — ещё нет: образ назван.
+	g, q := loadSetup(t, nil)
+	gctx, gcancel := context.WithCancel(context.Background())
+	defer gcancel()
+	g.r.onCall = func(c cmdSpec) error {
+		if strings.HasPrefix(c.String(), "regctl image copy") && strings.Contains(c.String(), " reg.example/cadence/sdlc-pipeline-backend@") {
+			gcancel()
+			return exitErr(130)
+		}
+		return nil
+	}
+	if code := runServer(gctx, g.e, []string{"images", "load", q, "--registry", "reg.example/cadence"}); code != 1 ||
+		g.errw.String() != "✗ interrupted. Already copied: reg.example/cadence/sdlc-pipeline-backend:v0.13.0@"+testBackendPin+". Nothing was loaded into Docker.\n" {
+		t.Errorf("registry, bundle: %d\n%s", code, g.errw)
+	}
+	g.clean()
 }
 
 // OpenVEX обязателен с той версии, с которой его прикладывает release.yml:

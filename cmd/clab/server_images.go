@@ -994,7 +994,7 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 		for _, b := range img.bundles {
 			copies = append(copies, [2]string{reg.addr + "/" + img.r.path + "@" + b, registry + "/" + img.r.repo() + "@" + b})
 		}
-		for _, c := range copies {
+		for k, c := range copies {
 			if _, err := regctl(ctx, e, nil, "image", "copy", host, c[0], c[1]); err != nil {
 				done := ""
 				if len(pushed) > 0 {
@@ -1002,8 +1002,12 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 				}
 				return fmt.Errorf("regctl could not copy %s to %s (see above): check that the registry is reachable and docker login to it is done.%s Nothing was loaded into Docker.", img.r.named(), registry, done)
 			}
+			// Образ уже в реестре администратора, даже если его бандлы
+			// ещё нет: отказ и прерывание дальше называют его.
+			if k == 0 {
+				pushed = append(pushed, dst+"@"+img.digest)
+			}
 		}
-		pushed = append(pushed, dst+"@"+img.digest)
 		e.ok("%s@%s in %s", dst, img.digest, registry)
 	}
 
