@@ -37,6 +37,7 @@ type fakeRunner struct {
 	postgresRunning bool
 	apiContainer    string
 	healthy         bool
+	uiDown          map[string]bool // порты ui, на которых он не отвечает ("80", "8080"); nil — отвечает на обоих (CLAB-247)
 	pullFails       bool
 	dumpBytes       int
 	gitAvailable    bool
@@ -249,10 +250,15 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		}
 		return nil
 	case strings.HasPrefix(args, "compose exec -T caddy wget"):
-		if f.healthy {
-			return nil
+		if !f.healthy {
+			return errExit1
 		}
-		return errExit1
+		for port, down := range f.uiDown {
+			if down && strings.HasSuffix(args, " http://ui:"+port+"/") {
+				return errExit1
+			}
+		}
+		return nil
 	case strings.HasPrefix(args, "compose exec -T postgres pg_dump"):
 		dump()
 		return nil
