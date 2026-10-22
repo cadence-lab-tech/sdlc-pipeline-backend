@@ -89,7 +89,9 @@ start the orchestrator, with its own `clab`:
    config goes into the prompt — only the path.
 4. Starts a sub-agent of type `clab-stage` (section "Sub-agent"). This type
    has no MCP tools and no `Agent` tool, and the hook in its definition
-   refuses a `clab` call without the task-token directory. The definition
+   refuses a call of `clab`, the `clab` of the self-hosted package
+   (`clab-<os>-<arch>`) or a script of the package without the task-token
+   directory. The definition
    lives in `.claude/agents/clab-stage.md` (installed by `clab setup`);
    Claude Code picks up the first definition in `.claude/agents/` after a
    session restart.
