@@ -46,7 +46,7 @@ dev/stack.sh ls               # какие стеки заняты и на ка�
 dev/stack.sh logs CLAB-59     # логи api (или другого сервиса аргументом)
 dev/stack.sh psql CLAB-59     # psql в базу стека
 dev/stack.sh e2e CLAB-59      # сквозной проход в своём стеке
-dev/stack.sh test-db CLAB-59  # завести sdlc_test в базе стека, напечатать адрес
+dev/stack.sh test-db CLAB-59  # завести базу-вход sdlc_test, убрать остатки баз пакетов, напечатать адрес
 dev/stack.sh down CLAB-59     # снести вместе с данными
 ```
 
@@ -102,7 +102,7 @@ SDLC_API_URL=http://localhost:18080 SDLC_UI_PORT=5180 npm run dev
 
 ```bash
 dev/stack.sh exec CLAB-59 backend go build ./... && dev/stack.sh exec CLAB-59 backend go vet ./...
-dev/stack.sh exec CLAB-59 backend make test-integration   # в базе sdlc_test этого стека
+dev/stack.sh exec CLAB-59 backend make test-integration   # в Postgres этого стека, база на пакет
 dev/stack.sh exec CLAB-59 frontend npm run typecheck
 dev/stack.sh exec CLAB-59 frontend bash -c 'npm run lint && npm run build'
 dev/stack.sh shell CLAB-59 frontend
@@ -123,7 +123,8 @@ dev/stack.sh shell CLAB-59 frontend
   git внутри не работает и не нужен: ветка, коммиты и push — на хосте.
   `GOFLAGS=-buildvcs=false` выставлен, иначе `go build -o` падал бы на
   штампе VCS.
-- `SDLC_TEST_DATABASE_URL` указывает на `sdlc_test` в Postgres стека, и
+- `SDLC_TEST_DATABASE_URL` указывает на базу-вход `sdlc_test` в Postgres
+  стека (тесты заводят рядом свои базы пакетов), и
   `make test-integration` внутри берёт его как есть, не ища стек через
   Docker — его в верстаке нет. `make up`, `dev/stack.sh`, `dev/e2e.sh` идут
   на хосте.
@@ -262,9 +263,24 @@ curl -s 'localhost:8088/v1/projects/SDLC/search?q=как+устроена+аре
 make test-integration
 ```
 
-База под них выделенная (`sdlc_test`): тест сносит в ней схему целиком и
-накатывает миграции заново. Без `SDLC_TEST_DATABASE_URL` такие тесты
-пропускаются, и `make test` остаётся быстрым.
+`SDLC_TEST_DATABASE_URL` — база-вход (`sdlc_test`), а не база тестов: каждый
+тестовый пакет при первом `testdb.Store` заводит рядом на том же сервере свою
+базу `sdlc_test_<хеш каталога пакета>` и дальше работает только в ней — тест
+сносит в ней схему целиком и накатывает миграции заново (CLAB-250). Поэтому
+пакеты идут параллельно, `go test ./...` и `make test-integration` — без
+`-p 1`. Имя базы стабильно в рабочей копии и разное у двух копий на одном
+сервере (общий стек `make up`), так что соседние копии баз друг у друга не
+сносят. Роли нужно право `CREATEDB` (у `sdlc` в dev и CI оно есть); без него
+тест падает с этой причиной. Без `SDLC_TEST_DATABASE_URL` такие тесты
+пропускаются, баз не заводится, и `make test` остаётся быстрым.
+
+Уборка. `make test-integration` после прогона, зелёного или красного, сносит
+базы пакетов своей копии (`go run ./internal/testdb/cleanup` — на Go, в
+верстаке psql нет) и выходит с кодом `go test`. `dev/stack.sh test-db`
+подбирает в стеке остатки прерванных прогонов, `dev/stack.sh down` уносит
+всё с томом. Сносится всё без `FORCE`: база, к которой подключён идущий
+прогон, остаётся с сообщением, и это не ошибка — тестовый процесс держит
+свою базу соединением до конца.
 
 Задан `SDLC_TEST_DATABASE_URL` — он и берётся: так работает верстак стека
 задачи (`dev/stack.sh exec CLAB-59 backend make test-integration`), где
@@ -280,10 +296,12 @@ Docker нет, а адрес базы стека выдан при старте.
 3. Стека у копии нет — общий стек `make up`, `localhost:55432`, как раньше.
 
 Стек найден, но остановлен (`dev/stack.sh stop`), — ошибка с командой подъёма,
-а не тихий уход в общий стек: там гоняют тесты соседи, и схему им снесло бы
-посреди прогона. Перед прогоном печатается адрес базы.
+а не тихий уход в общий стек: там гоняют тесты соседи. Перед прогоном
+печатается адрес базы-входа.
 
-Один пакет руками — через адрес, который печатает `env`:
+Один пакет руками — через адрес, который печатает `env`; пакет заведёт свою
+базу сам, а тесты предпроверки базы (`TestDBCheck*`) берут её адрес у
+`testdb.URL`. База остаётся до `dev/stack.sh test-db` или `down`:
 
 ```bash
 eval "$(dev/stack.sh env CLAB-59)"

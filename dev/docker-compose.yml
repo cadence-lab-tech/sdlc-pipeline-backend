@@ -277,8 +277,9 @@ services:
       # git внутри не работает. Он здесь и не нужен, а штамп VCS в бинарник
       # без этого флага ронял бы `go build -o`.
       GOFLAGS: -buildvcs=false
-      # База интеграционных тестов — Postgres этого же стека; базу sdlc_test
-      # заводит dev/stack.sh. Makefile берёт адрес из переменной как есть.
+      # База-вход интеграционных тестов — Postgres этого же стека; sdlc_test
+      # заводит dev/stack.sh, базы пакетов рядом с ней — сами тесты
+      # (internal/testdb). Makefile берёт адрес из переменной как есть.
       SDLC_TEST_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD:-sdlc}@postgres:5432/sdlc_test?sslmode=disable
       # api этого стека изнутри сети compose: для ручных запросов curl.
       CLAB_STACK_API: http://api:8080

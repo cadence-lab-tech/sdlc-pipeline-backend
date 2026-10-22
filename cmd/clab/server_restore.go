@@ -189,7 +189,7 @@ func (i *installation) restore(ctx context.Context, dump, blobs string) error {
 func (i *installation) loadExternal(ctx context.Context, dump string) error {
 	e := i.e
 	e.info("loading %s into %s (one transaction)", filepath.Base(dump), i.externalTarget())
-	safe, password, err := i.dbConn()
+	safe, password, err := i.dbConn(ctx)
 	if err != nil {
 		return err
 	}

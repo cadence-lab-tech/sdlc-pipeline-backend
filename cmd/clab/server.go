@@ -71,6 +71,10 @@ type serverEnv struct {
 	// подставляют httptest.NewTLSServer; у настоящего clab оба пусты.
 	apiTLSDial string
 	apiRoots   *x509.CertPool
+	// Чтение файла секрета на этой машине (CLAB-252); nil — os.ReadFile.
+	// Тесты подставляют отказ по правам: верстак работает от root, и chmod
+	// его не даёт.
+	readFile func(string) ([]byte, error)
 }
 
 func newServerEnv() (*serverEnv, error) {
