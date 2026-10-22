@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +56,7 @@ func objectCount(t *testing.T, pool *pgxpool.Pool) string {
 
 func TestDBCheckCadenceSchema(t *testing.T) {
 	testdb.Store(t)
-	u := os.Getenv(testdb.EnvURL)
+	u := testdb.URL(t)
 	latest, _ := postgres.LatestMigration()
 
 	r := checkDB(t, u, false)
@@ -89,7 +88,7 @@ func TestDBCheckEmptyDatabaseOnlyReads(t *testing.T) {
 	emptySchema(t, pool)
 	before := objectCount(t, pool)
 
-	r := checkDB(t, os.Getenv(testdb.EnvURL), true)
+	r := checkDB(t, testdb.URL(t), true)
 	if !r.OK || r.Schema != postgres.SchemaEmpty {
 		t.Fatalf("an empty database must pass: %+v", r.Checks)
 	}
@@ -105,7 +104,7 @@ func TestDBCheckEmptyDatabaseOnlyReads(t *testing.T) {
 func TestDBCheckRefusals(t *testing.T) {
 	_, pool := testdb.Store(t)
 	ctx := context.Background()
-	u := os.Getenv(testdb.EnvURL)
+	u := testdb.URL(t)
 
 	// Схема новее образа.
 	if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations (version, name, checksum) VALUES (999999, 'future', 'x')`); err != nil {
@@ -155,7 +154,7 @@ func TestDBCheckRoleWithoutPrivileges(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP ROLE IF EXISTS "+role) })
 
-	parsed, _ := url.Parse(os.Getenv(testdb.EnvURL))
+	parsed, _ := url.Parse(testdb.URL(t))
 	parsed.User = url.UserPassword(role, password)
 	r := checkDB(t, parsed.String(), true)
 	if r.OK {
