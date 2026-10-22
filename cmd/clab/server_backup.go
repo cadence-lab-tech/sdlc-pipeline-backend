@@ -194,7 +194,7 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 		// У образа сервиса нет shell: том берёт одноразовый контейнер. Он
 		// работает от root, чтобы прочитать каждый файл, и отдаёт архив
 		// вызывающему.
-		c := i.docker("run", "--rm", "--volumes-from", api+":ro", "-v", dir+":/backup", "alpine:3",
+		c := i.docker("run", "--rm", "--volumes-from", api+":ro", "-v", dir+":/backup", helperImage,
 			"sh", "-c", fmt.Sprintf("tar -czf '/backup/%s' -C /blobs . && chown %d:%d '/backup/%s' && chmod 600 '/backup/%s'",
 				name, i.e.uid, i.e.gid, name, name))
 		c.stdout, c.stderr = i.e.out, i.e.errw

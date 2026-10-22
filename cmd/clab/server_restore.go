@@ -282,7 +282,7 @@ func (i *installation) restoreBlobsAndStart(ctx context.Context, dump, blobs str
 		}
 		e.info("restoring the blobs volume from %s", filepath.Base(blobs))
 		// Сервис работает как nonroot (uid 65532) и должен писать в том.
-		c := i.docker("run", "--rm", "--volumes-from", api, "-v", filepath.Dir(blobs)+":/backup:ro", "alpine:3",
+		c := i.docker("run", "--rm", "--volumes-from", api, "-v", filepath.Dir(blobs)+":/backup:ro", helperImage,
 			"sh", "-c", fmt.Sprintf("find /blobs -mindepth 1 -delete && tar -xzf '/backup/%s' -C /blobs && chown -R 65532:65532 /blobs",
 				filepath.Base(blobs)))
 		c.stdout, c.stderr = e.out, e.errw

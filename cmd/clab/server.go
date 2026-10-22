@@ -186,6 +186,8 @@ Commands:
             them to an S3 bucket; backup verify checks that a backup restores
   restore   restore the database and the blobs volume from a backup
   status    the installation, its version, the version of clab and the services
+  images    the images of a version for a closed network: list them, save them
+            with the release into one archive, load the archive offline
 
 The installation directory is --dir DIR, else $CADENCE_DIR, else the current
 directory or the nearest one above it with VERSION and package.sha256 (or
@@ -209,6 +211,7 @@ func serverCommands() []serverCommand {
 		{"backup", backupHelp, serverBackup},
 		{"restore", restoreHelp, serverRestore},
 		{"status", statusHelp, serverStatus},
+		{"images", imagesHelp, serverImages},
 	}
 }
 
@@ -245,7 +248,7 @@ func runServer(ctx context.Context, e *serverEnv, args []string) int {
 			continue
 		}
 		if wantsHelp(args[1:]) {
-			fmt.Fprintln(e.out, c.help)
+			fmt.Fprintln(e.out, commandHelp(c, args[1:]))
 			return 0
 		}
 		err := c.run(ctx, e, args[1:])

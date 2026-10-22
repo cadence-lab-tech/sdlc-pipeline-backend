@@ -335,7 +335,7 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		i.cdHint(), shellQuote(i.rel(saved)), oldVersion, restoreCmd, shellQuote(i.rel(backup)), oldVersion)
 
 	e.info("pulling images of %s", target)
-	if err := i.composeRun(ctx, false, "pull", "--quiet"); err != nil {
+	if err := i.pullImages(ctx); err != nil {
 		// Кроме файлов, ещё ничего не изменилось: вернуть их.
 		if rerr := i.putFilesBack(saved, work, newList, savedList); rerr != nil {
 			return fmt.Errorf("could not pull the images of %s, and putting the package files back failed: %v.\n"+
