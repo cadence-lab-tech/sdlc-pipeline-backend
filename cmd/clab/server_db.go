@@ -143,11 +143,16 @@ func (i *installation) readSecretFile(ctx context.Context) func(string) ([]byte,
 		if hostErr == nil || !errors.Is(hostErr, fs.ErrPermission) {
 			return raw, hostErr
 		}
+		// Docker примет относительный путь за имя тома: оба пути абсолютные.
 		dir, err := filepath.Abs(filepath.Join(i.dir, "secrets"))
 		if err != nil {
 			return nil, hostErr
 		}
-		rel, err := filepath.Rel(dir, path)
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, hostErr
+		}
+		rel, err := filepath.Rel(dir, abs)
 		if err != nil || !plainRelPath(filepath.ToSlash(rel)) {
 			return nil, hostErr
 		}
