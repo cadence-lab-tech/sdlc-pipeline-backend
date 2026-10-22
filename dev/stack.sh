@@ -11,7 +11,9 @@
 #   dev/stack.sh ls              — какие стеки заняты
 #   dev/stack.sh logs CLAB-59    — логи api
 #   dev/stack.sh psql CLAB-59    — psql в базу стека
-#   dev/stack.sh test-db [KEY]   — завести sdlc_test в базе стека и напечатать
+#   dev/stack.sh test-db [KEY]   — завести sdlc_test (базу-вход тестов) в
+#                                  Postgres стека, снести свободные базы
+#                                  пакетов от прерванных прогонов и напечатать
 #                                  её адрес (для make test-integration); без
 #                                  KEY — стек, поднятый из этой рабочей копии
 #   dev/stack.sh down CLAB-59    — снести вместе с данными
@@ -182,8 +184,9 @@ wait_ready() {
     die "стек поднялся, но /readyz не ответил за три минуты: dev/stack.sh logs $KEY"
 }
 
-# Выделенная база интеграционных тестов в Postgres стека: тест сносит в ней
-# схему целиком, поэтому рядом с базой приложения, а не вместо неё.
+# База-вход интеграционных тестов в Postgres стека, рядом с базой приложения.
+# Сама она пустая: каждый тестовый пакет заводит рядом свою базу
+# sdlc_test_<хеш каталога> и сносит схему только в ней (internal/testdb).
 test_db_url() { printf 'postgres://sdlc:sdlc@localhost:%s/sdlc_test?sslmode=disable' "$POSTGRES_PORT"; }
 
 ensure_test_db() {
@@ -194,6 +197,20 @@ ensure_test_db() {
         dc exec -T postgres psql -U sdlc -d postgres -qc 'CREATE DATABASE sdlc_test' >/dev/null \
             || die "не удалось завести sdlc_test в стеке $KEY"
     fi
+}
+
+# Базы пакетов, оставшиеся от прерванных прогонов (уборку make
+# test-integration не дождались). Без FORCE: базу, к которой подключён идущий
+# прогон, Postgres не отдаёт — она остаётся, сообщение в stderr. Стек
+# принадлежит одной задаче, поэтому сносятся все базы пакетов в нём: и копии в
+# верстаке, и той же копии с хоста.
+drop_package_dbs() {
+    local name
+    for name in $(dc exec -T postgres psql -U sdlc -d postgres -tAc \
+        "SELECT datname FROM pg_database WHERE datname LIKE 'sdlc\_test\_%' ORDER BY datname"); do
+        dc exec -T postgres psql -U sdlc -d postgres -qc "DROP DATABASE IF EXISTS \"$name\"" >/dev/null 2>&1 \
+            || printf 'база пакета %s занята прогоном — оставлена\n' "$name" >&2
+    done
 }
 
 # Верстак репозитория по его имени. Зависимости фронтенда ставятся при первом
@@ -384,6 +401,7 @@ test-db)
     load_or_create "$key"
     stack_env
     ensure_test_db
+    drop_package_dbs
     printf 'стек задачи %s (compose-проект %s)\n' "$KEY" "$PROJECT" >&2
     test_db_url
     echo
