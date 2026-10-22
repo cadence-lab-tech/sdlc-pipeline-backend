@@ -117,10 +117,19 @@ func firstLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// uiProbes — адреса, по которым waitReady ждёт интерфейс, по порядку.
+// Порт ui зависит от версии образа, а не от версии clab: до v0.14.0 образ
+// слушает только :80 (root), с v0.14.0 — :80 и :8080 (CLAB-236), дальше —
+// только :8080 (CLAB-248). Готовность при upgrade ждёт clab исходной версии,
+// поэтому проверка терпима к обоим портам: clab этой версии дождётся стека
+// любой из них, а образ без :80 выходит через релиз после неё (CLAB-247).
+var uiProbes = []string{"http://ui:8080/", "http://ui:80/"}
+
 // waitReady — lib.sh wait_ready: API здоров по своей проверке (/readyz:
-// сервис поднят и база отвечает), а интерфейс отвечает через Caddy. Ожидание
-// считается шагами по 3 секунды, как в скрипте: нулевой таймаут — «не
-// готов» без единой проверки, на этом стоит сценарий отката в ci/.
+// сервис поднят и база отвечает), а интерфейс отвечает через Caddy на одном
+// из uiProbes. Ожидание считается шагами по 3 секунды, как в скрипте:
+// нулевой таймаут — «не готов» без единой проверки, на этом стоит сценарий
+// отката в ci/.
 func (i *installation) waitReady(ctx context.Context, timeout int) bool {
 	for waited := 0; waited < timeout; waited += 3 {
 		if ctx.Err() != nil {
@@ -128,13 +137,23 @@ func (i *installation) waitReady(ctx context.Context, timeout int) bool {
 		}
 		if api := i.containerOf(ctx, "api"); api != "" {
 			health, _ := output(ctx, i.e.run, i.docker("inspect", "-f", "{{.State.Health.Status}}", api))
-			if strings.TrimSpace(health) == "healthy" {
-				if _, err := output(ctx, i.e.run, i.compose("exec", "-T", "caddy", "wget", "-q", "-O", "/dev/null", "http://ui/")); err == nil {
-					return true
-				}
+			if strings.TrimSpace(health) == "healthy" && i.uiAnswers(ctx) {
+				return true
 			}
 		}
 		i.e.sleep(3 * time.Second)
+	}
+	return false
+}
+
+// uiAnswers — интерфейс отвечает на одном из uiProbes: wget из контейнера
+// caddy, как в lib.sh, прямо в ui. Маршрут Caddyfile пакета этим не
+// проверяется — он сменит порт вместе с образом в одном релизе (CLAB-248).
+func (i *installation) uiAnswers(ctx context.Context) bool {
+	for _, url := range uiProbes {
+		if _, err := output(ctx, i.e.run, i.compose("exec", "-T", "caddy", "wget", "-q", "-O", "/dev/null", url)); err == nil {
+			return true
+		}
 	}
 	return false
 }

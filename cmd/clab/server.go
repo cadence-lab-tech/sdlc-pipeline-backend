@@ -5,8 +5,10 @@ package main
 // же гарантиями, что у скриптов пакета (get-cadence.sh, install.sh,
 // upgrade.sh, backup.sh, restore.sh, lib.sh).
 //
-// Команда не ходит в API Cadence Lab и не требует входа: она работает с
-// каталогом установки и Docker на этой машине. Docker — через CLI
+// Команда не требует входа: она работает с каталогом установки и Docker на
+// этой машине. В API ходит только шаг стартового проекта (install
+// --with-starter и starter, CLAB-199) — к API своей установки через её Caddy
+// с токеном администратора установки, не с конфигом clab. Docker — через CLI
 // `docker compose`, а не через SDK движка: та же семантика, что у скриптов и
 // у ручного `docker compose`, и статический бинарь не растёт.
 //
@@ -17,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +65,12 @@ type serverEnv struct {
 	// Отвечает ли адрес по HTTP (ghcr.io для проверки подписей): в тестах
 	// подменяется, сети в верстаке нет.
 	reachable func(ctx context.Context, rawURL string) bool
+
+	// API своей установки (CLAB-199): куда соединяться в режиме tls вместо
+	// 127.0.0.1:443 и каким корням доверять (nil — системным). Тесты
+	// подставляют httptest.NewTLSServer; у настоящего clab оба пусты.
+	apiTLSDial string
+	apiRoots   *x509.CertPool
 }
 
 func newServerEnv() (*serverEnv, error) {
@@ -186,6 +195,8 @@ Commands:
             them to an S3 bucket; backup verify checks that a backup restores
   restore   restore the database and the blobs volume from a backup
   status    the installation, its version, the version of clab and the services
+  starter   set up the starter project: a project in a team with the roles and
+            workflows of bundles/starter.json, its workflows active
   images    the images of a version for a closed network: list them, save them
             with the release into one archive, load the archive offline
 
@@ -193,7 +204,9 @@ The installation directory is --dir DIR, else $CADENCE_DIR, else the current
 directory or the nearest one above it with VERSION and package.sha256 (or
 VERSION and docker-compose.yml); install creates it, default ./cadence. No
 sign-in is needed: clab server works with the files and Docker of this
-machine, not with the API.
+machine. Only the starter project (starter and install --with-starter) goes
+to the API, and only to the API of this installation, through its Caddy on
+this machine with the administrator token of the installation.
 
 clab server <command> --help — the options of a command.`
 
@@ -211,12 +224,15 @@ func serverCommands() []serverCommand {
 		{"backup", backupHelp, serverBackup},
 		{"restore", restoreHelp, serverRestore},
 		{"status", statusHelp, serverStatus},
+		{"starter", starterHelp, serverStarter},
 		{"images", imagesHelp, serverImages},
 	}
 }
 
-// cmdServer — точка входа из commands(). Клиента API у неё нет: main не
-// строит его для локальных команд (localCommand).
+// cmdServer — точка входа из commands(). Клиента API из конфига у неё нет:
+// main не строит его для локальных команд (localCommand). К API своей
+// установки ходит только шаг стартового проекта — своим клиентом
+// (server_api.go) с адресом и токеном из установки.
 func cmdServer(ctx context.Context, _ *Client, args []string) error {
 	e, err := newServerEnv()
 	if err != nil {

@@ -22,7 +22,10 @@
 
 	# Интерфейс отдаёт свой Caddy (см. Dockerfile интерфейса) с откатом на
 	# index.html: маршруты вроде /projects/SDLC/tasks/42 живут в React Router.
+	# Порт 8080: образ интерфейса работает без root и слушает :8080 с
+	# 1ccb530 (CLAB-236), :80 у него уходит (CLAB-248). Образ интерфейса
+	# старше 1ccb530 на этом Caddyfile не отвечает (CLAB-247).
 	handle {
-		reverse_proxy ui:80
+		reverse_proxy ui:8080
 	}
 }

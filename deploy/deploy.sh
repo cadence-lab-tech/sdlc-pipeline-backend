@@ -7,6 +7,9 @@
 #   ./deploy.sh frontend f00ba7              # выложить образ интерфейса
 #   ./deploy.sh backend $(cat .last-ok-backend)   # вернуться на предыдущий
 #
+# Откат интерфейса — только на образ не старше 1ccb530 (CLAB-236): Caddy
+# ходит в ui на :8080, а образы до него слушают один :80 (CLAB-247).
+#
 # Два репозитория — два образа, и каждый выкладывается отдельно: сервис не
 # пересобирается ради правки интерфейса. Тег пишется прямо в .env, а не
 # подставляется переменной: иначе «что сейчас крутится» знал бы только тот,
@@ -49,7 +52,7 @@ echo "▸ ждём $image"
 for _ in $(seq 1 60); do
   case "$image" in
     backend)  ok="$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q api)" 2>/dev/null || true)"; [ "$ok" = healthy ] ;;
-    frontend) docker compose exec -T caddy wget -q -O /dev/null http://ui/ 2>/dev/null ;;
+    frontend) docker compose exec -T caddy wget -q -O /dev/null http://ui:8080/ 2>/dev/null ;;
   esac && {
     echo "  поднялся"
     [ -n "$previous" ] && echo "$previous" > ".last-ok-$image"

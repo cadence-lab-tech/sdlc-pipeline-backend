@@ -87,7 +87,7 @@ func commands() []command {
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
 		{"version", "версия clab и сервера", "clab version", cmdVersion},
 
-		{"server", "self-hosted installation on this machine: upgrade, backup, restore, status", "clab server upgrade|backup|restore|status [--dir DIR] — clab server --help", cmdServer},
+		{"server", "self-hosted installation on this machine: install, upgrade, backup, restore, status, starter", "clab server install|upgrade|backup|restore|status|starter [--dir DIR] — clab server --help", cmdServer},
 	}
 }
 
