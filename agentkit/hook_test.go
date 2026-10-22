@@ -80,7 +80,7 @@ func runHook(t *testing.T, script, command string) (int, string) {
 const hookPrefix = "env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=/d "
 
 // Вызовы clab, clab пакета и скриптов пакета без каталога токена задачи
-// (CLAB-202, AC-15): хук отклоняет их кодом 2 и называет префикс.
+// (CLAB-249, AC-1): хук отклоняет их кодом 2 и называет префикс.
 var hookCaught = []string{
 	"bin/clab-linux-amd64 version",
 	"./bin/clab-darwin-arm64 server status",
@@ -113,7 +113,7 @@ var hookCaught = []string{
 }
 
 // Имя скрипта или бинаря как аргумент чужой команды, путь и ветка — не
-// вызов (AC-17).
+// вызов (CLAB-249, AC-3).
 var hookPassed = []string{
 	"cat install.sh",
 	"sed -n 1,20p upgrade.sh",
@@ -147,7 +147,7 @@ func TestHookCatchesPackageClab(t *testing.T) {
 			!strings.Contains(msg, "CLAB_CONFIG_DIR=") {
 			t.Errorf("%q без префикса: код %d, %q — ждали отказ 2", c, code, msg)
 		}
-		// AC-16: с префиксом из промпта тот же вызов проходит.
+		// AC-2: с префиксом из промпта тот же вызов проходит.
 		if code, msg := runHook(t, script, hookPrefix+c); code != 0 {
 			t.Errorf("%q с префиксом: код %d, %q — ждали 0", c, code, msg)
 		}
@@ -162,7 +162,7 @@ func TestHookCatchesPackageClab(t *testing.T) {
 	}
 }
 
-// Известное и оставленное поведение (CLAB-202, q7 и AC-17): хук — страховка,
+// Известное и оставленное поведение (CLAB-249, AC-4; решение q7): хук — страховка,
 // а не разбор shell. sh с флагами считается запуском, даже `sh -n`; `|`
 // внутри кавычек считается разделителем команд.
 func TestHookKnownFalsePositives(t *testing.T) {
