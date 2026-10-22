@@ -777,6 +777,19 @@ func TestServerStarterInstallation(t *testing.T) {
 		t.Errorf("token file: %d %s", code, errw)
 	}
 
+	// compose.secrets.yml: в .env токена нет, SDLC_ADMIN_TOKEN_FILE задан
+	// сервису api в compose-файле.
+	r2 := newFakeRunner()
+	r2.apiEnvironment = `{"SDLC_ADMIN_TOKEN": "", "SDLC_ADMIN_TOKEN_FILE": "/run/secrets/admin_token"}`
+	e2, out2, errw2 := testEnv(t, t.TempDir(), r2, nil)
+	inCompose := starterInstalled(t, api, testStarterBundle, "CADENCE_MODE=proxy\nCOMPOSE_FILE=docker-compose.yml:compose.proxy.yml:compose.secrets.yml:compose.override.yml\n"+
+		"CADENCE_HTTP_ADDR="+api.addr()+"\nSDLC_ADMIN_TOKEN=\nSDLC_BOOTSTRAP_TEAM=acme\n")
+	mustWrite(t, filepath.Join(inCompose, "secrets", "admin_token"), testAdminToken+"\n", 0o400)
+	if code := starter(e2, "--dir", inCompose, "--project", "ACME"); code != 0 || strings.Contains(out2.String()+errw2.String(), testAdminToken) {
+		t.Errorf("token in compose.secrets.yml: %d %s", code, errw2)
+	}
+	noTokenInCalls(t, r2, testAdminToken)
+
 	// Чужой токен — отказ без ожидания.
 	errw.Reset()
 	wrong := starterInstalled(t, api, testStarterBundle, "CADENCE_MODE=proxy\nCOMPOSE_FILE=docker-compose.yml:compose.proxy.yml:compose.override.yml\n"+

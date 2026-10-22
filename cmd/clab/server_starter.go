@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
 const starterHelp = `clab server starter — set up the starter project of this installation:
@@ -46,9 +47,10 @@ Options:
 It talks to the API of this installation only, through its Caddy on this
 machine (proxy mode: CADENCE_HTTP_ADDR; tls mode: 127.0.0.1:443 with the
 certificate of SDLC_DOMAIN checked as usual), with the administrator token
-of the installation (SDLC_ADMIN_TOKEN or SDLC_ADMIN_TOKEN_FILE). Neither a
-sign-in nor the clab configuration is used, and the token is neither printed
-nor stored.
+of the installation: SDLC_ADMIN_TOKEN or SDLC_ADMIN_TOKEN_FILE of .env, else
+of the api service, as compose.secrets.yml sets it (the file in secrets/).
+Neither a sign-in nor the clab configuration is used, and the token is
+neither printed nor stored.
 
 Running it again changes nothing: the project exists, the roles and
 workflows are unchanged, active workflows stay active, and drafts of the
@@ -192,15 +194,49 @@ func serverStarter(ctx context.Context, e *serverEnv, args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := inst.secretSource().Value("SDLC_ADMIN_TOKEN")
+	token, err := inst.adminToken(ctx)
 	if err != nil {
 		return err
 	}
 	if token == "" {
-		return errors.New("the installation has no administrator token: SDLC_ADMIN_TOKEN and SDLC_ADMIN_TOKEN_FILE are empty in .env.\n" +
+		return errors.New("the installation has no administrator token: SDLC_ADMIN_TOKEN and SDLC_ADMIN_TOKEN_FILE are empty in .env and for the api service.\n" +
 			"  Set the project up by hand with the token of an administrator: docs/admin.md, \"First cycle and roles\".")
 	}
 	return runStarter(ctx, inst, token, bundle, starterTarget{team: team, key: key, name: name}, true)
+}
+
+// adminToken — токен администратора так, как его получает api установки:
+// SDLC_ADMIN_TOKEN или SDLC_ADMIN_TOKEN_FILE из .env, а нет их там — из
+// окружения сервиса api в конфигурации compose. compose.secrets.yml («Secrets
+// in files») задаёт SDLC_ADMIN_TOKEN_FILE=/run/secrets/admin_token в
+// compose-файле, а не в .env; так же — Docker secrets в compose.override.yml.
+// Файл читается из secrets/ установки (hostSecretPath). Вывод compose со
+// значениями .env остаётся в памяти: не печатается и никуда не пишется.
+func (i *installation) adminToken(ctx context.Context) (string, error) {
+	token, err := i.secretSource().Value("SDLC_ADMIN_TOKEN")
+	if err != nil || token != "" {
+		return token, err
+	}
+	out, err := output(ctx, i.e.run, i.compose("config", "--format", "json", "api"))
+	if err != nil {
+		return "", nil
+	}
+	var cfg struct {
+		Services map[string]struct {
+			Environment map[string]*string `json:"environment"`
+		} `json:"services"`
+	}
+	if json.Unmarshal([]byte(out), &cfg) != nil {
+		return "", nil
+	}
+	env := cfg.Services["api"].Environment
+	get := func(k string) string {
+		if v := env[k]; v != nil {
+			return *v
+		}
+		return ""
+	}
+	return secrets.Source{Getenv: get, Path: i.hostSecretPath}.Value("SDLC_ADMIN_TOKEN")
 }
 
 // starterRetry — команда повторить шаг с теми же ключами: clab server
