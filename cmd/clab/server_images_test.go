@@ -138,6 +138,7 @@ type imagesRunner struct {
 	onCall       func(c cmdSpec) error // хук на каждую команду: не nil — её ответ (SIGINT посреди вызова)
 	refs         map[string][]fakeRef  // referrers образа в архиве: repo → referrers
 	regRefs      map[string][]fakeRef  // referrers, перенесённые во временный реестр
+	layoutDigest map[string]string     // repo → digest под тегом раскладки в архиве, если не pin
 	containerd   bool
 	arch         string
 	regctlVer    string
@@ -394,7 +395,17 @@ func (r *imagesRunner) regctl(c cmdSpec, write func(string), fail func(string) e
 		}
 		return nil
 	case strings.HasPrefix(args, "image digest ocidir://"):
-		write(testPg17Digest + "\n")
+		repo := layoutRepo(c.args[len(c.args)-1])
+		switch {
+		case r.layoutDigest[repo] != "":
+			write(r.layoutDigest[repo] + "\n")
+		case repo == "sdlc-pipeline-backend":
+			write(testBackendPin + "\n")
+		case repo == "sdlc-pipeline-frontend":
+			write(testFrontendPin + "\n")
+		default:
+			write(testPg17Digest + "\n")
+		}
 		return nil
 	case strings.HasPrefix(args, "image export "):
 		dst := c.args[len(c.args)-1]
@@ -1011,6 +1022,10 @@ func TestImagesLoadTampered(t *testing.T) {
 		"manifest digest": {func(f *airgapFixture, p string) {
 			rewriteTar(t, p, "cadence-images.json", func(s string) string { return strings.Replace(s, testBackendPin, testPg17Digest, 1) })
 		}, "the archive does not hold ghcr.io/cadence-lab-tech/sdlc-pipeline-backend"},
+		// Тег раскладки указывает не на pin (index_redigested тестирования).
+		"index redigested": {func(f *airgapFixture, _ string) {
+			f.r.layoutDigest = map[string]string{"sdlc-pipeline-backend": testPg17Digest}
+		}, "the image ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.13.0 in the archive is not " + testBackendPin},
 		"not an archive": {func(f *airgapFixture, p string) {
 			rewriteTar(t, p, "cadence-images.json", func(string) string { return "{" })
 		}, "not an archive of clab server images save"},
@@ -1158,7 +1173,7 @@ func TestImagesLoadForeignReferrers(t *testing.T) {
 func TestImagesLoadInterruptedAnywhere(t *testing.T) {
 	for _, point := range []string{"docker compose version", "docker info", "regctl version", "cosign verify-blob",
 		"docker version", "docker image inspect", "regctl image copy", "regctl manifest get", "regctl artifact list",
-		"cosign verify --offline", "cosign verify-attestation", "docker pull", "docker tag", "docker compose --project-directory", "cosign version"} {
+		"cosign verify --offline", "cosign verify-attestation", "docker pull", "docker tag", "docker compose --project-directory", "cosign version", "regctl image digest"} {
 		t.Run(point, func(t *testing.T) {
 			f, p := loadSetup(t, nil)
 			ctx, cancel := context.WithCancel(context.Background())

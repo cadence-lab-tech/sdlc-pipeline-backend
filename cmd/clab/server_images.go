@@ -942,6 +942,14 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 	for i := range plan {
 		img := &plan[i]
 		e.info("copying %s into the temporary registry", img.r.named())
+		// Тег раскладки — ровно тот digest, который проверяется и тянется
+		// дальше: иначе образ под тегом уехал бы во временный реестр, а
+		// подписи проверились бы у digest, которого там нет (index_redigested
+		// тестирования).
+		out, err := regctl(ctx, e, nil, "image", "digest", "ocidir://"+img.layout+":"+img.tag)
+		if err != nil || strings.TrimSpace(out) != img.digest {
+			return fmt.Errorf("the image %s in the archive is not %s, which the archive names: the archive is broken or altered. %s", img.r.named(), img.digest, nothingLoaded)
+		}
 		if _, err := regctl(ctx, e, nil, "image", "copy", host, "ocidir://"+img.layout+":"+img.tag, reg.addr+"/"+img.r.path+":"+img.r.tag); err != nil {
 			return fmt.Errorf("regctl could not copy %s from the archive into the temporary registry (see above). %s", img.r.named(), nothingLoaded)
 		}
