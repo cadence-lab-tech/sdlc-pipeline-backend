@@ -49,6 +49,8 @@ machine (proxy mode: CADENCE_HTTP_ADDR; tls mode: 127.0.0.1:443 with the
 certificate of SDLC_DOMAIN checked as usual), with the administrator token
 of the installation: SDLC_ADMIN_TOKEN or SDLC_ADMIN_TOKEN_FILE of .env, else
 of the api service, as compose.secrets.yml sets it (the file in secrets/).
+A file you cannot read (owned by the service, as docs/admin.md "Secrets in
+files" recommends) is read by a one-off alpine:3 container without network.
 Neither a sign-in nor the clab configuration is used, and the token is
 neither printed nor stored.
 
@@ -213,7 +215,7 @@ func serverStarter(ctx context.Context, e *serverEnv, args []string) error {
 // Файл читается из secrets/ установки (hostSecretPath). Вывод compose со
 // значениями .env остаётся в памяти: не печатается и никуда не пишется.
 func (i *installation) adminToken(ctx context.Context) (string, error) {
-	token, err := i.secretSource().Value("SDLC_ADMIN_TOKEN")
+	token, err := i.secretSource(ctx).Value("SDLC_ADMIN_TOKEN")
 	if err != nil || token != "" {
 		return token, err
 	}
@@ -236,7 +238,7 @@ func (i *installation) adminToken(ctx context.Context) (string, error) {
 		}
 		return ""
 	}
-	return secrets.Source{Getenv: get, Path: i.hostSecretPath}.Value("SDLC_ADMIN_TOKEN")
+	return secrets.Source{Getenv: get, Path: i.hostSecretPath, Read: i.readSecretFile(ctx)}.Value("SDLC_ADMIN_TOKEN")
 }
 
 // starterRetry — команда повторить шаг с теми же ключами: clab server

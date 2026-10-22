@@ -142,6 +142,11 @@ type Source struct {
 	// открывается здесь; nil — как есть. clab server переводит пути
 	// контейнера (/secrets, /run/secrets) в secrets/ установки.
 	Path func(name, path string) (string, error)
+	// Read читает файл по пути после Path; nil — os.ReadFile. clab server
+	// дочитывает файл, отданный сервису (65532, 400), одноразовым
+	// контейнером (CLAB-252). Ошибка Read уходит в ошибку File как есть,
+	// поэтому в ней не должно быть содержимого.
+	Read func(path string) ([]byte, error)
 }
 
 // OS — окружение процесса, пути как есть.
@@ -183,7 +188,11 @@ func (s Source) File(name, path string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%s: %s is a directory, not a file", name, path)
 	}
-	raw, err := os.ReadFile(path)
+	read := s.Read
+	if read == nil {
+		read = os.ReadFile
+	}
+	raw, err := read(path)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", name, err)
 	}
