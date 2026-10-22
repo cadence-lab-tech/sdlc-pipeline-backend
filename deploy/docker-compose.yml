@@ -183,8 +183,8 @@ services:
       - blobs:/blobs
       - ./secrets:/secrets:ro
 
-  # Интерфейс — статика в Caddy на 80-м порту внутренней сети. Сборка
-  # в репозитории интерфейса (Dockerfile там же).
+  # Интерфейс — статика в Caddy на порту 8080 внутренней сети (образ без
+  # root, CLAB-236/247). Сборка в репозитории интерфейса (Dockerfile там же).
   ui:
     image: ${IMAGE_FRONTEND}
     restart: unless-stopped

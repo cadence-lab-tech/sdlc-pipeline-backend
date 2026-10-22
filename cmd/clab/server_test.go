@@ -37,6 +37,7 @@ type fakeRunner struct {
 	postgresRunning bool
 	apiContainer    string
 	healthy         bool
+	uiDown          map[string]bool // порты ui, на которых он не отвечает ("80", "8080"); nil — отвечает на обоих (CLAB-247)
 	pullFails       bool
 	dumpBytes       int
 	gitAvailable    bool
@@ -69,6 +70,10 @@ type fakeRunner struct {
 	newPostgresImage string
 	dbSize           string
 	df               string
+
+	// Окружение сервиса api в docker compose config (CLAB-199): JSON-объект,
+	// пусто — без environment.
+	apiEnvironment string
 }
 
 // exitErr — код выхода внешней команды, как у *exec.ExitError.
@@ -183,7 +188,11 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		services := `"postgres": {"image": "pgvector/pgvector:pg17"}, "db-client": {"image": "pgvector/pgvector:pg18"}`
 		switch strings.TrimPrefix(args, "compose config --format json ") {
 		case "api":
-			services = `"postgres": {"image": "pgvector/pgvector:pg17"}, "api": {"image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0"}`
+			env := ""
+			if f.apiEnvironment != "" {
+				env = `, "environment": ` + f.apiEnvironment
+			}
+			services = `"postgres": {"image": "pgvector/pgvector:pg17"}, "api": {"image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0"` + env + `}`
 		}
 		write(`{"name": "cadence", "services": {` + services + `}}`)
 		return nil
@@ -261,10 +270,15 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		}
 		return nil
 	case strings.HasPrefix(args, "compose exec -T caddy wget"):
-		if f.healthy {
-			return nil
+		if !f.healthy {
+			return errExit1
 		}
-		return errExit1
+		for port, down := range f.uiDown {
+			if down && strings.HasSuffix(args, " http://ui:"+port+"/") {
+				return errExit1
+			}
+		}
+		return nil
 	case strings.HasPrefix(args, "compose exec -T postgres pg_dump"):
 		dump()
 		return nil

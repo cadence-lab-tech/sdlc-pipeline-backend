@@ -241,10 +241,14 @@ func TestActivationWaitsForTaskBeingCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Создание идёт в своей горутине. Если оно упало до сигнала started,
+	// тест обязан упасть с причиной, а не ждать сигнала вечно: так и выглядело
+	// «зависание» go test ./... с параллельными пакетами на общей базе.
 	created := make(chan domain.Task, 1)
 	started := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		_ = store.InTx(ctx, func(tx pgx.Tx) error {
+		done <- store.InTx(ctx, func(tx pgx.Tx) error {
 			task, err := store.CreateTask(ctx, tx, postgres.CreateTaskInput{
 				ProjectID: project.ID, Title: "заводится во время активации", CreatedBy: system.ID,
 			})
@@ -257,11 +261,18 @@ func TestActivationWaitsForTaskBeingCreated(t *testing.T) {
 			return nil
 		})
 	}()
-	<-started
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("создание задачи до активации: %v", err)
+	}
 
 	res, err := authoring.Activate(ctx, draft.ID, system.ID)
 	if err != nil {
 		t.Fatalf("активация: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("коммит создания задачи: %v", err)
 	}
 	task := <-created
 	moved := false

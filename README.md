@@ -214,10 +214,13 @@ clab scope SDLC-42 --remove acme/api --add acme/web --reason "..."  # замен
 Установка своего инстанса, вход, первый проект и подключение агента —
 в [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted):
 README и руководство администратора. Установкой на своей машине `clab`
-управляет сам, без входа и без API: `clab server upgrade|backup|restore|status`
-повторяет скрипты пакета (`upgrade.sh`, `backup.sh`, `restore.sh`) и
-находит каталог по `--dir`, `CADENCE_DIR` или вверх от текущего; вывод
-по-английски, как у пакета. Код — `cmd/clab/server*.go`, правило версий —
+управляет сам, без входа: `clab server install|upgrade|backup|restore|status`
+повторяет скрипты пакета (`install.sh`, `upgrade.sh`, `backup.sh`,
+`restore.sh`) и находит каталог по `--dir`, `CADENCE_DIR` или вверх от
+текущего; вывод по-английски, как у пакета. В API ходит только стартовый
+проект — `clab server install --with-starter --project KEY` и `clab server
+starter`: к API своей установки через её Caddy с токеном администратора
+установки, без конфига `clab`. Код — `cmd/clab/server*.go`, правило версий —
 стек от v0.6.0 и не новее `clab`.
 
 Скрипты и CI обходятся без конфига — переменные окружения перекрывают его:
