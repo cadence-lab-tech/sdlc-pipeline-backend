@@ -1,12 +1,12 @@
 package main
 
-// clab server images (CLAB-202, решение 0058) — образы версии для закрытого
+// clab server images (CLAB-202, решение 0059) — образы версии для закрытого
 // контура: list печатает перечень, save собирает архив версии на машине с
 // сетью, load загружает его на машине без сети так, что pin compose по
 // digest находится.
 //
 // Копирует образы внешний regctl, а не Go в самом clab (решение человека,
-// 0058): `regctl image copy --referrers` переносит индекс со всеми
+// 0059): `regctl image copy --referrers` переносит индекс со всеми
 // платформами, аттестациями BuildKit, подписью cosign и OpenVEX в OCI-layout
 // и обратно, а cosign save/load 3.1.3 referrers теряет (спайк CLAB-202).
 // Подписи проверяет тот же внешний cosign, что у install и upgrade (0054);
@@ -275,14 +275,33 @@ func versionImagesSpec(dir string, env []string, version string) cmdSpec {
 	return c
 }
 
+var composeRequired = regexp.MustCompile(`required variable ([A-Za-z_][A-Za-z0-9_]*) is missing a value`)
+
 // versionImages — перечень образов версии: compose пакета в каталоге dir и
-// helperImage, без повторов, по порядку.
-func versionImages(ctx context.Context, e *serverEnv, dir string, env []string, version string) ([]string, error) {
-	images, err := composeImages(ctx, e, versionImagesSpec(dir, env, version))
-	if err != nil {
-		return nil, fmt.Errorf("could not read the images of %s from the compose files of its package (see above)", version)
+// helperImage, без повторов, по порядку, — и команда compose, которой он
+// прочитан. Файлы пакета вместе требуют переменных режимов, которых у
+// перечня нет (SDLC_DATABASE_URL в compose.external-db.yml v0.12.0:
+// ${…:?}): такая переменная получает заглушку и чтение повторяется — имена
+// образов от неё не зависят.
+func versionImages(ctx context.Context, e *serverEnv, dir string, env []string, version string) ([]string, cmdSpec, error) {
+	env = append([]string{}, env...)
+	for try := 0; ; try++ {
+		c := versionImagesSpec(dir, env, version)
+		var out, errb bytes.Buffer
+		c.stdout, c.stderr = &out, &errb
+		err := e.run.run(ctx, c)
+		if err == nil {
+			images := strings.Fields(out.String())
+			c.stdout, c.stderr = nil, nil
+			return uniqueSorted(append(images, helperImage)), c, nil
+		}
+		if m := composeRequired.FindStringSubmatch(errb.String()); m != nil && try < 20 {
+			env = append(env, m[1]+"=placeholder-of-clab-server-images")
+			continue
+		}
+		(&verifier{e: e}).tail(errb.String())
+		return nil, c, fmt.Errorf("could not read the images of %s from the compose files of its package (see above)", version)
 	}
-	return uniqueSorted(append(images, helperImage)), nil
 }
 
 // canonicalEnv — окружение для перечня архива: без зеркала реестра и без
@@ -338,7 +357,7 @@ func imagesList(ctx context.Context, e *serverEnv, args []string) error {
 		if err != nil {
 			return err
 		}
-		if images, err = versionImages(ctx, e, pkgDir, e.environ, version); err != nil {
+		if images, _, err = versionImages(ctx, e, pkgDir, e.environ, version); err != nil {
 			return err
 		}
 	} else {
@@ -349,7 +368,7 @@ func imagesList(ctx context.Context, e *serverEnv, args []string) error {
 		if err := requireDocker(ctx, e); err != nil {
 			return err
 		}
-		if images, err = versionImages(ctx, e, inst.dir, inst.composeEnv(), inst.version); err != nil {
+		if images, _, err = versionImages(ctx, e, inst.dir, inst.composeEnv(), inst.version); err != nil {
 			return err
 		}
 	}
@@ -540,11 +559,11 @@ func imagesSave(ctx context.Context, e *serverEnv, args []string) error {
 
 	// --- 3. перечень и подписи образов --------------------------------------------
 	env := canonicalEnv(e.environ)
-	images, err := versionImages(ctx, e, pkgDir, env, version)
+	images, spec, err := versionImages(ctx, e, pkgDir, env, version)
 	if err != nil {
 		return fmt.Errorf("%v. %s", err, nothingSaved)
 	}
-	if err := v.verifyImages(ctx, version, versionImagesSpec(pkgDir, env, version)); err != nil {
+	if err := v.verifyImages(ctx, version, spec); err != nil {
 		return err
 	}
 	manifest := imagesArchive{Format: archiveFormat, Version: version, Created: e.now().UTC().Format(time.RFC3339),
@@ -839,7 +858,7 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 	}
 	// Перечень — из подписанного пакета: pin наших образов берутся из его
 	// docker-compose.yml, а не из манифеста архива.
-	images, err := versionImages(ctx, e, pkgDir, canonicalEnv(e.environ), version)
+	images, _, err := versionImages(ctx, e, pkgDir, canonicalEnv(e.environ), version)
 	if err != nil {
 		return fmt.Errorf("%v. %s", err, nothingLoaded)
 	}

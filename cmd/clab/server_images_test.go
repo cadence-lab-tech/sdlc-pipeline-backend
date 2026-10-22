@@ -86,6 +86,7 @@ type imagesRunner struct {
 	offline      bool   // нет сети: cosign без --trusted-root падает
 	composeImgs  string // ответ docker compose config --images без -f (pull)
 	onRegctlCopy func() // хук: вызов regctl image copy в реестр (SIGINT)
+	requireVar   string // compose config --images по всем файлам требует эту переменную (${X:?})
 }
 
 func newImagesRunner() *imagesRunner {
@@ -144,6 +145,9 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 		r.record(c)
 		write(r.composeImgs)
 		return nil
+	case r.requireVar != "" && strings.HasSuffix(args, " --profile * config --images") && !hasEnv(c.env, r.requireVar):
+		r.record(c)
+		return fail("error while interpolating services.api.environment." + r.requireVar + ": required variable " + r.requireVar + " is missing a value: not set")
 	case args == "compose pull --quiet --policy missing":
 		r.record(c)
 		return nil
@@ -190,6 +194,15 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 		return nil
 	}
 	return r.fakeRunner.run(ctx, c)
+}
+
+func hasEnv(env []string, key string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, key+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // inspect — docker image inspect: ссылка с digest на containerd находится
@@ -470,6 +483,21 @@ func TestImagesListVersion(t *testing.T) {
 
 // AC-1: перечень установки — её версия и CADENCE_REGISTRY её .env;
 // compose.override.yml установки — не пакет.
+// Файлы пакета вместе требуют переменной режима (${SDLC_DATABASE_URL:?} в
+// compose.external-db.yml v0.12.0): она получает заглушку, перечень тот же,
+// и save проверяет подписи той же командой compose.
+func TestImagesListRequiredVariable(t *testing.T) {
+	f := airgapSetup(t, nil)
+	f.r.requireVar = "SDLC_DATABASE_URL"
+	if code := f.images("list", "--version", "v0.13.0"); code != 0 || f.out.String() != strings.Join(airgapImages("v0.13.0"), "\n")+"\n" {
+		t.Fatalf("list: %d\n%s\n%s", code, f.out, f.errw)
+	}
+	f.save()
+	if calls := f.r.callsWith("docker compose "); len(calls) < 2 {
+		t.Errorf("no retry: %v", calls)
+	}
+}
+
 func TestImagesListDir(t *testing.T) {
 	files := airgapFiles("v0.12.0")
 	dir := installed(t, "v0.12.0", map[string]string{"docker-compose.yml": files["docker-compose.yml"],
