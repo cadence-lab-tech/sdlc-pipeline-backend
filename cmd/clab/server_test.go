@@ -63,6 +63,10 @@ type fakeRunner struct {
 	cosignVersion string
 	cosignBad     string
 	ghcrDown      bool
+
+	// Окружение сервиса api в docker compose config (CLAB-199): JSON-объект,
+	// пусто — без environment.
+	apiEnvironment string
 }
 
 // exitErr — код выхода внешней команды, как у *exec.ExitError.
@@ -164,7 +168,11 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		services := `"postgres": {"image": "pgvector/pgvector:pg17"}, "db-client": {"image": "pgvector/pgvector:pg18"}`
 		switch strings.TrimPrefix(args, "compose config --format json ") {
 		case "api":
-			services = `"postgres": {"image": "pgvector/pgvector:pg17"}, "api": {"image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0"}`
+			env := ""
+			if f.apiEnvironment != "" {
+				env = `, "environment": ` + f.apiEnvironment
+			}
+			services = `"postgres": {"image": "pgvector/pgvector:pg17"}, "api": {"image": "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.10.0"` + env + `}`
 		}
 		write(`{"name": "cadence", "services": {` + services + `}}`)
 		return nil

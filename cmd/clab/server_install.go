@@ -37,11 +37,14 @@ Usage: clab server install [--version vX.Y.Z] [--dir DIR] [--name NAME]
                            [--mode tls|proxy] [--domain HOST] [--email ADDR]
                            [--http-addr [IP:]PORT] [--team KEY]
                            [--team-name NAME] [--external-db URL]
-                           [--external-db-ca FILE] [--yes]
+                           [--external-db-ca FILE]
+                           [--with-starter --project KEY [--project-name NAME]]
+                           [--yes]
 
   clab server install --domain cadence.example.com --email ops@example.com
   clab server install --mode proxy --http-addr 127.0.0.1:8080 --yes
   clab server install --dir /opt/cadence-stage --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081
+  clab server install --mode proxy --team acme --with-starter --project ACME --yes
 
 Options:
   --version vX.Y.Z   the release to install; default the latest release this
@@ -72,6 +75,14 @@ Options:
                      the CA of the database server: copied to secrets/db-ca.pem
                      and named in the URL (sslrootcert), sslmode=verify-full
                      unless the URL sets another
+  --with-starter     once the stack is up, set up the starter project: create
+                     it in the first team (--team is required), apply
+                     bundles/starter.json of the package and activate its
+                     workflows (clab server starter --help)
+  --project KEY      with --with-starter: the key of the project, 2-16
+                     characters A-Z, 0-9 and _ (asked in a terminal)
+  --project-name NAME
+                     with --with-starter: its display name, default the key
   -y, --yes, --non-interactive
                      ask nothing: every answer comes from flags or the
                      environment (also without a terminal)
@@ -86,6 +97,13 @@ It runs once: a directory with .env is refused, and nothing is changed there
 (new secrets would lock the database volume out). Every refusal comes before
 .env is written. If the stack does not start after that, .env is kept and the
 command prints how to start it.
+
+With --with-starter the team, the project key and bundles/starter.json of the
+package are checked before .env as well. The starter project is the only step
+that talks to the API, and only to the API of this installation, through its
+Caddy on this machine with the administrator token of the installation; if
+it fails, the stack keeps running, .env is kept, and the command prints the
+clab server starter command that finishes it.
 
 With cosign 3.x in PATH it verifies the signature of checksums.txt of the
 release (before anything is unpacked) and of both images of the version at
@@ -107,23 +125,31 @@ type installOptions struct {
 	team, teamName                string
 	externalDB, externalDBCA      string
 	yes                           bool
+	// Стартовый проект (CLAB-199): после готовности стека — проект в
+	// первой команде со связкой пакета и активными циклами.
+	withStarter          bool
+	project, projectName string
 }
 
 func serverInstall(ctx context.Context, e *serverEnv, args []string) error {
 	var o installOptions
 	pos, err := parseServerArgs(args,
-		map[string]*bool{"--yes": &o.yes, "-y": &o.yes, "--non-interactive": &o.yes},
+		map[string]*bool{"--yes": &o.yes, "-y": &o.yes, "--non-interactive": &o.yes, "--with-starter": &o.withStarter},
 		map[string]*string{
 			"--version": &o.version, "--dir": &o.dir, "--name": &o.name,
 			"--mode": &o.mode, "--domain": &o.domain, "--email": &o.email, "--http-addr": &o.httpAddr,
 			"--team": &o.team, "--team-name": &o.teamName,
 			"--external-db": &o.externalDB, "--external-db-ca": &o.externalDBCA,
+			"--project": &o.project, "--project-name": &o.projectName,
 		})
 	if err != nil {
 		return err
 	}
 	if len(pos) > 0 {
 		return usageError{fmt.Sprintf("unexpected argument: %s (the version goes with --version)", pos[0])}
+	}
+	if !o.withStarter && (o.project != "" || o.projectName != "") {
+		return usageError{"--project and --project-name go with --with-starter"}
 	}
 	if o.version != "" && !validVersion(o.version) {
 		return usageError{fmt.Sprintf("'%s' is not a version: expected vX.Y.Z", o.version)}
@@ -216,6 +242,14 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	a, err := installAnswers(e, o)
 	if err != nil {
 		return err
+	}
+	// Связка стартового проекта — из этого же пакета и до .env: пакет без
+	// неё отказывает сейчас, а не после старта стека.
+	var starter *starterBundle
+	if o.withStarter {
+		if starter, err = loadStarterBundle(pkgDir, "the package of "+version); err != nil {
+			return err
+		}
 	}
 	pairs := a.pairs(name)
 	for _, p := range pairs {
@@ -318,6 +352,17 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 			shellQuote(e.self), shellQuote(dir), backupLog)
 	}
 	e.say("Copy the backups off this machine: BACKUP_S3_* in .env (docs/admin.md, \"Off-machine copy\").")
+	if starter == nil {
+		return nil
+	}
+	// Стартовый проект — после итога установки: токен и команды
+	// обслуживания уже напечатаны, и сбой шага их не теряет.
+	e.say("")
+	t := starterTarget{team: a.team, key: a.project, name: a.projectName}
+	if err := runStarter(ctx, inst, a.token, starter, t, false); err != nil {
+		return fmt.Errorf("%v\n  The stack is running and .env is kept; only the starter project is not finished. Fix the cause and run:\n    %s",
+			err, starterRetry(e, dir, t))
+	}
 	return nil
 }
 
@@ -470,7 +515,7 @@ func fetchInstallPackage(ctx context.Context, e *serverEnv, verify *verifier, re
 		return "", err
 	}
 	peek := filepath.Join(work, "peek")
-	if err := extractTarGz(tarball, peek, map[string]bool{"VERSION": true, packageManifest: true, ".env.example": true, "docker-compose.yml": true}); err != nil {
+	if err := extractTarGz(tarball, peek, map[string]bool{"VERSION": true, packageManifest: true, ".env.example": true, "docker-compose.yml": true, starterBundlePath: true}); err != nil {
 		return "", err
 	}
 	if !isFile(filepath.Join(peek, packageManifest)) || !isFile(filepath.Join(peek, ".env.example")) {
@@ -491,6 +536,7 @@ func fetchInstallPackage(ctx context.Context, e *serverEnv, verify *verifier, re
 type installAnswersT struct {
 	mode, domain, email, httpAddr string
 	team, teamName                string
+	project, projectName          string // стартовый проект; в .env не пишутся
 	composeFile                   string
 	external                      bool
 	dbURL, dbCA                   string // dbCA — абсолютный путь к файлу CA
@@ -561,6 +607,20 @@ func installAnswers(e *serverEnv, o installOptions) (*installAnswersT, error) {
 	if a.team != "" && a.teamName == "" {
 		if a.teamName, err = q.ask("Display name of team "+a.team, a.teamName, a.team); err != nil {
 			return nil, err
+		}
+	}
+	if o.withStarter {
+		if a.team == "" {
+			return nil, errors.New("--with-starter needs the team that owns the project: --team KEY (or SDLC_BOOTSTRAP_TEAM)")
+		}
+		if a.project, err = q.ask("Key of the starter project (2-16 characters A-Z, 0-9 and _)", o.project, ""); err != nil {
+			return nil, err
+		}
+		if err := checkProjectKey(a.project); err != nil {
+			return nil, err
+		}
+		if a.projectName = o.projectName; a.projectName == "" {
+			a.projectName = a.project
 		}
 	}
 
