@@ -912,7 +912,7 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 			if !img.r.ours() {
 				continue
 			}
-			if err := v.verifyImageOffline(ctx, version, img.r.repo(), reg.addr+"/"+img.r.path+"@"+img.digest, root, "the archive"); err != nil {
+			if err := verifyArchiveImage(ctx, e, v, host, version, img.r.repo(), reg.addr+"/"+img.r.path+"@"+img.digest, root); err != nil {
 				return err
 			}
 		}
@@ -1007,6 +1007,96 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) error {
 	return nil
 }
 
+// Подписи и OpenVEX образа во временном реестре: referrers — бандлы
+// Sigstore (cosign 3.x), тип содержимого — аннотация бандла.
+const (
+	sigstoreBundleType  = "application/vnd.dev.sigstore.bundle"
+	predicateAnnotation = "dev.sigstore.bundle.predicateType"
+	openvexPredicate    = "https://openvex.dev/ns"
+)
+
+// vexSince — образы, к которым release.yml прикладывает подписанный
+// OpenVEX, и с какой версии (backend — 0046, frontend — CLAB-234): в архиве
+// такой версии образ без него — отказ.
+var vexSince = map[string]string{"sdlc-pipeline-backend": "v0.9.0", "sdlc-pipeline-frontend": "v0.13.0"}
+
+// verifyArchiveImage — подписи образа repo по ссылке с digest target во
+// временном реестре load (host — флаг regctl для него), без сети, по корню
+// root архива. Каждый бандл Sigstore, приложенный к образу, должен
+// проверяться identity версии: cosign verify засчитывает образ по любому
+// проверенному бандлу (подпись или OpenVEX — решение 0059), и подменённый
+// или подложенный рядом бандл иначе ушёл бы в Docker и реестр
+// администратора. OpenVEX — ещё и cosign verify-attestation --type openvex
+// (решение человека по O2 тестирования CLAB-202): сканер берёт его как
+// аттестацию, и проверен он должен быть так же.
+func verifyArchiveImage(ctx context.Context, e *serverEnv, v *verifier, host, version, repo, target, root string) error {
+	out, err := regctl(ctx, e, nil, "artifact", "list", host, "--format", "{{json .Descriptors}}", target)
+	var descs []struct {
+		ArtifactType string            `json:"artifactType"`
+		Annotations  map[string]string `json:"annotations"`
+	}
+	if err == nil {
+		err = json.Unmarshal([]byte(strings.TrimSpace(out)), &descs)
+	}
+	if err != nil {
+		return fmt.Errorf("regctl could not list the signatures of %s in the temporary registry (see above). %s", target, nothingLoaded)
+	}
+	var bundles, vex int
+	for _, d := range descs {
+		if strings.HasPrefix(d.ArtifactType, sigstoreBundleType) {
+			bundles++
+			if strings.HasPrefix(d.Annotations[predicateAnnotation], openvexPredicate) {
+				vex++
+			}
+		}
+	}
+	identity := verifyIdentity(repo, version)
+	altered := func(what string) error {
+		return fmt.Errorf("%s did not verify for %s: the archive is altered or not ours.\n"+
+			"  Do not use it and report it privately (SECURITY.md). %s", what, identity, nothingLoaded)
+	}
+	cosign := func(args ...string) (string, error) {
+		var stdout, stderr bytes.Buffer
+		err := e.run.run(ctx, cmdSpec{name: "cosign", args: append(args, "--offline", "--trusted-root", root,
+			"--certificate-identity", identity, "--certificate-oidc-issuer", verifyIssuer, target), stdout: &stdout, stderr: &stderr})
+		if err != nil {
+			v.tail(stderr.String())
+		}
+		return stdout.String(), err
+	}
+
+	out, err = cosign("verify")
+	var verified []json.RawMessage
+	if err != nil || json.Unmarshal([]byte(strings.TrimSpace(out)), &verified) != nil {
+		return altered(fmt.Sprintf("the signature of %s (%s %s)", target, repo, version))
+	}
+	if len(verified) < bundles {
+		return altered(fmt.Sprintf("%d of the %d Sigstore bundles attached to %s (signatures and attestations of %s %s)",
+			bundles-len(verified), bundles, target, repo, version))
+	}
+	e.ok("%s is signed by %s (verified offline with %s of the archive)", target, identity, trustedRootAsset)
+
+	if vex == 0 {
+		if since, ok := vexSince[repo]; ok && !versionLess(version, since) {
+			return fmt.Errorf("the archive has no OpenVEX of %s (%s %s), which its release attaches: the archive is altered.\n"+
+				"  Do not use it and report it privately (SECURITY.md). %s", target, repo, version, nothingLoaded)
+		}
+		return nil
+	}
+	out, err = cosign("verify-attestation", "--type", "openvex")
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	if err != nil || n < vex {
+		return altered(fmt.Sprintf("the OpenVEX of %s (%s %s)", target, repo, version))
+	}
+	e.ok("the OpenVEX of %s is signed by %s (verified offline with %s of the archive)", target, identity, trustedRootAsset)
+	return nil
+}
+
 // writeMirror — ассеты релиза из архива в каталог зеркала релизов.
 func writeMirror(src, dst string) error {
 	entries, err := os.ReadDir(src)
@@ -1048,15 +1138,23 @@ func dockerImageID(ctx context.Context, e *serverEnv, ref string) string {
 type airgapRegistry struct {
 	e         *serverEnv
 	ctx       context.Context
-	name      string
+	name      string // clab-images-load-<id>
+	id        string // значение метки airgapLabel: по ней контейнер находится и без имени
 	addr      string // 127.0.0.1:PORT
 	dropImage bool   // образ загружен этим load: убрать вместе с контейнером
+	unsure    bool   // docker run не дошёл до успеха: контейнер может появиться у демона позже
 }
 
 // startAirgapRegistry грузит образ реестра своей платформы из архива и
 // запускает его на свободном порту 127.0.0.1. Контейнер и его том
 // убирает stop — в любом исходе, в том числе после SIGINT (контекст
 // команды отменён, уборка — без него).
+//
+// docker load и docker run идут с detach (CLAB-202, AC-8): прерванный
+// посреди запроса docker run оставлял у демона контейнер, который тот
+// дописывал уже после docker rm уборки. Теперь запрос доходит до конца,
+// и rm видит контейнер; не дошёл (ошибка, предел) — stop ищет его по
+// метке, пока демон не перестанет его показывать.
 func startAirgapRegistry(ctx context.Context, e *serverEnv, tree string, spec archiveRegistry) (*airgapRegistry, error) {
 	out, err := output(ctx, e.run, cmdSpec{name: "docker", args: []string{"version", "--format", "{{.Server.Arch}}"}})
 	arch := strings.TrimSpace(out)
@@ -1064,17 +1162,30 @@ func startAirgapRegistry(ctx context.Context, e *serverEnv, tree string, spec ar
 	if err != nil || !ok || spec.Name == "" {
 		return nil, fmt.Errorf("the archive has no image of the temporary registry for linux/%s (Docker of this machine). %s", arch, nothingLoaded)
 	}
-	reg := &airgapRegistry{e: e, ctx: context.WithoutCancel(ctx), name: "clab-images-load-" + randomSuffix()}
+	id := randomSuffix()
+	reg := &airgapRegistry{e: e, ctx: context.WithoutCancel(ctx), name: "clab-images-load-" + id, id: id}
+	// Прерванный inspect сказал бы «образа нет», и stop снял бы чужой образ.
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("interrupted. %s", nothingLoaded)
+	}
 	reg.dropImage = !dockerImagePresent(ctx, e, spec.Name)
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("interrupted. %s", nothingLoaded)
+	}
 	if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"load", "-q", "-i", filepath.Join(tree, filepath.FromSlash(file))},
-		stdout: io.Discard, stderr: e.errw}); err != nil {
+		stdout: io.Discard, stderr: e.errw, detach: true}); err != nil || ctx.Err() != nil {
 		reg.stop()
 		return nil, fmt.Errorf("docker could not load the image of the temporary registry from the archive (see above). %s", nothingLoaded)
 	}
-	if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"run", "-d", "--name", reg.name, "--label", airgapLabel + "=1",
-		"-p", "127.0.0.1::5000", spec.Name}, stdout: io.Discard, stderr: e.errw}); err != nil {
+	if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"run", "-d", "--name", reg.name, "--label", airgapLabel + "=" + id,
+		"-p", "127.0.0.1::5000", spec.Name}, stdout: io.Discard, stderr: e.errw, detach: true}); err != nil {
+		reg.unsure = true
 		reg.stop()
 		return nil, fmt.Errorf("docker could not start the temporary registry (see above). %s", nothingLoaded)
+	}
+	if ctx.Err() != nil {
+		reg.stop()
+		return nil, fmt.Errorf("interrupted. %s", nothingLoaded)
 	}
 	out, err = output(ctx, e.run, cmdSpec{name: "docker", args: []string{"port", reg.name, "5000/tcp"}})
 	for _, line := range strings.Split(out, "\n") {
@@ -1101,10 +1212,34 @@ func startAirgapRegistry(ctx context.Context, e *serverEnv, tree string, spec ar
 	return reg, nil
 }
 
+// stop убирает контейнер временного реестра с его томом и образ реестра,
+// если его загрузил этот load. Без отмены и в своей группе процессов:
+// второй Ctrl-C уборку не обрывает.
 func (r *airgapRegistry) stop() {
-	_ = r.e.run.run(r.ctx, cmdSpec{name: "docker", args: []string{"rm", "-f", "-v", r.name}, stdout: io.Discard, stderr: io.Discard})
+	rm := func(target string) {
+		_ = r.e.run.run(r.ctx, cmdSpec{name: "docker", args: []string{"rm", "-f", "-v", target}, stdout: io.Discard, stderr: io.Discard, detach: true})
+	}
+	rm(r.name)
+	// docker run не дошёл до успеха — контейнер мог появиться у демона
+	// после rm: по метке, пока его нет на трёх проверках подряд.
+	for empty, i := 0, 0; r.unsure && empty < 3 && i < 20; i++ {
+		out, err := output(r.ctx, r.e.run, cmdSpec{name: "docker", args: []string{"ps", "-aq", "--filter", "label=" + airgapLabel + "=" + r.id}})
+		ids := strings.Fields(out)
+		switch {
+		case err != nil:
+			empty = 0
+		case len(ids) == 0:
+			empty++
+		default:
+			empty = 0
+			for _, id := range ids {
+				rm(id)
+			}
+		}
+		r.e.sleep(500 * time.Millisecond)
+	}
 	if r.dropImage {
-		_ = r.e.run.run(r.ctx, cmdSpec{name: "docker", args: []string{"rmi", airgapRegistryName}, stdout: io.Discard, stderr: io.Discard})
+		_ = r.e.run.run(r.ctx, cmdSpec{name: "docker", args: []string{"rmi", airgapRegistryName}, stdout: io.Discard, stderr: io.Discard, detach: true})
 	}
 }
 
@@ -1116,30 +1251,73 @@ func randomSuffix() string {
 
 // ── pull в install и upgrade ────────────────────────────────────────────────
 
-// pullImages — docker compose pull образов установки, кроме тех, что уже
-// лежат в Docker этой машины ровно по ссылке compose (CLAB-202): в закрытом
-// контуре после clab server images load pull всех образов упал бы на
-// первом же реестре, а с --registry — на сторонних образах Docker Hub.
-// Нет ни одного локально — прежний pull всех; все есть — pull не нужен;
-// часть — pull --policy missing.
+// pullImages — docker compose pull образов установки так, чтобы закрытый
+// контур (CLAB-202) не ходил в сеть за тем, что clab server images load уже
+// положил, а машина с сетью получала то же, что раньше (решение 0059):
+//   - нет ни одного образа локально — прежний pull всех;
+//   - образ с pin (tag@sha256) уже здесь — не тянется: по digest придёт
+//     ровно он же;
+//   - сторонний образ по тегу (pgvector) уже здесь — тянется всегда, когда
+//     его реестр отвечает: пересборку по тому же тегу приносит pull
+//     (admin.md, находки «fixed in Debian»; 0056 п. 6); реестр не отвечает
+//     (контур) — остаётся тот, что есть, с предупреждением;
+//   - остальные отсутствующие — pull --policy missing.
 func (i *installation) pullImages(ctx context.Context) error {
 	images, err := output(ctx, i.e.run, i.compose("config", "--images"))
-	var present, missing int
+	var present, missing, tagged []string
 	if err == nil {
 		for _, img := range uniqueSorted(strings.Fields(images)) {
-			if _, err := output(ctx, i.e.run, i.docker("image", "inspect", "--format", "{{.Id}}", img)); err == nil {
-				present++
-			} else {
-				missing++
+			if _, err := output(ctx, i.e.run, i.docker("image", "inspect", "--format", "{{.Id}}", img)); err != nil {
+				missing = append(missing, img)
+				continue
+			}
+			present = append(present, img)
+			if !strings.Contains(img, "@") {
+				tagged = append(tagged, img)
 			}
 		}
 	}
+	if len(present) == 0 {
+		return i.composeRun(ctx, false, "pull", "--quiet")
+	}
+	var kept []string
+	for _, img := range tagged {
+		if !i.e.reachable(ctx, registryProbe(img)) {
+			kept = append(kept, img)
+			continue
+		}
+		c := i.docker("pull", "-q", img)
+		c.stdout, c.stderr = io.Discard, i.e.errw
+		if err := i.e.run.run(ctx, c); err != nil {
+			return err
+		}
+	}
 	switch {
-	case present > 0 && missing == 0:
-		i.e.info("all %d images are on this machine: nothing to pull", present)
-		return nil
-	case present > 0:
+	case len(kept) == 1:
+		i.e.warn("%s: its registry does not answer, the image on this machine is kept", kept[0])
+	case len(kept) > 1:
+		i.e.warn("%s: their registries do not answer, the images on this machine are kept", strings.Join(kept, ", "))
+	}
+	if len(missing) > 0 {
 		return i.composeRun(ctx, false, "pull", "--quiet", "--policy", "missing")
 	}
-	return i.composeRun(ctx, false, "pull", "--quiet")
+	if len(kept) == len(tagged) {
+		i.e.info("all %d images are on this machine: nothing to pull", len(present))
+	}
+	return nil
+}
+
+// registryProbe — адрес, ответ которого значит «реестр образа ref отвечает»:
+// /v2/ его реестра (у Docker Hub — registry-1.docker.io). Любой ответ HTTP,
+// в том числе 401, — отвечает.
+func registryProbe(ref string) string {
+	host := parseImageRef(ref).domain
+	if host == "docker.io" {
+		host = "registry-1.docker.io"
+	}
+	scheme := "https"
+	if h, _, _ := strings.Cut(host, ":"); h == "localhost" || strings.HasPrefix(h, "127.") {
+		scheme = "http"
+	}
+	return scheme + "://" + host + "/v2/"
 }

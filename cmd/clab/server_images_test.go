@@ -73,11 +73,38 @@ func publishAirgap(t *testing.T, releases, v string, root bool) {
 	}
 }
 
+// fakeRef — бандл Sigstore, приложенный к образу: его тип и проверяется ли
+// он identity версии.
+type fakeRef struct {
+	pred string
+	bad  bool
+}
+
+const signPredicate = "https://sigstore.dev/cosign/sign/v1"
+
+// defaultRefs — как у релиза v0.13.0: подпись и OpenVEX у обоих.
+func defaultRefs() map[string][]fakeRef {
+	return map[string][]fakeRef{
+		"sdlc-pipeline-backend":  {{pred: signPredicate}, {pred: openvexPredicate}},
+		"sdlc-pipeline-frontend": {{pred: signPredicate}, {pred: openvexPredicate}},
+	}
+}
+
+// refRepo — образ ссылки host/path/repo@digest.
+func refRepo(ref string) string {
+	name, _, _ := strings.Cut(ref, "@")
+	return name[strings.LastIndex(name, "/")+1:]
+}
+
 // imagesRunner — regctl и образы Docker поверх fakeRunner.
 type imagesRunner struct {
 	*fakeRunner
-	local        map[string]string // ссылка в Docker → digest образа
-	containers   map[string]bool
+	local        map[string]string     // ссылка в Docker → digest образа
+	containers   map[string]string     // контейнер → значение метки airgapLabel
+	late         map[string]string     // контейнеры, которые демон покажет на следующем docker ps
+	onDockerRun  func(c cmdSpec) error // хук docker run временного реестра; nil — контейнер создан
+	onRun        func(c cmdSpec)       // хук на каждую команду
+	refs         map[string][]fakeRef  // бандлы Sigstore образа во временном реестре: repo → бандлы
 	containerd   bool
 	arch         string
 	regctlVer    string
@@ -92,7 +119,7 @@ type imagesRunner struct {
 func newImagesRunner() *imagesRunner {
 	r := newFakeRunner()
 	r.cosign = true
-	return &imagesRunner{fakeRunner: r, local: map[string]string{}, containers: map[string]bool{},
+	return &imagesRunner{fakeRunner: r, local: map[string]string{}, containers: map[string]string{}, late: map[string]string{}, refs: defaultRefs(),
 		containerd: true, arch: "amd64", regctlVer: "v0.9.2", pushed: map[string]string{}}
 }
 
@@ -103,6 +130,9 @@ func (r *imagesRunner) record(c cmdSpec) {
 }
 
 func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
+	if r.onRun != nil {
+		r.onRun(c)
+	}
 	args := strings.Join(c.args, " ")
 	write := func(s string) {
 		if c.stdout != nil {
@@ -134,6 +164,27 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 		case r.offline && (c.args[0] == "verify" || c.args[0] == "verify-blob") && !strings.Contains(args, "--trusted-root"):
 			r.record(c)
 			return fail("Error: getting TUF client: dial tcp: lookup tuf-repo-cdn.sigstore.dev: no such host")
+		case (c.args[0] == "verify" || c.args[0] == "verify-attestation") && strings.HasPrefix(c.args[len(c.args)-1], testRegAddr+"/"):
+			target := c.args[len(c.args)-1]
+			if r.cosignBad != "" && strings.Contains(target, "/"+r.cosignBad+"@") {
+				return r.fakeRunner.run(ctx, c)
+			}
+			r.record(c)
+			var good []string
+			for _, ref := range r.refs[refRepo(target)] {
+				if !ref.bad && (c.args[0] == "verify" || ref.pred == openvexPredicate) {
+					good = append(good, `{"critical":{"type":"`+ref.pred+`"}}`)
+				}
+			}
+			if len(good) == 0 {
+				return fail("Error: no matching attestations: none of the expected identities matched")
+			}
+			if c.args[0] == "verify" {
+				write("[" + strings.Join(good, ",") + "]\n")
+			} else {
+				write(strings.Join(good, "\n") + "\n")
+			}
+			return nil
 		}
 		return r.fakeRunner.run(ctx, c)
 	case "docker":
@@ -168,14 +219,33 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 		return nil
 	case strings.HasPrefix(args, "run -d --name clab-images-load-"):
 		r.record(c)
-		r.containers[c.args[3]] = true
+		if r.onDockerRun != nil {
+			return r.onDockerRun(c)
+		}
+		r.containers[c.args[3]] = strings.TrimPrefix(c.args[5], airgapLabel+"=")
+		return nil
+	case strings.HasPrefix(args, "ps -aq --filter label="+airgapLabel+"="):
+		r.record(c)
+		for n, l := range r.late {
+			r.containers[n] = l
+			delete(r.late, n)
+		}
+		want := strings.TrimPrefix(c.args[3], "label="+airgapLabel+"=")
+		for n, l := range r.containers {
+			if l == want {
+				write(n + "\n")
+			}
+		}
 		return nil
 	case strings.HasPrefix(args, "port clab-images-load-"):
 		r.record(c)
 		write(testRegAddr + "\n")
 		return nil
-	case strings.HasPrefix(args, "rm -f -v clab-images-load-"):
+	case strings.HasPrefix(args, "rm -f -v "):
 		r.record(c)
+		if _, ok := r.containers[c.args[3]]; !ok {
+			return fail("Error response from daemon: No such container: " + c.args[3])
+		}
 		delete(r.containers, c.args[3])
 		return nil
 	case strings.HasPrefix(args, "pull -q "):
@@ -248,6 +318,17 @@ func (r *imagesRunner) regctl(c cmdSpec, write func(string), fail func(string) e
 			r.onRegctlCopy()
 		}
 		r.pushed[dst] = src
+		return nil
+	case strings.HasPrefix(args, "artifact list "):
+		var descs []string
+		for _, ref := range r.refs[refRepo(c.args[len(c.args)-1])] {
+			descs = append(descs, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.dev.sigstore.bundle.v0.3+json","annotations":{"`+predicateAnnotation+`":"`+ref.pred+`"}}`)
+		}
+		if descs == nil {
+			write("null\n")
+		} else {
+			write("[" + strings.Join(descs, ",") + "]\n")
+		}
 		return nil
 	case strings.HasPrefix(args, "image digest ocidir://"):
 		write(testPg17Digest + "\n")
@@ -688,8 +769,8 @@ func loadSetup(t *testing.T, vars map[string]string) (*airgapFixture, string) {
 // clean — после load нет временного реестра, его образа и ссылок на него.
 func (f *airgapFixture) clean() {
 	f.t.Helper()
-	if len(f.r.containers) != 0 {
-		f.t.Errorf("containers left: %v", f.r.containers)
+	if len(f.r.containers) != 0 || len(f.r.late) != 0 {
+		f.t.Errorf("containers left: %v %v", f.r.containers, f.r.late)
 	}
 	for ref := range f.r.local {
 		if ref == airgapRegistryName || strings.HasPrefix(ref, testRegAddr) {
@@ -719,6 +800,14 @@ func TestImagesLoad(t *testing.T) {
 			!strings.Contains(out, "✓ "+target+" is signed by "+verifyIdentity(img.repo, "v0.13.0")+" (verified offline") {
 			t.Errorf("verify %s:\n%s", img.repo, out)
 		}
+	}
+	backend := testRegAddr + "/cadence-lab-tech/sdlc-pipeline-backend@" + testBackendPin
+	frontend := testRegAddr + "/cadence-lab-tech/sdlc-pipeline-frontend@" + testFrontendPin
+	if att := f.r.callsWith("cosign verify-attestation --type openvex --offline --trusted-root "); len(att) != 2 ||
+		!strings.HasSuffix(att[0], " "+backend) || !strings.HasSuffix(att[1], " "+frontend) ||
+		!strings.Contains(out, "✓ the OpenVEX of "+backend+" is signed by "+verifyIdentity("sdlc-pipeline-backend", "v0.13.0")+" (verified offline") ||
+		!strings.Contains(out, "✓ the OpenVEX of "+frontend+" is signed by "+verifyIdentity("sdlc-pipeline-frontend", "v0.13.0")+" (verified offline") {
+		t.Errorf("OpenVEX: %v\n%s", att, out)
 	}
 	for _, img := range airgapImages("v0.13.0") {
 		if f.r.inspect(img) == "" {
@@ -862,6 +951,86 @@ func TestImagesLoadTampered(t *testing.T) {
 	}
 }
 
+// OpenVEX в load (решение человека по O2 тестирования): подменённый,
+// подложенный рядом или пропавший OpenVEX и любой непроверяемый бандл
+// Sigstore — отказ до Docker и реестра администратора. Подпись удалена,
+// OpenVEX цел — проходит: cosign засчитывает подписью и аттестацию той же
+// identity (0059, AC-4 — «не осталось действительной подписи»).
+func TestImagesLoadVEX(t *testing.T) {
+	sign, vex := fakeRef{pred: signPredicate}, fakeRef{pred: openvexPredicate}
+	for name, c := range map[string]struct {
+		refs []fakeRef // бандлы backend
+		ok   bool
+		want string
+	}{
+		"VEX tampered":           {[]fakeRef{sign, {pred: openvexPredicate, bad: true}}, false, "1 of the 2 Sigstore bundles attached to"},
+		"VEX forged next to it":  {[]fakeRef{sign, vex, {pred: openvexPredicate, bad: true}}, false, "1 of the 3 Sigstore bundles"},
+		"VEX only, tampered":     {[]fakeRef{{pred: openvexPredicate, bad: true}}, false, "the signature of " + testRegAddr},
+		"VEX missing":            {[]fakeRef{sign}, false, "the archive has no OpenVEX of " + testRegAddr},
+		"signature tampered":     {[]fakeRef{{pred: signPredicate, bad: true}, vex}, false, "1 of the 2 Sigstore bundles"},
+		"forged bundle":          {[]fakeRef{sign, vex, {pred: signPredicate, bad: true}}, false, "1 of the 3 Sigstore bundles"},
+		"signature removed (O1)": {[]fakeRef{vex}, true, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, p := loadSetup(t, nil)
+			f.r.refs["sdlc-pipeline-backend"] = c.refs
+			code := f.images("load", p, "--registry", "reg.example/cadence")
+			if c.ok {
+				if code != 0 {
+					t.Errorf("code %d\n%s", code, f.errw)
+				}
+				f.clean()
+				return
+			}
+			if code != 1 || !strings.Contains(f.errw.String(), c.want) || !strings.Contains(f.errw.String(), nothingLoaded) {
+				t.Errorf("code %d\n%s", code, f.errw)
+			}
+			if len(f.r.local) != 0 {
+				t.Errorf("loaded: %v", f.r.local)
+			}
+			for dst := range f.r.pushed {
+				if strings.HasPrefix(dst, "reg.example") {
+					t.Errorf("pushed to the registry: %s", dst)
+				}
+			}
+			f.clean()
+		})
+	}
+	// Подменённый OpenVEX, который verify засчитал (бандлов столько же),
+	// ловит verify-attestation.
+	f, p := loadSetup(t, nil)
+	f.r.onRun = func(c cmdSpec) {
+		if len(c.args) > 0 && c.args[0] == "verify-attestation" {
+			f.r.refs["sdlc-pipeline-backend"] = []fakeRef{{pred: signPredicate}, {pred: openvexPredicate, bad: true}}
+		}
+	}
+	if code := f.images("load", p); code != 1 || !strings.Contains(f.errw.String(), "the OpenVEX of "+testRegAddr) || len(f.r.local) != 0 {
+		t.Errorf("verify-attestation: %d %v\n%s", code, f.r.local, f.errw)
+	}
+	f.clean()
+}
+
+// OpenVEX обязателен с той версии, с которой его прикладывает release.yml:
+// у frontend — с v0.13.0 (CLAB-234), раньше его отсутствие — не подмена.
+func TestArchiveVEXSince(t *testing.T) {
+	f, _ := loadSetup(t, nil)
+	f.r.refs["sdlc-pipeline-frontend"] = []fakeRef{{pred: signPredicate}}
+	ctx := context.Background()
+	v, err := newVerifier(ctx, f.e, "auto", nothingLoaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := "--host=reg=" + testRegAddr + ",tls=disabled"
+	target := testRegAddr + "/cadence-lab-tech/sdlc-pipeline-frontend@" + testFrontendPin
+	if err := verifyArchiveImage(ctx, f.e, v, host, "v0.12.0", "sdlc-pipeline-frontend", target, "root.json"); err != nil {
+		t.Errorf("v0.12.0: %v", err)
+	}
+	if err := verifyArchiveImage(ctx, f.e, v, host, "v0.13.0", "sdlc-pipeline-frontend", target, "root.json"); err == nil ||
+		!strings.Contains(err.Error(), "the archive has no OpenVEX of "+target) {
+		t.Errorf("v0.13.0: %v", err)
+	}
+}
+
 // AC-4, AC-8: режимы проверки, regctl, версия архива — отказы до действий.
 func TestImagesLoadModes(t *testing.T) {
 	// auto без cosign — одно предупреждение и загрузка.
@@ -940,28 +1109,113 @@ func TestImagesLoadInterrupted(t *testing.T) {
 	}
 }
 
+// AC-8, F1 тестирования: SIGINT во время docker run временного реестра.
+// Прерванный посреди запроса docker run демон дописывает уже после rm
+// уборки; поэтому docker load и docker run идут с detach (своя группа
+// процессов, без отмены) и доходят до конца, а уборка видит контейнер.
+// Без detach подставной Docker ведёт себя как настоящий: CLI оборван,
+// контейнер появляется позже.
+func TestImagesLoadInterruptedRun(t *testing.T) {
+	f, p := loadSetup(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var detached []string
+	f.r.onDockerRun = func(c cmdSpec) error {
+		cancel()
+		if !c.detach {
+			f.r.late[c.args[3]] = strings.TrimPrefix(c.args[5], airgapLabel+"=")
+			return exitErr(130)
+		}
+		f.r.containers[c.args[3]] = strings.TrimPrefix(c.args[5], airgapLabel+"=")
+		return nil
+	}
+	f.r.onRun = func(c cmdSpec) {
+		if c.detach {
+			detached = append(detached, c.String())
+		}
+	}
+	if code := runServer(ctx, f.e, []string{"images", "load", p}); code != 1 {
+		t.Errorf("code %d\n%s", code, f.errw)
+	}
+	f.clean()
+	if len(f.r.local) != 0 {
+		t.Errorf("left in Docker: %v", f.r.local)
+	}
+	for _, want := range []string{"docker load -q -i ", "docker run -d --name clab-images-load-", "docker rm -f -v clab-images-load-", "docker rmi " + airgapRegistryName} {
+		found := false
+		for _, d := range detached {
+			found = found || strings.HasPrefix(d, want)
+		}
+		if !found {
+			t.Errorf("%s is not detached: %v", want, detached)
+		}
+	}
+	if len(f.r.callsWith("regctl image copy")) != 0 {
+		t.Error("copied after the interruption")
+	}
+}
+
+// docker run не дошёл до успеха, а контейнер появился у демона после rm —
+// уборка находит его по метке и убирает с томом.
+func TestAirgapRegistryLateContainer(t *testing.T) {
+	f, p := loadSetup(t, nil)
+	f.r.onDockerRun = func(c cmdSpec) error {
+		f.r.late[c.args[3]] = strings.TrimPrefix(c.args[5], airgapLabel+"=")
+		return exitErr(1)
+	}
+	if code := f.images("load", p); code != 1 || !strings.Contains(f.errw.String(), "docker could not start the temporary registry") {
+		t.Errorf("code %d\n%s", code, f.errw)
+	}
+	f.clean()
+	if rm := f.r.callsWith("docker rm -f -v "); len(rm) != 2 {
+		t.Errorf("rm: %v", rm)
+	}
+	if len(f.r.local) != 0 {
+		t.Errorf("left in Docker: %v", f.r.local)
+	}
+}
+
 // ── закрытый контур в install и upgrade (A4) ───────────────────────────────
 
-// pullImages: всё локально — без pull; часть — pull --policy missing;
-// ничего — прежний pull.
+// pullImages (решение человека по F2 тестирования, вариант б): образ с
+// pin, который уже здесь, не тянется; сторонний по тегу тянется всегда,
+// когда его реестр отвечает, а без ответа остаётся локальный; остальные
+// отсутствующие — pull --policy missing; ничего локально — прежний pull.
 func TestPullImagesLocal(t *testing.T) {
 	dir := installed(t, "v0.13.0", nil)
+	ours := "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.13.0@" + testBackendPin
+	pg := "pgvector/pgvector:pg17"
+	local := "localhost:5050/sdlc-pipeline-frontend:v0.13.0"
 	for name, c := range map[string]struct {
-		local []string
-		want  string
+		local   []string
+		down    bool
+		pulls   []string // docker compose pull и docker pull, по порядку
+		nothing bool     // «nothing to pull»
+		kept    bool     // предупреждение о неответивших реестрах
+		one     bool     // ...об одном
 	}{
-		"all":  {[]string{"a:1", "b:2"}, ""},
-		"some": {[]string{"a:1"}, "docker compose pull --quiet --policy missing"},
-		"none": {nil, "docker compose pull --quiet"},
+		"one kept":              {local: []string{ours, pg}, down: true, pulls: []string{"docker compose pull --quiet --policy missing"}, one: true},
+		"all, online":           {local: []string{ours, pg, local}, pulls: []string{"docker pull -q " + local, "docker pull -q " + pg}},
+		"all, offline":          {local: []string{ours, pg, local}, down: true, nothing: true, kept: true},
+		"pinned only, offline":  {local: []string{ours}, down: true, pulls: []string{"docker compose pull --quiet --policy missing"}},
+		"ours missing, online":  {local: []string{pg}, pulls: []string{"docker pull -q " + pg, "docker compose pull --quiet --policy missing"}},
+		"ours missing, offline": {local: []string{pg, local}, down: true, kept: true, pulls: []string{"docker compose pull --quiet --policy missing"}},
+		"none":                  {pulls: []string{"docker compose pull --quiet"}},
+		"none, offline":         {down: true, pulls: []string{"docker compose pull --quiet"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newImagesRunner()
-			r.composeImgs = "a:1\nb:2\na:1\n"
+			r.composeImgs = strings.Join([]string{ours, pg, local, pg}, "\n") + "\n"
 			for _, l := range c.local {
 				r.local[l] = "sha256:x"
 			}
-			e, out, _ := testEnv(t, dir, r.fakeRunner, nil)
+			e, out, errw := testEnv(t, dir, r.fakeRunner, nil)
 			e.run = r
+			var probes []string
+			e.reachable = func(_ context.Context, u string) bool {
+				probes = append(probes, u)
+				return !c.down
+			}
 			inst, err := openInstallation(e, dir)
 			if err != nil {
 				t.Fatal(err)
@@ -969,14 +1223,45 @@ func TestPullImagesLocal(t *testing.T) {
 			if err := inst.pullImages(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			pulls := r.callsWith("docker compose pull")
-			switch {
-			case c.want == "" && (len(pulls) != 0 || !strings.Contains(out.String(), "all 2 images are on this machine")):
-				t.Errorf("pulled: %v\n%s", pulls, out)
-			case c.want != "" && (len(pulls) != 1 || pulls[0] != c.want):
-				t.Errorf("pulls: %v", pulls)
+			var pulls []string
+			for _, call := range r.calls {
+				if strings.HasPrefix(call, "docker compose pull") || strings.HasPrefix(call, "docker pull") {
+					pulls = append(pulls, call)
+				}
+			}
+			if fmt.Sprint(pulls) != fmt.Sprint(c.pulls) {
+				t.Errorf("pulls: %v, want %v", pulls, c.pulls)
+			}
+			if got := strings.Contains(out.String(), "images are on this machine: nothing to pull"); got != c.nothing {
+				t.Errorf("nothing to pull: %v\n%s", got, out)
+			}
+			if got := strings.Contains(errw.String(), "do not answer, the images on this machine are kept"); got != c.kept {
+				t.Errorf("kept: %v\n%s", got, errw)
+			}
+			if got := strings.Contains(errw.String(), "! "+pg+": its registry does not answer, the image on this machine is kept"); got != c.one {
+				t.Errorf("one kept: %v\n%s", got, errw)
+			}
+			for _, p := range probes {
+				if p != "https://registry-1.docker.io/v2/" && p != "http://localhost:5050/v2/" {
+					t.Errorf("probe %s", p)
+				}
 			}
 		})
+	}
+}
+
+func TestRegistryProbe(t *testing.T) {
+	for ref, want := range map[string]string{
+		"pgvector/pgvector:pg17":                          "https://registry-1.docker.io/v2/",
+		"alpine:3":                                        "https://registry-1.docker.io/v2/",
+		"ghcr.io/cadence-lab-tech/x:v1":                   "https://ghcr.io/v2/",
+		"reg.corp.example:5443/cadence/x:v1":              "https://reg.corp.example:5443/v2/",
+		"localhost:5050/sdlc-pipeline-backend:v0.13.0":    "http://localhost:5050/v2/",
+		"127.0.0.1:5000/cadence/sdlc-pipeline-backend:v1": "http://127.0.0.1:5000/v2/",
+	} {
+		if got := registryProbe(ref); got != want {
+			t.Errorf("%s: %s, want %s", ref, got, want)
+		}
 	}
 }
 
