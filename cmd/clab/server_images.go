@@ -1008,10 +1008,13 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 	}
 
 	// --- 5. в Docker этой машины -----------------------------------------------------
-	var added []string
+	// temps — ссылки временного реестра, под которыми docker pull положил
+	// образ: docker rmi после tag убирает их, но Ctrl-C группе процессов
+	// обрывает и его, и тогда ссылку убирает undo.
+	var added, temps []string
 	undo := func() {
 		bg := context.WithoutCancel(ctx)
-		for _, ref := range added {
+		for _, ref := range append(added, temps...) {
 			_ = e.run.run(bg, cmdSpec{name: "docker", args: []string{"rmi", ref}, stdout: io.Discard, stderr: io.Discard})
 		}
 	}
@@ -1035,6 +1038,7 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 		}
 		src := reg.addr + "/" + img.r.path + "@" + img.digest
 		hadNamed := dockerImagePresent(ctx, e, named)
+		temps = append(temps, src)
 		var errb bytes.Buffer
 		if err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"pull", "-q", src}, stdout: io.Discard, stderr: &errb}); err != nil {
 			undo()

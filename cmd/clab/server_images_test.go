@@ -167,6 +167,11 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 	if r.onRun != nil {
 		r.onRun(c)
 	}
+	// Как exec.CommandContext: после отмены команда не запускается.
+	if err := ctx.Err(); err != nil {
+		r.record(c)
+		return err
+	}
 	if r.onCall != nil {
 		if err := r.onCall(c); err != nil {
 			r.record(c)
@@ -1173,7 +1178,9 @@ func TestImagesLoadForeignReferrers(t *testing.T) {
 func TestImagesLoadInterruptedAnywhere(t *testing.T) {
 	for _, point := range []string{"docker compose version", "docker info", "regctl version", "cosign verify-blob",
 		"docker version", "docker image inspect", "regctl image copy", "regctl manifest get", "regctl artifact list",
-		"cosign verify --offline", "cosign verify-attestation", "docker pull", "docker tag", "docker compose --project-directory", "cosign version", "regctl image digest"} {
+		"cosign verify --offline", "cosign verify-attestation", "docker pull", "docker tag", "docker compose --project-directory", "cosign version", "regctl image digest",
+		// Ctrl-C группе процессов обрывает и docker rmi ссылки временного реестра после tag.
+		"docker rmi " + testRegAddr} {
 		t.Run(point, func(t *testing.T) {
 			f, p := loadSetup(t, nil)
 			ctx, cancel := context.WithCancel(context.Background())
