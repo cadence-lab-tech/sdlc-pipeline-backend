@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -112,16 +114,82 @@ func plainRelPath(rel string) bool {
 }
 
 // secretSource — секреты так, как их видит скрипт пакета: .env поверх
-// окружения, файлы — из secrets/ установки.
-func (i *installation) secretSource() secrets.Source {
-	return secrets.Source{Getenv: i.get, Path: i.hostSecretPath}
+// окружения, файлы — из secrets/ установки (readSecretFile).
+func (i *installation) secretSource(ctx context.Context) secrets.Source {
+	return secrets.Source{Getenv: i.get, Path: i.hostSecretPath, Read: i.readSecretFile(ctx)}
+}
+
+// secretReaderImage — образ одноразового контейнера, который читает файл
+// secrets/, недоступный пользователю; тот же, что у архива тома blobs в
+// backup и restore.
+const secretReaderImage = "alpine:3"
+
+// readSecretFile — чтение файла secrets/ установки (путь — после
+// hostSecretPath) для secrets.Source.Read (CLAB-252). Сначала на этой
+// машине; файл, отданный сервису по admin.md («Secrets in files»: владелец
+// 65532, режим 400), даёт пользователю permission denied — тогда его читает
+// одноразовый контейнер от root: secrets/ только для чтения, без сети, без
+// лога демона (--log-driver none), путь отдельным аргументом cat, без shell.
+// Значение приходит из stdout в память и не попадает ни в аргументы, ни в
+// ошибки: в них путь и причины, на машине и в контейнере. Другие ошибки
+// (нет файла и т. п.) — как есть, без контейнера.
+func (i *installation) readSecretFile(ctx context.Context) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		read := i.e.readFile
+		if read == nil {
+			read = os.ReadFile
+		}
+		raw, hostErr := read(path)
+		if hostErr == nil || !errors.Is(hostErr, fs.ErrPermission) {
+			return raw, hostErr
+		}
+		dir, err := filepath.Abs(filepath.Join(i.dir, "secrets"))
+		if err != nil {
+			return nil, hostErr
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil || !plainRelPath(filepath.ToSlash(rel)) {
+			return nil, hostErr
+		}
+		var out, stderr bytes.Buffer
+		c := i.docker("run", "--rm", "--log-driver", "none", "--network", "none",
+			"-v", dir+":/s:ro", secretReaderImage, "cat", "/s/"+filepath.ToSlash(rel))
+		c.stdout, c.stderr = &out, &stderr
+		why := ""
+		if err := i.e.run.run(ctx, c); err != nil {
+			why = err.Error()
+			if msg := lastLine(stderr.String()); msg != "" {
+				why += ": " + msg
+			}
+		} else if strings.TrimRight(out.String(), "\r\n") == "" {
+			why = "it read nothing"
+		}
+		if why != "" {
+			return nil, fmt.Errorf("%v, and reading it with a one-off %s container failed (%s). "+
+				"Make the file readable to you (sudo chown $(id -u):65532 %s && sudo chmod 440 %s) "+
+				"or see docs/admin.md, \"Secrets in files\"",
+				hostErr, secretReaderImage, why, shellQuote(path), shellQuote(path))
+		}
+		return out.Bytes(), nil
+	}
+}
+
+// lastLine — последняя непустая строка вывода, не длиннее 300 байт: причина
+// отказа docker без простыни.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	l := strings.TrimSpace(lines[len(lines)-1])
+	if len(l) > 300 {
+		l = l[:300] + "…"
+	}
+	return l
 }
 
 // dbConn — lib.sh db_conn: адрес внешней базы без пароля и пароль — из
 // SDLC_DATABASE_URL, SDLC_DATABASE_URL_FILE или с SDLC_DATABASE_PASSWORD_FILE
 // (решение 0052).
-func (i *installation) dbConn() (safe, password string, err error) {
-	raw, err := i.secretSource().DatabaseURL()
+func (i *installation) dbConn(ctx context.Context) (safe, password string, err error) {
+	raw, err := i.secretSource(ctx).DatabaseURL()
 	if err != nil {
 		return "", "", err
 	}
@@ -225,7 +293,7 @@ func (i *installation) dbClient(password string, args ...string) cmdSpec {
 // dbClientCheck — lib.sh db_client_check: клиент бэкапа (libpq) подключается
 // тем же адресом, что и сервис.
 func (i *installation) dbClientCheck(ctx context.Context) error {
-	safe, password, err := i.dbConn()
+	safe, password, err := i.dbConn(ctx)
 	if err != nil {
 		fmt.Fprintf(i.e.errw, "✗ %v\n", err)
 		return err

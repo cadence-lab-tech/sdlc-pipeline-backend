@@ -192,3 +192,33 @@ func TestSourcePath(t *testing.T) {
 		t.Fatalf("%q %v", v, err)
 	}
 }
+
+// CLAB-252: Read читает файл по пути после Path; ошибка Read — с именем
+// переменной; Stat остаётся на этой машине (нет файла — без Read).
+func TestSourceRead(t *testing.T) {
+	host := writeFile(t, "")
+	var got []string
+	src := Source{
+		Getenv: envOf(map[string]string{"SDLC_ADMIN_TOKEN_FILE": "/secrets/admin_token"}),
+		Path:   func(string, string) (string, error) { return host, nil },
+		Read: func(p string) ([]byte, error) {
+			got = append(got, p)
+			return []byte(marker + "\r\n"), nil
+		},
+	}
+	if v, err := src.Value("SDLC_ADMIN_TOKEN"); err != nil || v != marker || len(got) != 1 || got[0] != host {
+		t.Fatalf("%q %v %v", v, err, got)
+	}
+
+	src.Read = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	if _, err := src.Value("SDLC_ADMIN_TOKEN"); err == nil || !strings.HasPrefix(err.Error(), "SDLC_ADMIN_TOKEN_FILE: ") {
+		t.Errorf("read error: %v", err)
+	}
+
+	got = nil
+	src.Read = func(p string) ([]byte, error) { got = append(got, p); return nil, nil }
+	src.Path = func(string, string) (string, error) { return filepath.Join(t.TempDir(), "missing"), nil }
+	if _, err := src.Value("SDLC_ADMIN_TOKEN"); err == nil || len(got) != 0 {
+		t.Errorf("missing file: %v, read %v", err, got)
+	}
+}
