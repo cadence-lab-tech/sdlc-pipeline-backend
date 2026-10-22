@@ -10,18 +10,26 @@ hooks:
         - type: command
           command: |
             # clab only with the task-token directory.
-            # Looks for clab called as a command — at the start, after ; & | ( ` {,
-            # environment variables and env; a path or a branch like clab/... does not count.
+            # Looks for a call as a command: bare clab, the clab of the package
+            # (clab-<os>-<arch>) and the scripts of the package (install.sh,
+            # upgrade.sh, backup.sh, restore.sh, get-cadence.sh) by any path —
+            # at the start, after ; & | ( ` {, environment variables and
+            # env/command/exec/time/nohup/sudo/sh/bash with flags. The scripts run
+            # clab and get the directory from the environment. A name as an
+            # argument (cat install.sh, git diff -- upgrade.sh, ls bin/clab-…),
+            # a path or a branch like clab/... does not count.
+            # Known and kept: sh -n install.sh is refused too, and so is | inside
+            # quotes (grep 'a|clab x'): a safety net, not a shell parser.
             # Newline and tab arrive from JSON as \n and \t.
             # Claude Code runs the hook only when the project folder is trusted;
             # /clab-run checks that it is alive with a probe before the first run.
             in=$(cat)
             sep='(^|"command": *"|[;&|(`{]|\\[nt])'
-            pre='[[:space:]]*((env|command|exec|time|nohup)([[:space:]]+-[A-Za-z]+([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)?)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*[[:space:]]+)*'
-            bin='([^[:space:];&|"(]*/)?clab([[:space:];&|)"]|\\[nt]|$)'
+            pre='[[:space:]]*((env|command|exec|time|nohup|sudo|sh|bash)([[:space:]]+-[A-Za-z]+([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)?)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*[[:space:]]+)*'
+            bin='([^[:space:];&|"(]*/)?(clab(-[a-z0-9]+-[a-z0-9]+)?|(install|upgrade|backup|restore|get-cadence)\.sh)([[:space:];&|)"]|\\[nt]|$)'
             printf '%s' "$in" | grep -Eq "$sep$pre$bin" || exit 0
             case "$in" in *CLAB_CONFIG_DIR=*) case "$in" in *"-u SDLC_TOKEN"*) exit 0 ;; esac ;; esac
-            echo 'clab without the task-token directory. Every clab call needs the prefix from the prompt: env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab ...' >&2
+            echo 'clab without the task-token directory (bare clab, the clab of the package or a script of the package). Every such call needs the prefix from the prompt: env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=<dir> <command>' >&2
             exit 2
 ---
 
