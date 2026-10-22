@@ -151,10 +151,15 @@ jobs:
         env:
           TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
         run: |
+          ssh -p "${{ vars.SSH_PORT || 22 }}" "$TARGET" "mkdir -p /opt/sdlc/postgres"
           scp -P "${{ vars.SSH_PORT || 22 }}" \
             deploy/docker-compose.yml deploy/Caddyfile \
             deploy/deploy.sh deploy/backup.sh \
             "$TARGET:/opt/sdlc/"
+          # Скрипт переезда базы на новую мажорную версию PostgreSQL: его
+          # монтирует compose (CLAB-237).
+          scp -P "${{ vars.SSH_PORT || 22 }}" \
+            deploy/postgres/major-upgrade.sh "$TARGET:/opt/sdlc/postgres/"
           ssh -p "${{ vars.SSH_PORT || 22 }}" "$TARGET" \
             "chmod +x /opt/sdlc/deploy.sh /opt/sdlc/backup.sh"
 

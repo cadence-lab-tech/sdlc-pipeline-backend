@@ -18,7 +18,7 @@ Go-сервис Cadence Lab (Clab): REST для UI, MCP-сервер для ло
 ## Стек
 
 Go 1.26 (не ниже 1.25 требует MCP SDK, 1.26 — исправления x/net и
-x/crypto), Gin, pgx (без ORM), PostgreSQL 17 + pgvector, эмбеддинги
+x/crypto), Gin, pgx (без ORM), PostgreSQL 18 + pgvector, эмбеддинги
 размерности 1024: Voyage `voyage-code-3` или любой OpenAI-совместимый
 эндпоинт, провайдер выбирает инстанс
 ([решение 0008](../docs/decisions/0008-voyage-embeddings.md)).
