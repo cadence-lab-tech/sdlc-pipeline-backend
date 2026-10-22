@@ -35,7 +35,7 @@ jobs:
       # Тот же образ, что в dev/docker-compose.yml: миграциям нужны pgcrypto
       # и vector. База выделенная — тест сносит в ней схему public целиком.
       postgres:
-        image: pgvector/pgvector:pg17
+        image: pgvector/pgvector:pg18-trixie
         env:
           POSTGRES_USER: sdlc
           POSTGRES_PASSWORD: sdlc

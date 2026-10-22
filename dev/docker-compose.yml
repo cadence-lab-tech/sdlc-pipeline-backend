@@ -18,7 +18,9 @@ name: sdlc-pipeline
 
 services:
   postgres:
-    image: pgvector/pgvector:pg17
+    # PostgreSQL 18 на Debian 13 — тот же образ, что в пакете self-hosted и
+    # на нашем инстансе (CLAB-237).
+    image: pgvector/pgvector:pg18-trixie
     container_name: ${DEV_STACK_PREFIX:-sdlc}-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sdlc}
@@ -28,7 +30,12 @@ services:
       # 55432, а не 5432: у разработчика обычно уже занят локальным Postgres.
       - "${POSTGRES_PORT:-55432}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Образы 18+ держат данные в /var/lib/postgresql/18/docker и не
+      # стартуют с томом на /var/lib/postgresql/data. Том новый: данные dev
+      # одноразовые, прежний pgdata (17) не подхватывается: демо сеется
+      # заново на пустой базе. Старый том стека задачи убирает
+      # dev/stack.sh down, основного — docker volume rm sdlc-pipeline_pgdata.
+      - postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdlc} -d ${POSTGRES_DB:-sdlc}"]
       interval: 5s
@@ -309,7 +316,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  pgdata:
+  postgres:
   # Вынесенное содержимое артефактов и документов; общий для api и воркера.
   blobs:
   minio:

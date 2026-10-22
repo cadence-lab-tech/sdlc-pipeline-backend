@@ -62,6 +62,13 @@ type fakeRunner struct {
 	cosignVersion string
 	cosignBad     string
 	ghcrDown      bool
+
+	// Новая мажорная версия встроенной базы (CLAB-237): образ postgres в
+	// compose новой версии (пусто — тот же pg17), ответ psql о размере баз
+	// и df тома.
+	newPostgresImage string
+	dbSize           string
+	df               string
 }
 
 // exitErr — код выхода внешней команды, как у *exec.ExitError.
@@ -157,6 +164,19 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		}
 		gzipFile(filepath.Join(mountOf(c.args), f.s3GetName), "-- dump from the bucket\n")
 		write(f.s3GetName + "\n")
+		return nil
+	case strings.HasPrefix(args, "compose --project-directory ") && strings.HasSuffix(args, " config --format json postgres"):
+		image := f.newPostgresImage
+		if image == "" {
+			image = "pgvector/pgvector:pg17"
+		}
+		write(`{"name": "cadence", "services": {"postgres": {"image": "` + image + `"}}}`)
+		return nil
+	case strings.HasPrefix(args, "compose exec -T postgres sh -c psql -X -At "):
+		write(f.dbSize)
+		return nil
+	case strings.HasPrefix(args, "compose exec -T postgres df -Pk "):
+		write(f.df)
 		return nil
 	case strings.HasPrefix(args, "compose config --format json "):
 		// Как настоящий compose: с сервисами, от которых этот зависит.
@@ -1245,6 +1265,99 @@ func TestServerUpgrade(t *testing.T) {
 // isManifestOf — эталон в каталоге описывает его VERSION (для теста).
 func (e *serverEnv) isManifestOf(dir string) bool {
 	return (&installation{e: e, dir: dir}).manifestOfThisVersion()
+}
+
+// CLAB-237: образ postgres новой версии — новая мажорная версия PostgreSQL.
+// Апгрейд предупреждает о переезде базы до бэкапа и отказывает, если места
+// на диске томов меньше размера базы; без смены образа — ни предупреждения,
+// ни замеров.
+func TestServerUpgradePostgresMove(t *testing.T) {
+	const dfHead = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n"
+	moves := "moves the database"
+
+	f := upgradeSetup(t, nil)
+	if code := f.upgrade("v0.6.1"); code != 0 {
+		t.Fatalf("upgrade without a new PostgreSQL: %s", f.errw)
+	}
+	if strings.Contains(f.errw.String(), moves) || f.r.called("docker compose exec -T postgres sh -c psql") ||
+		f.r.called("docker compose exec -T postgres df") {
+		t.Errorf("the same PostgreSQL: no warning and no measuring, got %s %v", f.errw, f.r.calls)
+	}
+
+	// Места меньше, чем весит база: отказ до бэкапа, ничего не изменилось.
+	f = upgradeSetup(t, nil)
+	f.r.newPostgresImage = "pgvector/pgvector:pg18-trixie"
+	f.r.dbSize = "3221225472\n"
+	f.r.df = dfHead + "/dev/vda1         41152736 40104160   1048576      98% /var/lib/postgresql/data\n"
+	before := tree(t, f.dir)
+	if code := f.upgrade("v0.6.1"); code == 0 {
+		t.Fatal("must refuse when the disk has less free space than the database")
+	}
+	errw := f.errw.String()
+	for _, want := range []string{
+		"the upgrade to v0.6.1 moves the database (3.0G) from PostgreSQL 17 to PostgreSQL 18",
+		"the volume pgdata stays as it is, for a rollback (docs/admin.md, \"PostgreSQL 18\")",
+		"the move to PostgreSQL 18 needs about 3.0G free on the disk of the Docker volumes",
+		"and it has 1.0G", "Nothing has changed.",
+	} {
+		if !strings.Contains(errw, want) {
+			t.Errorf("refusal lacks %q:\n%s", want, errw)
+		}
+	}
+	if f.r.called("docker compose exec -T postgres pg_dump") || tree(t, f.dir) != before || f.version(t) != "v0.6.0" {
+		t.Error("the refusal must come before the backup and change nothing")
+	}
+
+	// Места хватает: предупреждение, затем апгрейд как обычно.
+	f = upgradeSetup(t, nil)
+	f.r.newPostgresImage = "pgvector/pgvector:pg18-trixie@sha256:" + strings.Repeat("a", 64)
+	f.r.dbSize = "3221225472\n"
+	f.r.df = dfHead + "/dev/vda1         41152736 30666976  10485760      75% /var/lib/postgresql/data\n"
+	if code := f.upgrade("v0.6.1"); code != 0 {
+		t.Fatalf("upgrade with room for the move: %s", f.errw)
+	}
+	if !strings.Contains(f.errw.String(), "moves the database (3.0G) from PostgreSQL 17 to PostgreSQL 18") ||
+		!strings.Contains(f.out.String(), "the disk of the volumes has 10G free for the move") || f.version(t) != "v0.6.1" {
+		t.Errorf("warning and upgrade: %s %s", f.errw, f.out)
+	}
+	if !f.r.called("docker compose exec -T postgres pg_dump") {
+		t.Error("the backup must follow the check")
+	}
+
+	// Размер или место не узнать: предупреждение, апгрейд идёт — переезд
+	// сам остановится без места, и апгрейд напечатает откат.
+	f = upgradeSetup(t, nil)
+	f.r.newPostgresImage = "pgvector/pgvector:pg18-trixie"
+	if code := f.upgrade("v0.6.1"); code != 0 {
+		t.Fatalf("upgrade without the measures: %s", f.errw)
+	}
+	if !strings.Contains(f.errw.String(), "moves the database from PostgreSQL 17 to PostgreSQL 18") ||
+		!strings.Contains(f.errw.String(), "could not tell the size of the database or the free disk") {
+		t.Errorf("warning without the measures: %s", f.errw)
+	}
+
+	// Внешняя база: postgres нет, переезда нет.
+	f = upgradeSetup(t, map[string]string{"CADENCE_DB": "external"})
+	f.r.newPostgresImage = "pgvector/pgvector:pg18-trixie"
+	f.upgrade("v0.6.1")
+	if strings.Contains(f.errw.String(), moves) {
+		t.Errorf("an external database moves nothing: %s", f.errw)
+	}
+}
+
+func TestPgMajor(t *testing.T) {
+	for image, want := range map[string]int{
+		"pgvector/pgvector:pg17":        17,
+		"pgvector/pgvector:pg18-trixie": 18,
+		"mirror.example.com:5000/pgvector/pgvector:pg18-trixie@sha256:" + strings.Repeat("0", 64): 18,
+		"postgres:17":                  0,
+		"pgvector/pgvector:0.8.1-pg18": 0,
+		"":                             0,
+	} {
+		if got := pgMajor(image); got != want {
+			t.Errorf("pgMajor(%q) = %d, want %d", image, got, want)
+		}
+	}
 }
 
 // Правленый файл пакета — отказ до бэкапа со списком; --force — замена и

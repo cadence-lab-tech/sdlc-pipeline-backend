@@ -404,6 +404,9 @@ down)
     load_or_create "$key"
     stack_env
     dc down -v
+    # Том PostgreSQL 17 стека, поднятого до перехода на 18 (CLAB-237): compose
+    # его больше не объявляет, и down -v его не видит.
+    docker volume rm "${PROJECT}_pgdata" >/dev/null 2>&1 || true
     rm -f "$(state_file "$KEY")"
     echo "стек задачи $KEY снесён вместе с данными"
     ;;
