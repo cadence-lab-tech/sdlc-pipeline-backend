@@ -149,7 +149,7 @@ func (i *installation) backup(ctx context.Context) (string, error) {
 	if i.externalDB() {
 		// Файл адреса или пароля читается до дампа: путь вне secrets/ или
 		// нечитаемый файл — отказ, а не пустой дамп.
-		if _, _, err := i.dbConn(); err != nil {
+		if _, _, err := i.dbConn(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -217,7 +217,7 @@ func (i *installation) dumpTo(ctx context.Context, dump string) error {
 	if i.externalDB() {
 		// Адрес до файла дампа: файл секрета, который не читается, —
 		// отказ без пустого дампа.
-		safe, password, err := i.dbConn()
+		safe, password, err := i.dbConn(ctx)
 		if err != nil {
 			return err
 		}
