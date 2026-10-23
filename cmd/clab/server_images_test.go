@@ -221,6 +221,9 @@ func (r *imagesRunner) run(ctx context.Context, c cmdSpec) error {
 					good = append(good, `{"critical":{"type":"`+ref.pred+`"}}`)
 				}
 			}
+			if len(r.regRefs[refRepo(target)]) == 0 && c.args[0] == "verify" {
+				return cosignNoSignaturesFail(c)
+			}
 			if len(good) == 0 {
 				return fail("Error: no matching attestations: none of the expected identities matched")
 			}
