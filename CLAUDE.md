@@ -730,5 +730,16 @@ CLI не знает.
 `.github/workflows/deploy.yml` собирает образ и выкладывает его. Правила
 работы с продом — `devops/CLAUDE.md` в той же локальной папке.
 
+CI: `ci.yml` — обязательная проверка `backend` на каждом PR и push в main,
+её ждёт `deploy.yml`. `package.yml` (CLAB-253) — проверка пакета self-hosted
+с clab ветки: только на PR, который меняет `cmd/clab/server*` и то, на что
+`clab server` опирается (`main.go`, `client.go`, `output.go`, `version.go`,
+`proc_unix.go`, `internal/secrets`), и вручную. Собирает clab под четыре
+платформы с версией `VERSION` пакета и гоняет `ci/check-stack.sh` пакета с
+`CHECK_CLAB_DIR` на опубликованных образах `VERSION` в обоих режимах
+секретов (`.env` и `CHECK_SECRETS=files`); пакет — ветка self-hosted с тем
+же именем, иначе main. Обязательной проверкой не стоит: из-за фильтра путей
+PR без этих путей висел бы в «expected». Почему так — шапка workflow.
+
 Не написано: символьный граф через tree-sitter и `code_edges` — требует cgo,
 а сборка статическая.
