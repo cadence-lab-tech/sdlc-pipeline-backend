@@ -231,7 +231,7 @@ func (i *installation) waitReady(ctx context.Context, timeout int) error {
 			return errNotReady
 		}
 		if i.apiHealthy(ctx) && i.uiAnswers(ctx) {
-			err, checked := i.routesAnswer(ctx)
+			rerr, checked := i.routesAnswer(ctx)
 			if !checked && !warned {
 				warned = true
 				also := ""
@@ -240,10 +240,10 @@ func (i *installation) waitReady(ctx context.Context, timeout int) error {
 				}
 				i.e.warn("the routes of Caddy are not checked: its admin API (%s in the caddy container) does not answer, as with 'admin off' in your own Caddyfile; readiness is the direct probes only%s", caddyUpstreamsURL, also)
 			}
-			if err == nil {
+			if rerr == nil {
 				return nil
 			}
-			routeErr = err
+			routeErr = rerr
 			if fails++; fails >= routeFailSteps {
 				return routeErr
 			}
