@@ -40,7 +40,9 @@ func (s *Server) registerCatalogTools() {
 		s.addRepository)
 	add(s, "sdlc_put_role",
 		"Завести роль специалиста или добавить версию инструкции существующей. "+
-			"Версия иммутабельна: правка — всегда новая версия.",
+			"Версия иммутабельна: правка — всегда новая версия. model_level — уровень модели "+
+			"роли по умолчанию (low, medium, high); уровень задачи и этапа его перекрывают. "+
+			"model_hint устарел: строка модели для раннера прежних версий, вместо него — model_level.",
 		s.putRole)
 	add(s, "sdlc_get_role",
 		"Роль с последней версией инструкции и контрактом вывода.",
@@ -170,7 +172,8 @@ type putRoleInput struct {
 	InputKinds     []string        `json:"input_kinds,omitempty" jsonschema:"артефакты предыдущих этапов на вход"`
 	OutputContract json.RawMessage `json:"output_contract,omitempty" jsonschema:"[{kind,title,format,required,schema}]"`
 	ToolPolicy     json.RawMessage `json:"tool_policy,omitempty"`
-	ModelHint      string          `json:"model_hint,omitempty"`
+	ModelLevel     string          `json:"model_level,omitempty" jsonschema:"уровень модели роли по умолчанию: low, medium, high; пусто — не задан"`
+	ModelHint      string          `json:"model_hint,omitempty" jsonschema:"устарел (решение 0060): строка модели для раннера прежних версий; используйте model_level"`
 	RepoScope      []string        `json:"repo_scope,omitempty"`
 	ContextBudget  json.RawMessage `json:"context_budget,omitempty"`
 	Changelog      string          `json:"changelog,omitempty" jsonschema:"что изменилось относительно прошлой версии"`
@@ -186,8 +189,9 @@ func (s *Server) putRole(ctx context.Context, in putRoleInput) (*sdk.CallToolRes
 		Roles: []workflow.BundleRole{{
 			Key: in.Key, Name: in.Name, Summary: in.Summary, Instructions: in.Instructions,
 			InputKinds: in.InputKinds, OutputContract: in.OutputContract, ToolPolicy: in.ToolPolicy,
-			ModelHint: in.ModelHint, RepoScope: in.RepoScope, ContextBudget: in.ContextBudget,
-			Changelog: in.Changelog,
+			ModelHint: in.ModelHint, ModelLevel: in.ModelLevel, RepoScope: in.RepoScope,
+			ContextBudget: in.ContextBudget,
+			Changelog:     in.Changelog,
 		}},
 	}, false)
 	if err != nil {

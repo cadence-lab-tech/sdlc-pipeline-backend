@@ -71,10 +71,14 @@ type BundleRole struct {
 	InputKinds     []string        `json:"input_kinds,omitempty"`
 	OutputContract json.RawMessage `json:"output_contract,omitempty"`
 	ToolPolicy     json.RawMessage `json:"tool_policy,omitempty"`
-	ModelHint      string          `json:"model_hint,omitempty"`
-	RepoScope      []string        `json:"repo_scope,omitempty"`
-	ContextBudget  json.RawMessage `json:"context_budget,omitempty"`
-	Changelog      string          `json:"changelog,omitempty"`
+	// Устарел (решение 0060): строка модели для раннера прежних версий.
+	ModelHint string `json:"model_hint,omitempty"`
+	// Уровень модели роли по умолчанию: low | medium | high. Сервер прежней
+	// версии поле не знает и теряет молча; связка без него — «уровня нет».
+	ModelLevel    string          `json:"model_level,omitempty"`
+	RepoScope     []string        `json:"repo_scope,omitempty"`
+	ContextBudget json.RawMessage `json:"context_budget,omitempty"`
+	Changelog     string          `json:"changelog,omitempty"`
 }
 
 type BundleDocument struct {
@@ -253,10 +257,15 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 	if r.Name == "" {
 		r.Name = r.Key
 	}
+	// Проверка до сравнения с последней версией: неверный уровень — отказ
+	// всей связки, в том числе в dry_run, а не «unchanged» по совпадению.
+	if err := checkModelLevel(r.ModelLevel, "роль "+r.Key+": model_level"); err != nil {
+		return ImportEntry{}, err
+	}
 	version := RoleVersionInput{
 		Instructions: r.Instructions, InputKinds: r.InputKinds,
 		OutputContract: r.OutputContract, ToolPolicy: r.ToolPolicy,
-		ModelHint: optional(r.ModelHint), RepoScope: r.RepoScope,
+		ModelHint: optional(r.ModelHint), ModelLevel: optional(r.ModelLevel), RepoScope: r.RepoScope,
 		ContextBudget: r.ContextBudget, Changelog: optional(r.Changelog),
 	}
 
@@ -375,7 +384,8 @@ func sameVersion(have domain.RoleVersion, want RoleVersionInput) bool {
 	if !eqStrings(have.InputKinds, want.InputKinds) || !eqStrings(have.RepoScope, want.RepoScope) {
 		return false
 	}
-	if !eqOptional(have.ModelHint, deref(want.ModelHint)) {
+	if !eqOptional(have.ModelHint, deref(want.ModelHint)) ||
+		!eqOptional(have.ModelLevel, deref(want.ModelLevel)) {
 		return false
 	}
 	return eqJSON(have.OutputContract, want.OutputContract, `[]`) &&
@@ -559,8 +569,8 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 			Key: r.Key, Name: r.Name, Summary: deref(r.Summary),
 			Instructions: v.Instructions, InputKinds: v.InputKinds,
 			OutputContract: v.OutputContract, ToolPolicy: v.ToolPolicy,
-			ModelHint: deref(v.ModelHint), RepoScope: v.RepoScope,
-			ContextBudget: v.ContextBudget,
+			ModelHint: deref(v.ModelHint), ModelLevel: deref(v.ModelLevel),
+			RepoScope: v.RepoScope, ContextBudget: v.ContextBudget,
 		})
 	}
 

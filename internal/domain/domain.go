@@ -393,11 +393,15 @@ type RoleVersion struct {
 	InputKinds     []string        `json:"input_kinds"`
 	OutputContract json.RawMessage `json:"output_contract"`
 	ToolPolicy     json.RawMessage `json:"tool_policy"`
-	ModelHint      *string         `json:"model_hint,omitempty"`
-	RepoScope      []string        `json:"repo_scope"`
-	ContextBudget  json.RawMessage `json:"context_budget"`
-	Changelog      *string         `json:"changelog,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	// Устарел (решение 0060): строка модели, её читает только раннер прежних
+	// версий. Рекомендация теперь — ModelLevel.
+	ModelHint *string `json:"model_hint,omitempty"`
+	// Уровень модели роли по умолчанию: low | medium | high, nil — не задан.
+	ModelLevel    *string         `json:"model_level,omitempty"`
+	RepoScope     []string        `json:"repo_scope"`
+	ContextBudget json.RawMessage `json:"context_budget"`
+	Changelog     *string         `json:"changelog,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 type Task struct {
@@ -425,11 +429,16 @@ type Task struct {
 	Labels         []string        `json:"labels"`
 	// Свойства задачи (решение 0015). Системное multi_repo движок читает сам,
 	// остальные отдаются агенту как контекст.
-	Properties   json.RawMessage  `json:"properties"`
-	Repositories []TaskRepository `json:"repositories,omitempty"`
-	CreatedAt    time.Time        `json:"created_at"`
-	UpdatedAt    time.Time        `json:"updated_at"`
-	ClosedAt     *time.Time       `json:"closed_at,omitempty"`
+	Properties json.RawMessage `json:"properties"`
+	// Рекомендованный уровень модели задачи и её этапов (решение 0060):
+	// уровень этапа перекрывает уровень задачи, тот — уровень роли.
+	// StageSettings — объект «ключ статуса → объект настроек этапа».
+	ModelLevel    *string          `json:"model_level"`
+	StageSettings json.RawMessage  `json:"stage_settings"`
+	Repositories  []TaskRepository `json:"repositories,omitempty"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+	ClosedAt      *time.Time       `json:"closed_at,omitempty"`
 }
 
 // DefaultTaskType — тип задачи, если она его не называет. Набор типов
@@ -492,6 +501,29 @@ func ValidTaskLinkRel(rel string) bool {
 // (migrations/000003_tasks.up.sql). Перечень нужен наружу: правка приоритета
 // обязана отбиваться понятной ошибкой раньше, чем ошибкой базы.
 var TaskPriorities = []string{"low", "normal", "high", "urgent"}
+
+// ModelLevels — уровни модели, которые допускает CHECK в схеме
+// (migrations/000028_model_level.up.sql). Сервер моделей не знает: модель под
+// уровень выбирает исполнитель (решение 0060).
+var ModelLevels = []string{"low", "medium", "high"}
+
+// Источники снимка уровня на прогоне — по порядку разрешения: этап задачи,
+// задача, версия роли прогона, ничего.
+const (
+	ModelLevelSourceStage = "stage"
+	ModelLevelSourceTask  = "task"
+	ModelLevelSourceRole  = "role"
+	ModelLevelSourceNone  = "none"
+)
+
+func ValidModelLevel(level string) bool {
+	for _, l := range ModelLevels {
+		if l == level {
+			return true
+		}
+	}
+	return false
+}
 
 func ValidTaskPriority(priority string) bool {
 	for _, p := range TaskPriorities {
@@ -570,6 +602,10 @@ type StageRun struct {
 	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 	Outcome           *string    `json:"outcome,omitempty"`
 	Summary           *string    `json:"summary,omitempty"`
+	// Снимок рекомендованного уровня модели при захвате (решение 0060). У
+	// прогонов, заведённых до него, оба nil — «снимка не было», не none.
+	ModelLevel       *string `json:"model_level,omitempty"`
+	ModelLevelSource *string `json:"model_level_source,omitempty"`
 }
 
 // LeaseHeld — держит ли прогон живую аренду на момент now.

@@ -44,8 +44,11 @@ type RoleView struct {
 	InputKinds     []string        `json:"input_kinds"`
 	OutputContract json.RawMessage `json:"output_contract"`
 	ToolPolicy     json.RawMessage `json:"tool_policy"`
-	ModelHint      *string         `json:"model_hint,omitempty"`
-	ContextBudget  json.RawMessage `json:"context_budget,omitempty"`
+	// Уровень модели версии роли по умолчанию (решение 0060).
+	ModelLevel *string `json:"model_level"`
+	// Устарел: строка модели для clab и раннера прежних версий.
+	ModelHint     *string         `json:"model_hint,omitempty"`
+	ContextBudget json.RawMessage `json:"context_budget,omitempty"`
 }
 
 type RepositoryView struct {
@@ -130,6 +133,10 @@ type TaskView struct {
 	// что работает над куском эпика (решение 0024).
 	Type   string  `json:"type"`
 	Parent *string `json:"parent,omitempty"`
+	// Уровень модели задачи и настройки этапов (решение 0060) — постановка,
+	// по которой разрешён execution.
+	ModelLevel    *string         `json:"model_level"`
+	StageSettings json.RawMessage `json:"stage_settings"`
 }
 
 // StageView — состояние прогона для агента.
@@ -151,6 +158,10 @@ type ClaimResult struct {
 	Context    ClaimContext     `json:"context"`
 	GatesAhead []TransitionSpec `json:"gates_ahead"`
 	Lease      *Lease           `json:"lease,omitempty"`
+	// Рекомендованный уровень модели прогона и его источник (решение 0060):
+	// снимок при захвате. Отдаётся всегда — по его отсутствию клиент узнаёт
+	// сервер прежней версии.
+	Execution Execution `json:"execution"`
 	// Напоминание отчитаться о стоимости прогона (решение 0026): сервер её не
 	// измеряет, а без отчёта прогон стоит «неизвестно».
 	UsageReport string `json:"usage_report,omitempty"`
@@ -185,9 +196,10 @@ var (
 	// Служебные поля — не текст людей и агентов, а состояние движка; в
 	// ответ они не выносятся, перечень нужен тесту и MCP_CONTRACT.md.
 	BoundaryService = []string{
-		"stage_run_id", "kind", "lease", "usage_report", "boundary",
+		"stage_run_id", "kind", "lease", "usage_report", "boundary", "execution",
 		"task.key", "task.status", "task.status_name", "task.attempt", "task.priority",
-		"task.type", "task.parent", "context.baselines",
+		"task.type", "task.parent", "task.model_level", "task.stage_settings",
+		"context.baselines",
 	}
 )
 
@@ -263,7 +275,8 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		// Иначе (аренды не было, протухла, снята) токены прошлой аренды
 		// гаснут: без этого они ожили бы вместе с новой арендой того же
 		// принципала, не дождавшись воркера.
-		if !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now())) {
+		newLease := !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now()))
+		if newLease {
 			if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
 				return err
 			}
@@ -273,6 +286,15 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		run, err = e.store.ClaimStageRun(ctx, tx, run.ID, actor, sessionRef, expires)
 		if err != nil {
 			return err
+		}
+		// Снимок уровня — по тому же правилу «новая аренда»: новый держатель
+		// получает текущую рекомендацию, подтверждение живой аренды — ту, с
+		// которой его запустили. Прогону, взятому до миграции, снимок пишется
+		// один раз, при подтверждении: иначе он так и остался бы без него.
+		if newLease || run.ModelLevelSource == nil {
+			if err := e.snapshotExecution(ctx, tx, task, &run); err != nil {
+				return err
+			}
 		}
 		if err := e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventStageClaimed, actor,
 			map[string]any{
@@ -522,16 +544,20 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 		Priority: task.Priority, Labels: task.Labels,
 		ExternalRef: task.ExternalRef, Properties: task.Properties,
 		Type: task.Type(), Parent: task.ParentKey,
+		ModelLevel: task.ModelLevel, StageSettings: task.StageSettings,
 	}
 
 	var err error
+	var roleLevel *string
 	if run.RoleVersionID != nil {
 		role, err := e.roleView(ctx, q, *run.RoleVersionID)
 		if err != nil {
 			return out, err
 		}
 		out.Role = role
+		roleLevel = role.ModelLevel
 	}
+	out.Execution = runExecution(task, run, roleLevel)
 
 	if out.Context, err = e.claimContext(ctx, q, task, run, out.Role); err != nil {
 		return out, err
@@ -555,8 +581,29 @@ func (e *Engine) roleView(ctx context.Context, q postgres.Querier, roleVersionID
 	return &RoleView{
 		Key: key, Name: name, Version: rv.Version, Instructions: rv.Instructions,
 		InputKinds: rv.InputKinds, OutputContract: rv.OutputContract,
-		ToolPolicy: rv.ToolPolicy, ModelHint: rv.ModelHint, ContextBudget: rv.ContextBudget,
+		ToolPolicy: rv.ToolPolicy, ModelLevel: rv.ModelLevel, ModelHint: rv.ModelHint,
+		ContextBudget: rv.ContextBudget,
 	}, nil
+}
+
+// snapshotExecution разрешает уровень прогона по текущим уровням этапа,
+// задачи и версии роли прогона и пишет его на прогон.
+func (e *Engine) snapshotExecution(ctx context.Context, tx pgx.Tx, task domain.Task, run *domain.StageRun) error {
+	var roleLevel *string
+	if run.RoleVersionID != nil {
+		rv, err := e.store.GetRoleVersion(ctx, tx, *run.RoleVersionID)
+		if err != nil {
+			return err
+		}
+		roleLevel = rv.ModelLevel
+	}
+	exec := resolveExecution(task, *run, roleLevel)
+	if err := e.store.SnapshotModelLevel(ctx, tx, run.ID, exec.ModelLevel, exec.ModelLevelSource); err != nil {
+		return err
+	}
+	source := exec.ModelLevelSource
+	run.ModelLevel, run.ModelLevelSource = exec.ModelLevel, &source
+	return nil
 }
 
 func (e *Engine) claimContext(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun, role *RoleView) (ClaimContext, error) {
