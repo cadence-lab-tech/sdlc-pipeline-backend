@@ -107,3 +107,76 @@ func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (dom
 	}
 	return out, nil
 }
+
+// RunUsageByTask — учёт каждого прогона задачи одним запросом: этапы и
+// вложенные перепроверки, только свои прогоны, без поддерева (CLAB-264).
+//
+// sum пропускает NULL и сам даёт NULL, если непустых значений нет: число,
+// которого не сообщили ни в одной строке, остаётся «неизвестно», а строка без
+// стоимости не обнуляет стоимость прогона (решение 0026). Модели — без
+// повторов, по времени первого отчёта, при равенстве — по имени, чтобы
+// порядок не зависел от плана запроса. Прогона без строк в ответе нет: «нет
+// учёта» дописывает тот, кто склеивает (CardStageRuns).
+func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID]domain.RunUsage, error) {
+	rows, err := q.Query(ctx, `
+		WITH own AS (
+			SELECT u.* FROM stage_run_usage u
+			JOIN stage_runs sr ON sr.id = u.run_id
+			WHERE sr.task_id = $1
+		),
+		models AS (
+			SELECT run_id, array_agg(model ORDER BY first_at, model) AS models
+			FROM (SELECT run_id, model, min(reported_at) AS first_at
+			      FROM own GROUP BY run_id, model) m
+			GROUP BY run_id
+		)
+		SELECT o.run_id, count(*)::int, m.models,
+		       sum(o.input_tokens)::bigint, sum(o.output_tokens)::bigint,
+		       sum(o.cache_read_tokens)::bigint, sum(o.cache_write_tokens)::bigint,
+		       sum(o.cost_usd)::float8, sum(o.duration_ms)::bigint
+		FROM own o JOIN models m ON m.run_id = o.run_id
+		GROUP BY o.run_id, m.models`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]domain.RunUsage{}
+	for rows.Next() {
+		var (
+			runID uuid.UUID
+			u     domain.RunUsage
+		)
+		if err := rows.Scan(&runID, &u.Reports, &u.Models, &u.InputTokens, &u.OutputTokens,
+			&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS); err != nil {
+			return nil, translate(err)
+		}
+		u.Reported = u.Reports > 0
+		out[runID] = u
+	}
+	return out, translate(rows.Err())
+}
+
+// CardStageRuns — прогоны задачи для карточки вместе с их учётом. Одно место
+// для REST (getTask) и MCP (sdlc_get_task), чтобы транспорты отдавали одно и
+// то же (решение 0011). ListStageRuns остаётся без учёта: его зовёт ещё
+// сборка контекста захвата, где учёт не нужен.
+func (s *Store) CardStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.CardStageRun, error) {
+	runs, err := s.ListStageRuns(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
+	usage, err := s.RunUsageByTask(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.CardStageRun, 0, len(runs))
+	for _, r := range runs {
+		u, ok := usage[r.ID]
+		if !ok {
+			u = domain.NoRunUsage()
+		}
+		out = append(out, domain.CardStageRun{StageRun: r, Usage: u})
+	}
+	return out, nil
+}
