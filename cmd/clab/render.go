@@ -89,7 +89,11 @@ type stateView struct {
 		Parent      *string         `json:"parent"`
 		Description *string         `json:"description"`
 		ExternalRef json.RawMessage `json:"external_ref"`
+		taskLevels
 	} `json:"task"`
+	// Рекомендация прогона (решение 0060). Сервер прежней версии её не
+	// отдаёт — тогда строк уровня в сводке нет.
+	Execution *executionView `json:"execution"`
 	// Граница правил и данных (CLAB-209). Старый сервер её не отдаёт —
 	// тогда подписи секций те же, а правило берётся своё.
 	Boundary *struct {
@@ -185,6 +189,10 @@ func printSummary(s stateView, rejectionLine bool) {
 		run += fmt.Sprintf(", аренда до %s, heartbeat каждые %d с", when(&s.Lease.ExpiresAt), s.Lease.Heartbeat)
 	}
 	pairs = append(pairs, "Прогон:", run)
+	// Строки уровня идут после «Прогон» без выравнивания по колонке подписей:
+	// длинная подпись иначе сдвинула бы всю сводку, а скилы ищут строку
+	// «Рекомендованный уровень: …» как есть.
+	levelsAfter := len(pairs) / 2
 	var repos []string
 	for _, r := range s.Context.Repositories {
 		item := r.Owner + "/" + r.Name
@@ -206,7 +214,15 @@ func printSummary(s stateView, rejectionLine bool) {
 	if s.Context.Rejection != nil && rejectionLine {
 		pairs = append(pairs, "Возврат:", trunc(s.Context.Rejection.Reason, 120))
 	}
-	kv(pairs...)
+	lines := kvLines(pairs...)
+	if s.Execution != nil {
+		levelsAfter = min(levelsAfter, len(lines))
+		levels := []string{s.Execution.recommendedLine(), s.Task.taskLevels.summaryLine()}
+		lines = append(lines[:levelsAfter], append(levels, lines[levelsAfter:]...)...)
+	}
+	for _, line := range lines {
+		fmt.Println(line)
+	}
 	if len(s.GatesAhead) > 0 {
 		fmt.Println("Переходы:")
 		for _, tr := range s.GatesAhead {
@@ -469,6 +485,30 @@ func renderEditedTask(raw json.RawMessage) error {
 	fmt.Printf("Приоритет: %s   Метки: %s   Описание: %s\n",
 		t.Priority, dash(strings.Join(t.Labels, ", ")), dash(describeLength(t.Description)))
 	fmt.Printf("Трекер: %s\n", joinOr(externalLinks(t.ExternalRef), "—"))
+	// Сервер прежней версии уровней не знает: строки нет, вывод прежний.
+	if serverKnowsLevels(raw) {
+		var levels taskLevels
+		if err := decode(raw, &levels); err != nil {
+			return err
+		}
+		fmt.Println(levels.editLine())
+	}
+	return nil
+}
+
+// renderCreatedWithLevels — строка заведённой задачи и её уровни: create с
+// --model-level или --model-level-for показывает, что они записались.
+func renderCreatedWithLevels(raw json.RawMessage) error {
+	if err := renderTask(raw); err != nil {
+		return err
+	}
+	if serverKnowsLevels(raw) {
+		var levels taskLevels
+		if err := decode(raw, &levels); err != nil {
+			return err
+		}
+		fmt.Println(levels.editLine())
+	}
 	return nil
 }
 

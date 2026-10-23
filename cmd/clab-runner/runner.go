@@ -172,12 +172,18 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	defer r.cleanupWorkspace(ctx, space)
 	workdir := space.dir()
 
+	choice := r.chooseModel(claim)
+	if choice.hintDeprecated {
+		log.Warn("model_hint устарел, задайте SDLC_RUNNER_MODEL_LEVELS: модель взята из model_hint роли",
+			"model_level", choice.level, "model_level_source", choice.source, "model", choice.model)
+	}
+
 	if r.cfg.DryRun {
 		// Токен задачи в сухом прогоне не выпускается: он гас бы через
 		// секунду вместе с отпущенной арендой, а след в ленте остался бы.
 		argv := r.argv(item, claim, "<mcp.json>", workdir)
 		log.Info("сухой прогон: агент получил бы токен задачи и окружение по списку",
-			"argv", strings.Join(argv, " "), "workdir", workdir)
+			append([]any{"argv", strings.Join(argv, " "), "workdir", workdir}, choice.logAttrs()...)...)
 		r.releaseQuietly(ctx, item.Task.Key, "сухой прогон раннера")
 		return
 	}
@@ -197,8 +203,8 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	defer home.cleanup()
 
 	argv := r.argv(item, claim, home.mcpConfig, workdir)
-	log.Info("запуск агента", "model", claim.model(), "command", argv[0], "workdir", workdir,
-		"credentials", creds.kind())
+	log.Info("запуск агента", append(choice.logAttrs(), "command", argv[0], "workdir", workdir,
+		"credentials", creds.kind())...)
 
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
@@ -346,15 +352,15 @@ func (r *runner) releaseQuietly(ctx context.Context, task, note string) {
 	}
 }
 
-// argv собирает команду запуска из шаблона. Модель и инструменты приезжают из
-// версии роли: «аналитик думает большой моделью, ревьюер читает маленькой» —
-// свойство роли, а не задачи и не раннера.
+// argv собирает команду запуска из шаблона. Инструменты приезжают из версии
+// роли, модель — по рекомендованному уровню и таблице раннера (chooseModel):
+// уровень рекомендует сервер, а какая модель ему отвечает, знает раннер.
 func (r *runner) argv(item queueItem, claim claimResult, mcpConfig, workdir string) []string {
 	replacer := strings.NewReplacer(
 		"{task}", item.Task.Key,
 		"{workdir}", workdir,
 		"{role}", claim.roleKey(item.RoleKey),
-		"{model}", claim.model(),
+		"{model}", r.chooseModel(claim).model,
 		"{allowed_tools}", strings.Join(claim.allowTools(), ","),
 		"{disallowed_tools}", strings.Join(claim.denyTools(), ","),
 		"{mcp_config}", mcpConfig,
@@ -495,11 +501,65 @@ func (c claimResult) roleKey(fallback string) string {
 	return fallback
 }
 
-func (c claimResult) model() string {
+func (c claimResult) modelHint() string {
 	if c.Role != nil && c.Role.ModelHint != nil {
 		return *c.Role.ModelHint
 	}
 	return ""
+}
+
+// Откуда взята модель запуска — значения поля model_from в журнале.
+const (
+	modelFromTable = "table"
+	modelFromHint  = "model_hint"
+	modelFromNone  = "none"
+)
+
+// modelChoice — модель запуска и как она выбрана. Один результат идёт в
+// {model}, в журнал запуска и в сухой прогон, чтобы они не разошлись.
+type modelChoice struct {
+	level  string // рекомендованный уровень; none — не задан
+	source string // источник уровня; absent — сервер без execution
+	model  string // пусто — флаг --model снимается
+	from   string
+	// Модель взята из устаревшего model_hint у сервера, который уже
+	// рекомендует уровень, — повод предупредить владельца раннера.
+	hintDeprecated bool
+}
+
+func (m modelChoice) logAttrs() []any {
+	return []any{"model_level", m.level, "model_level_source", m.source, "model", m.model, "model_from", m.from}
+}
+
+// chooseModel выбирает модель запуска (решение 0060): запись таблицы для
+// рекомендованного уровня, иначе model_hint роли, иначе ничего. Против
+// сервера без execution — сразу model_hint и без предупреждения: так вёл
+// себя раннер прежней версии, и обновлённый раннер у необновлённого сервера
+// собирает тот же argv.
+func (r *runner) chooseModel(c claimResult) modelChoice {
+	choice := modelChoice{level: "none", source: "absent", from: modelFromNone}
+	if c.Execution != nil {
+		choice.source = c.Execution.ModelLevelSource
+		if level := ptrString(c.Execution.ModelLevel); level != "" {
+			choice.level = level
+			if model, ok := r.cfg.ModelLevels[level]; ok {
+				choice.model, choice.from = model, modelFromTable
+				return choice
+			}
+		}
+	}
+	if hint := c.modelHint(); hint != "" {
+		choice.model, choice.from = hint, modelFromHint
+		choice.hintDeprecated = c.Execution != nil
+	}
+	return choice
+}
+
+func ptrString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (c claimResult) allowTools() []string {
@@ -544,9 +604,25 @@ func parseUsage(out []byte) map[string]any {
 
 	model := result.Model
 	if model == "" {
-		for name := range result.ModelUsage {
-			model = name
-			break
+		// Разрез по моделям — map, и порядок обхода у неё случайный: та же
+		// выдача агента записывалась бы то одной моделью, то другой.
+		// Основная модель запуска — та, что стоила больше всего; при
+		// равенстве — та, что больше написала, затем по имени.
+		// Несообщённое число — ниже любого сообщённого, нуля тоже.
+		bestCost, bestOut := float64(-1), int64(-1)
+		for name, u := range result.ModelUsage {
+			cost, out := float64(-1), int64(-1)
+			if u.CostUSD != nil {
+				cost = *u.CostUSD
+			}
+			if u.OutputTokens != nil {
+				out = *u.OutputTokens
+			}
+			better := model == "" || cost > bestCost ||
+				(cost == bestCost && (out > bestOut || (out == bestOut && name < model)))
+			if better {
+				model, bestCost, bestOut = name, cost, out
+			}
 		}
 	}
 	if model == "" {

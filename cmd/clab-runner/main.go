@@ -20,6 +20,16 @@
 //	SDLC_RUNNER_COMMAND   чем запускать агента (по умолчанию Claude Code)
 //	SDLC_RUNNER_TIMEOUT   сколько ждать агента, прежде чем считать его мёртвым
 //	SDLC_RUNNER_ONCE      забрать одну задачу и выйти: удобно в CI
+//	SDLC_RUNNER_DRY_RUN   ничего не запускать: захватить, напечатать argv,
+//	                      уровень, его источник и модель, отпустить задачу
+//	SDLC_RUNNER_MODEL_LEVELS
+//	                      какая модель отвечает рекомендованному уровню
+//	                      (решение 0060): low=haiku,medium=sonnet,high=opus,
+//	                      любую запись можно опустить; значение идёт в
+//	                      {model}. Уровня нет в таблице или он не задан —
+//	                      model_hint роли (устарел, в журнале предупреждение),
+//	                      нет и его — --model снимается. Сервер без уровней
+//	                      — model_hint, как раньше. Опечатка — отказ старта
 //	SDLC_RUNNER_REPOS     каталог с клонами репозиториев проекта; клон ищется
 //	                      по origin. С ним агент работает в git worktree своей
 //	                      задачи, без него — в каталоге раннера, и тогда больше
@@ -75,6 +85,9 @@ func main() {
 		"repos", cfg.ReposDir, "worktrees", cfg.WorktreesDir)
 	if cfg.ReposDir == "" {
 		log.Warn("SDLC_RUNNER_REPOS не задан: агент работает в каталоге раннера, без рабочей копии задачи")
+	}
+	if len(cfg.ModelLevels) > 0 {
+		log.Info("таблица уровней модели", "model_levels", modelLevelsString(cfg.ModelLevels))
 	}
 	if len(cfg.AgentEnvRefused) > 0 {
 		log.Warn("SDLC_RUNNER_ENV: имена SDLC_* и CLAB_* агенту не передаются, раннер задаёт их сам",

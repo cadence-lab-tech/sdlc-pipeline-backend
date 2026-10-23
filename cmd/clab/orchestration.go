@@ -17,9 +17,10 @@ import (
 
 func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, title, description, taskType, parent, priority, assignee string
-	var repos, labels, blocks, properties string
+	var repos, labels, blocks, properties, modelLevel string
 	var external externalRefFlag
-	_, err := flags("create", args, func(fs *flag.FlagSet) {
+	var stageLevels stageLevelFlag
+	fs, err := flags("create", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&title, "title", "", "заголовок задачи")
 		fs.StringVar(&description, "description", "", "описание")
@@ -32,6 +33,8 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&blocks, "blocks", "", "ключи задач, которые новая блокирует")
 		fs.StringVar(&properties, "properties", "", "свойства задачи объектом JSON")
 		fs.Var(&external, "external-ref", externalRefUsage)
+		fs.StringVar(&modelLevel, "model-level", "", modelLevelUsage)
+		fs.Var(&stageLevels, "model-level-for", stageLevelUsage)
 	})
 	if err != nil {
 		return err
@@ -79,22 +82,39 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	if len(external.links) > 0 {
 		body["external_ref"] = external.links
 	}
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	levels := addModelLevels(body, passed, modelLevel, &stageLevels)
 
 	var out json.RawMessage
 	if err := c.do(ctx, "POST", "/projects/"+key+"/tasks", body, &out); err != nil {
 		return err
 	}
-	return emit(out, render(renderTask, out))
+	human := renderTask
+	if levels {
+		human = renderCreatedWithLevels
+	}
+	if err := emit(out, render(human, out)); err != nil {
+		return err
+	}
+	if levels && !serverKnowsLevels(out) {
+		var t taskRow
+		_ = json.Unmarshal(out, &t)
+		return levelsNotStored("задача " + dash(t.Key) + " заведена без уровней")
+	}
+	return nil
 }
 
-// cmdEdit правит постановку задачи: заголовок, описание, приоритет, метки.
+// cmdEdit правит постановку задачи: заголовок, описание, приоритет, метки,
+// уровни модели задачи и этапов.
 //
 // Переданное флагом и не переданное — разные вещи: `--description ""`
 // очищает описание, а отсутствие флага его не трогает. Поэтому тело запроса
 // собирается по fs.Visit, а не по непустым значениям.
 func cmdEdit(ctx context.Context, c *Client, args []string) error {
-	var title, description, descriptionFile, priority, labels string
+	var title, description, descriptionFile, priority, labels, modelLevel string
 	var external externalRefFlag
+	var stageLevels stageLevelFlag
 	task, rest := popTask(args)
 	fs, err := flags("edit", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&title, "title", "", "новый заголовок, не длиннее 80 символов")
@@ -103,6 +123,8 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&priority, "priority", "", "low, normal, high, urgent")
 		fs.StringVar(&labels, "labels", "", "метки через запятую; \"\" очищает")
 		fs.Var(&external, "external-ref", externalRefUsage+"; \"\" снимает ссылки")
+		fs.StringVar(&modelLevel, "model-level", "", modelLevelUsage)
+		fs.Var(&stageLevels, "model-level-for", stageLevelUsage)
 	})
 	if err != nil {
 		return err
@@ -150,16 +172,24 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		// Ссылки заменяются целиком, как метки: пустой объект их снимает.
 		body["external_ref"] = external.links
 	}
+	levels := addModelLevels(body, passed, modelLevel, &stageLevels)
 	if len(body) == 0 {
 		fs.Usage()
-		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority, --labels или --external-ref")
+		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority, " +
+			"--labels, --external-ref, --model-level или --model-level-for")
 	}
 
 	var out json.RawMessage
 	if err := c.do(ctx, "PATCH", "/tasks/"+task, body, &out); err != nil {
 		return err
 	}
-	return emit(out, render(renderEditedTask, out))
+	if err := emit(out, render(renderEditedTask, out)); err != nil {
+		return err
+	}
+	if levels && !serverKnowsLevels(out) {
+		return levelsNotStored("остальная правка " + task + " применена")
+	}
+	return nil
 }
 
 func cmdRelate(ctx context.Context, c *Client, args []string) error {

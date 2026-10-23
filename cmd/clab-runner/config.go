@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config — настройки раннера. Команда запуска вынесена в переменную
@@ -41,7 +43,14 @@ type Config struct {
 	// попадают — они в AgentEnvRefused, о них раннер предупреждает при старте.
 	AgentEnv        []string
 	AgentEnvRefused []string
+	// Таблица «уровень → модель» из SDLC_RUNNER_MODEL_LEVELS (решение 0060):
+	// сервер рекомендует уровень, а какая модель ему отвечает под подписку
+	// владельца раннера — знает только раннер. nil — таблицы нет.
+	ModelLevels map[string]string
 }
+
+// modelLevels — уровни из решения 0060; других ключей таблица не знает.
+var modelLevels = []string{"low", "medium", "high"}
 
 // Команда по умолчанию — Claude Code: агент получает промпт work_on_task с
 // того же MCP-сервера, к которому подключён, поэтому человек и раннер
@@ -88,10 +97,14 @@ func loadConfig() (Config, error) {
 		c.Slots = n
 	}
 	c.AgentEnv, c.AgentEnvRefused = parseAgentEnv(env("SDLC_RUNNER_ENV", ""))
+	levels, err := parseModelLevels(env("SDLC_RUNNER_MODEL_LEVELS", ""))
+	if err != nil {
+		return c, err
+	}
+	c.ModelLevels = levels
 	if err := c.loadWorkspaces(); err != nil {
 		return c, err
 	}
-	var err error
 	if c.Interval, err = envDuration("SDLC_RUNNER_INTERVAL", c.Interval); err != nil {
 		return c, err
 	}
@@ -99,6 +112,52 @@ func loadConfig() (Config, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// parseModelLevels разбирает SDLC_RUNNER_MODEL_LEVELS вида
+// low=haiku,medium=sonnet,high=opus. Любую запись можно опустить; пустая
+// переменная — таблицы нет. Опечатка — отказ старта, а не молчаливый запуск
+// без модели: уровень без записи раннер обошёл бы, и никто бы не заметил.
+func parseModelLevels(raw string) (map[string]string, error) {
+	var table map[string]string
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item == "" {
+			continue
+		}
+		level, model, ok := strings.Cut(item, "=")
+		level, model = strings.TrimSpace(level), strings.TrimSpace(model)
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("SDLC_RUNNER_MODEL_LEVELS: %q не по форме <уровень>=<модель>, "+
+				"например low=haiku,medium=sonnet,high=opus", item)
+		case !slices.Contains(modelLevels, level):
+			return nil, fmt.Errorf("SDLC_RUNNER_MODEL_LEVELS: %q — уровень %q не поддерживается, допустимы %s",
+				item, level, strings.Join(modelLevels, ", "))
+		case model == "":
+			return nil, fmt.Errorf("SDLC_RUNNER_MODEL_LEVELS: %q — не указана модель", item)
+		case strings.ContainsFunc(model, unicode.IsSpace):
+			return nil, fmt.Errorf("SDLC_RUNNER_MODEL_LEVELS: %q — пробел внутри имени модели", item)
+		}
+		if _, dup := table[level]; dup {
+			return nil, fmt.Errorf("SDLC_RUNNER_MODEL_LEVELS: %q — уровень %s указан дважды", item, level)
+		}
+		if table == nil {
+			table = map[string]string{}
+		}
+		table[level] = model
+	}
+	return table, nil
+}
+
+// modelLevelsString — таблица для журнала в порядке уровней.
+func modelLevelsString(table map[string]string) string {
+	var parts []string
+	for _, level := range modelLevels {
+		if model, ok := table[level]; ok {
+			parts = append(parts, level+"="+model)
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 // loadWorkspaces читает, где лежат клоны и куда класть рабочие копии.

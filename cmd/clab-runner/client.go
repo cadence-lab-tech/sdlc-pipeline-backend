@@ -149,8 +149,9 @@ func (c *client) queue(ctx context.Context, project, role string) ([]queueItem, 
 	return out.Queue, c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
-// claimResult — то, что нужно раннеру из ответа захвата: модель и инструменты
-// берутся из версии роли, а не из настроек раннера (решение 0025).
+// claimResult — то, что нужно раннеру из ответа захвата: инструменты — из
+// версии роли (решение 0025), рекомендованный уровень модели — из execution
+// (решение 0060), устаревшая строка модели model_hint — запасной путь.
 type claimResult struct {
 	StageRunID string `json:"stage_run_id"`
 	Role       *struct {
@@ -166,6 +167,16 @@ type claimResult struct {
 		HeartbeatIntervalSeconds int       `json:"heartbeat_interval_seconds"`
 	} `json:"lease"`
 	Context claimContext `json:"context"`
+	// Сервер прежней версии execution не отдаёт: nil, и раннер ведёт себя
+	// как раньше — модель из model_hint.
+	Execution *claimExecution `json:"execution"`
+}
+
+// claimExecution — рекомендация прогона: уровень и откуда он (этап задачи,
+// задача, роль или none).
+type claimExecution struct {
+	ModelLevel       *string `json:"model_level"`
+	ModelLevelSource string  `json:"model_level_source"`
 }
 
 // claimContext — область задачи из ответа захвата. Рабочие копии заводятся
