@@ -63,7 +63,7 @@ func TestModelLevelOverMCP(t *testing.T) {
 		t.Fatalf("sdlc_put_role без уровня: %v", out)
 	}
 
-	// Описания тулов (AC-3, AC-14).
+	// Описания тулов (AC-3, AC-14; учёт прогона в sdlc_get_task — CLAB-264, AC-7).
 	serverT, clientT := sdk.NewInMemoryTransports()
 	ss, err := srv.mcp.Connect(WithIdentity(WithProject(ctx, "SDLC"), root), serverT, nil)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestModelLevelOverMCP(t *testing.T) {
 	}
 	want := map[string][]string{
 		"sdlc_claim_task":  {"execution", "model_level_source", "role.model_level", "model_hint устарел"},
-		"sdlc_get_task":    {"model_level", "stage_settings", "execution"},
+		"sdlc_get_task":    {"model_level", "stage_settings", "execution", "usage", "reported: false"},
 		"sdlc_create_task": {"model_level", "stage_settings"},
 		"sdlc_update_task": {"model_level", "stage_settings", "сливается"},
 		"sdlc_put_role":    {"model_level", "model_hint устарел"},
