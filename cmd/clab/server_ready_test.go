@@ -198,7 +198,7 @@ func mustRefuseRoute(t *testing.T, cmd routeCommand, got routeRun, want ...strin
 	if got.code != 1 {
 		t.Fatalf("code %d, want 1\nout:\n%s\nerr:\n%s", got.code, got.out, got.errw)
 	}
-	for _, w := range append([]string{"ui:8080", "caddy reload --config /etc/caddy/Caddyfile", `"The UI on port 8080"`,
+	for _, w := range append([]string{"ui:8080", "  export CADENCE_VERSION=$(cat VERSION)\n  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile\n", `"The UI on port 8080"`,
 		"everywhere except /v1, /mcp, /webhooks, /healthz and /readyz", "curl "}, want...) {
 		if !strings.Contains(got.errw, w) {
 			t.Errorf("stderr must name %q:\n%s", w, got.errw)

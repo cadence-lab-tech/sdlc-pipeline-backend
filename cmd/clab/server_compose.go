@@ -200,7 +200,8 @@ func (r *routeError) explain(i *installation) string {
 	return fmt.Sprintf("%s.\n"+
 		"  The api and ui services are up (ui answers directly), but the site answers %d everywhere except /v1, /mcp, /webhooks, /healthz and /readyz.\n"+
 		"  The UI image listens on port 8080 only from v0.16.0: point the route of your Caddyfile at ui:8080, then reload Caddy:\n"+
-		"%s  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile\n"+
+		"%s  export CADENCE_VERSION=$(cat VERSION)\n"+
+		"  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile\n"+
 		"  Check the site: curl -sS -o /dev/null -w '%%{http_code}\\n' %s\n"+
 		"  See docs/admin.md, \"The UI on port 8080\".",
 		r.Error(), status, i.cdHint(), i.siteURL())
