@@ -269,7 +269,8 @@ func (s *Server) getTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	runs, err := s.store.ListStageRuns(ctx, q, task.ID)
+	// У каждого прогона — его учёт (CLAB-264): одним запросом на задачу.
+	runs, err := s.store.CardStageRuns(ctx, q, task.ID)
 	if err != nil {
 		fail(c, s.log, err)
 		return

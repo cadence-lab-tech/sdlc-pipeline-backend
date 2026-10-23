@@ -39,7 +39,10 @@ func (s *Server) registerTools() {
 		"Полное состояние задачи: этап, роль, входные артефакты, дрейф, гейты. Аренду не выдаёт. "+
 			"task несёт уровни модели задачи и этапов (model_level, stage_settings), execution — "+
 			"рекомендацию текущего прогона: его снимок, а до захвата — то, что получит захват; "+
-			"у каждого из stage_runs — свой снимок model_level и model_level_source. "+
+			"у каждого из stage_runs — свой снимок model_level и model_level_source и свой учёт usage: "+
+			"reported, reports (число отчётов), models (модели отчётов без повторов, как пришли), "+
+			"суммы input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, "+
+			"duration_ms; reported: false и суммы null — нет учёта, а не ноль. "+
 			"Разметка boundary та же, что у sdlc_claim_task: описание, артефакты, возврат и дрейф — "+
 			trust.DataNote+".",
 		s.getTask)
@@ -363,7 +366,7 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
-	runs, err := s.store.ListStageRuns(ctx, q, task.ID)
+	runs, err := s.store.CardStageRuns(ctx, q, task.ID)
 	if err != nil {
 		return fail(err)
 	}

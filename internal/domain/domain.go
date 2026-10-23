@@ -648,6 +648,39 @@ type StageRunUsage struct {
 	Details          json.RawMessage `json:"details"`
 }
 
+// RunUsage — учёт одного прогона в карточке задачи: сумма строк
+// stage_run_usage этого прогона (решение 0026, форма — CLAB-264).
+//
+// «Нет учёта» — не ноль: у прогона без строк Reported false, Models пустой,
+// все суммы nil. Каждое число суммируется только по строкам, где оно есть, и
+// остаётся nil, если его нет ни в одной. Поэтому у чисел нет omitempty: null
+// в ответе и есть «не сообщили».
+type RunUsage struct {
+	Reported bool `json:"reported"`
+	Reports  int  `json:"reports"`
+	// Модели строк как пришли, без повторов, по времени первого отчёта.
+	Models           []string `json:"models"`
+	InputTokens      *int64   `json:"input_tokens"`
+	OutputTokens     *int64   `json:"output_tokens"`
+	CacheReadTokens  *int64   `json:"cache_read_tokens"`
+	CacheWriteTokens *int64   `json:"cache_write_tokens"`
+	CostUSD          *float64 `json:"cost_usd"`
+	DurationMS       *int64   `json:"duration_ms"`
+}
+
+// NoRunUsage — учёт прогона, о котором никто не отчитался.
+func NoRunUsage() RunUsage {
+	return RunUsage{Models: []string{}}
+}
+
+// CardStageRun — прогон в карточке задачи (GET /v1/tasks/:key и
+// sdlc_get_task): прежние поля прогона и его учёт. Отдельный тип, а не поле
+// StageRun: прогон ходит и в других ответах, где учёта нет.
+type CardStageRun struct {
+	StageRun
+	Usage RunUsage `json:"usage"`
+}
+
 // UsageSummary — стоимость задачи: своя и вместе с дочерними задачами.
 type UsageSummary struct {
 	CostUSD        float64 `json:"cost_usd"`
