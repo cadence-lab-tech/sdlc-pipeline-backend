@@ -465,7 +465,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 	case "put":
-		var projectFlag, roleKey, name, summary, file, contract, inputs, changelog string
+		var projectFlag, roleKey, name, summary, file, contract, inputs, changelog, modelLevel string
 		_, err := flags("role", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.StringVar(&roleKey, "key", "", "ключ роли")
@@ -475,6 +475,7 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 			fs.StringVar(&contract, "contract", "", "файл с output_contract (JSON-список)")
 			fs.StringVar(&inputs, "inputs", "", "input_kinds через запятую")
 			fs.StringVar(&changelog, "changelog", "", "что изменилось")
+			fs.StringVar(&modelLevel, "model-level", "", roleLevelUsage)
 		})
 		if err != nil {
 			return err
@@ -496,6 +497,11 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		}
 		if inputs != "" {
 			role["input_kinds"] = splitCSV(inputs)
+		}
+		// Версия собирается целиком: без флага уровня у неё нет, как нет
+		// контракта без --contract. Пустое значение — то же «нет».
+		if level := strings.TrimSpace(modelLevel); level != "" {
+			role["model_level"] = level
 		}
 		if contract != "" {
 			raw, err := os.ReadFile(contract)

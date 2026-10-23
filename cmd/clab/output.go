@@ -74,11 +74,24 @@ func (t *table) print() {
 
 // kv печатает пары «подпись: значение» одной колонкой подписей.
 func kv(pairs ...string) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	for _, line := range kvLines(pairs...) {
+		fmt.Println(line)
+	}
+}
+
+// kvLines — те же пары строками, по строке на пару: так между ними можно
+// вставить строку, не выровненную по колонке.
+func kvLines(pairs ...string) []string {
+	var buf strings.Builder
+	w := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
 	for i := 0; i+1 < len(pairs); i += 2 {
 		fmt.Fprintf(w, "%s\t%s\n", pairs[i], pairs[i+1])
 	}
 	w.Flush()
+	if buf.Len() == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
 }
 
 func trunc(s string, n int) string {

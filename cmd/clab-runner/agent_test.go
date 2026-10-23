@@ -38,6 +38,9 @@ type fakeAPI struct {
 	srv    *httptest.Server
 	issue  func(w http.ResponseWriter) // ответ на POST …/task-token
 	revoke func(w http.ResponseWriter) // ответ на DELETE /auth/tokens/:id
+	// claim — ответ захвата; nil — прогон роли developer без уровня и
+	// без execution, как у сервера прежней версии.
+	claim map[string]any
 
 	mu    sync.Mutex
 	calls []apiCall
@@ -80,8 +83,11 @@ func (f *fakeAPI) serve(w http.ResponseWriter, req *http.Request) {
 			"role_key": "developer", "claimable": true,
 		}}})
 	case call.Path == "/v1/tasks/CLAB-1/claim":
-		json.NewEncoder(w).Encode(map[string]any{"stage_run_id": "run-1",
-			"role": map[string]any{"key": "developer"}})
+		reply := f.claim
+		if reply == nil {
+			reply = map[string]any{"stage_run_id": "run-1", "role": map[string]any{"key": "developer"}}
+		}
+		json.NewEncoder(w).Encode(reply)
 	case call.Path == "/v1/tasks/CLAB-1/task-token":
 		f.issue(w)
 	case call.Path == "/v1/tasks/CLAB-1/release", call.Path == "/v1/tasks/CLAB-1/heartbeat",
