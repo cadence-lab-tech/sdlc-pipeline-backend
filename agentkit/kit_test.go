@@ -113,6 +113,68 @@ func TestKitIsGeneric(t *testing.T) {
 	}
 }
 
+// CLAB-261 (решение 0060, п. 10): clab-run переводит уровень в модель
+// саб-агента ровно тремя строками таблицы и при none оставляет inherit;
+// clab-work сравнивает и только сообщает; учёт — полным id модели; модель
+// задаёт параметр запуска, а определение clab-stage остаётся с inherit.
+func TestKitModelLevels(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Тексты сверяются без переносов строк: фразу рвёт перенос абзаца.
+	files, flat := map[string]string{}, map[string]string{}
+	for _, f := range k.Files {
+		files[f.Path] = f.Content
+		flat[f.Path] = strings.Join(strings.Fields(f.Content), " ")
+	}
+	want := map[string][]string{
+		"skills/clab-run/SKILL.md": {
+			"| `low` | `haiku` |", "| `medium` | `sonnet` |", "| `high` | `opus` |",
+			"`execution`", "`model` parameter of the `Agent` tool", "`inherit`", "`none`",
+			"clab claim <key> --json", "not from `clab show` before it",
+			"reviewer role", "say so in the chat and start the executor without `model`",
+			"same table", "full model id", "claude-opus-5-5",
+		},
+		"skills/clab-work/SKILL.md": {
+			"`execution`", "recommended level X (source), you are running on Y",
+			"say nothing", "Do not change the model", "report to the orchestrator",
+			"full model id", "claude-opus-5-5",
+		},
+		"skills/clab-guide/SKILL.md": {
+			"`execution: {model_level, model_level_source}`", "--model-level", "--model-level-for", "full model id", "claude-opus-5-5",
+		},
+		"agents/clab-stage.md": {"model: inherit"},
+	}
+	for path, needles := range want {
+		body, ok := flat[path]
+		if !ok {
+			t.Fatalf("в наборе нет %s", path)
+		}
+		for _, s := range needles {
+			if !strings.Contains(body, s) {
+				t.Errorf("%s: нет %q", path, s)
+			}
+		}
+	}
+	// Таблица ровно из трёх строк: других уровней и моделей в ней нет.
+	rows := 0
+	for _, line := range strings.Split(files["skills/clab-run/SKILL.md"], "\n") {
+		if strings.HasPrefix(line, "| `") {
+			rows++
+		}
+	}
+	if rows != 3 {
+		t.Errorf("clab-run: в таблице уровней %d строк вместо трёх", rows)
+	}
+	// Уровень — рекомендация: скил не велит ждать человека или менять модель.
+	for _, s := range []string{"must not continue", "wait for the human", "switch to the recommended", "change the model to"} {
+		if strings.Contains(flat["skills/clab-work/SKILL.md"], s) {
+			t.Errorf("clab-work принуждает к модели: %q", s)
+		}
+	}
+}
+
 func TestFrontmatter(t *testing.T) {
 	doc := "---\nname: x\ndescription: \"a: b\"\nhooks:\n  PreToolUse:\n    - matcher: Bash\ntools: Bash, Read\n---\nbody: no\n"
 	m := Frontmatter(doc)
