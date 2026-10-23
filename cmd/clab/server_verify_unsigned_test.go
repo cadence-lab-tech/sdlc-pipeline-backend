@@ -83,8 +83,8 @@ func unsignedInstall(t *testing.T, mode string, unsigned ...string) (*installFix
 func unsignedRefusal(t *testing.T, stderr, repo, version, pin, nothing string) {
 	t.Helper()
 	for _, want := range []string{
-		testMirror + "/" + repo + "@" + pin + " (" + repo + " " + version + ") has no signature in " + testMirror + ":",
-		"loaded there with CADENCE_VERIFY=off", "copied without their referrers",
+		testMirror + "/" + repo + "@" + pin + " (" + repo + " " + version + ") has no signature in " + testMirror + ", or no image with this digest is there:",
+		"loaded there with CADENCE_VERIFY=off", "copied without their referrers", "or this version is not loaded there at all.",
 		"Its digest is the pin of the signed package.",
 		"Load the archive again with verification (cosign 3.x, without CADENCE_VERIFY=off): clab server images load FILE --registry " + testMirror,
 		"or skip the signatures on purpose: run again with CADENCE_VERIFY=off",

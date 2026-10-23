@@ -16,9 +16,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,6 +74,12 @@ type verifier struct {
 	root           string
 	releases, work string
 	offline        bool
+
+	// Реестры, куда Docker этой машины ходит по http (CLAB-280): docker
+	// info читается один раз за запуск, и только если есть что проверять в
+	// зеркале CADENCE_REGISTRY; nil после чтения — Docker не ответил.
+	registries     *dockerRegistries
+	registriesRead bool
 }
 
 // newVerifier — lib.sh verify_init: значение CADENCE_VERIFY и cosign, до
@@ -266,17 +274,25 @@ func (v *verifier) verifyChecksumsOffline(ctx context.Context, version, dir, roo
 }
 
 // verifyImageOffline — подпись образа repo по ссылке с digest target без
-// сети, по корню root; where — откуда корень, для вывода.
-func (v *verifier) verifyImageOffline(ctx context.Context, version, repo, target, root, where string) error {
+// сети, по корню root; where — откуда корень, для вывода; allowHTTP —
+// cosign можно к реестру по http (--allow-http-registry, CLAB-280).
+func (v *verifier) verifyImageOffline(ctx context.Context, version, repo, target, root, where string, allowHTTP bool) error {
 	identity := verifyIdentity(repo, version)
-	out, err := v.runCosign(ctx, "verify", "--offline", "--trusted-root", root, "--certificate-identity", identity,
-		"--certificate-oidc-issuer", verifyIssuer, target)
+	args := []string{"verify", "--offline", "--trusted-root", root}
+	if allowHTTP {
+		args = append(args, "--allow-http-registry")
+	}
+	out, err := v.runCosign(ctx, append(args, "--certificate-identity", identity, "--certificate-oidc-issuer", verifyIssuer, target)...)
 	if err != nil {
 		v.tail(ctx, out)
 		if cosignUnsigned(err, out) {
+			// cosign отвечает так же, когда образа с этим digest в реестре
+			// нет вовсе: отказ называет оба случая (тестирование
+			// CLAB-278), выходы у них те же — load заново кладёт и образ.
 			registry := target[:strings.LastIndex(target, "/"+repo+"@")]
-			return fmt.Errorf("%s (%s %s) has no signature in %s: this happens when the archive is loaded there with CADENCE_VERIFY=off, "+
-				"or the images are copied without their referrers. Its digest is the pin of the signed package.\n"+
+			return fmt.Errorf("%s (%s %s) has no signature in %s, or no image with this digest is there: this happens when the archive is loaded there "+
+				"with CADENCE_VERIFY=off, the images are copied without their referrers, or this version is not loaded there at all. "+
+				"Its digest is the pin of the signed package.\n"+
 				"  Load the archive again with verification (cosign 3.x, without CADENCE_VERIFY=off): clab server images load FILE --registry %s,\n"+
 				"  or skip the signatures on purpose: run again with CADENCE_VERIFY=off (docs/admin.md, \"Air-gapped installation\"). %s",
 				target, repo, version, registry, registry, v.nothing)
@@ -342,7 +358,8 @@ func (v *verifier) imagesRoot(ctx context.Context, version string) string {
 func (v *verifier) verifyClosed(ctx context.Context, version, repo, ref string, at int) (stop bool, err error) {
 	registry := ref[:strings.LastIndex(ref[:at], "/"+repo)]
 	if registry != verifyRegistry {
-		return false, v.verifyImageOffline(ctx, version, repo, registry+"/"+repo+"@"+ref[at+1:], v.root, "the mirror of the releases")
+		return false, v.verifyImageOffline(ctx, version, repo, registry+"/"+repo+"@"+ref[at+1:], v.root, "the mirror of the releases",
+			v.httpRegistry(ctx, registry))
 	}
 	if dockerImagePresent(ctx, v.e, ref) {
 		v.e.ok("%s verified when loaded: same digest as the pin of the signed package", ref)
@@ -353,6 +370,97 @@ func (v *verifier) verifyClosed(ctx context.Context, version, repo, ref string, 
 	}
 	v.e.warn("images not verified: ghcr.io is unreachable from this host, and %s is not on this machine (load the archive of the version first: clab server images load)", ref)
 	return true, nil
+}
+
+// dockerRegistries — RegistryConfig из docker info: что демон собрал из
+// insecure-registries своего daemon.json — имена host[:port] с Secure=false
+// и сети CIDR.
+type dockerRegistries struct {
+	InsecureRegistryCIDRs []string
+	IndexConfigs          map[string]struct{ Secure bool }
+}
+
+// httpRegistry — Docker этой машины ходит к реестру registry
+// (host[:port]/путь, CADENCE_REGISTRY) по http, значит, и cosign можно
+// туда по http (CLAB-280). Сам cosign берёт http только у loopback и
+// частных IP-литералов; зеркалу по http под именем хоста без флага он
+// отвечает ложной тревогой «altered or not ours».
+//
+// Флаг — только по слову Docker, а не всегда: с ним cosign на отказ https
+// пробует http, и на https-реестре атакующий в сети понизит соединение и
+// получит учётные данные docker login. Подпись так не подделать (проверка
+// офлайн по корню, identity и pin), но кредов жаль, а http администратор
+// уже разрешил там, где разрешил его Docker'у. Флаг «небезопасного»
+// реестра cosign не годится: он ещё и не проверяет сертификат. Docker не
+// ответил или ответил непонятно — флага нет, как до CLAB-280, без отказа и
+// предупреждения.
+func (v *verifier) httpRegistry(ctx context.Context, registry string) bool {
+	if !v.registriesRead {
+		v.registriesRead = true
+		v.registries = readDockerRegistries(ctx, v.e)
+	}
+	if v.registries == nil {
+		return false
+	}
+	host, _, _ := strings.Cut(registry, "/")
+	return v.registries.insecure(host, v.e.lookupHost)
+}
+
+// readDockerRegistries — docker info --format '{{json .RegistryConfig}}';
+// nil — ошибка или не JSON.
+func readDockerRegistries(ctx context.Context, e *serverEnv) *dockerRegistries {
+	out, err := output(ctx, e.run, cmdSpec{name: "docker", args: []string{"info", "--format", "{{json .RegistryConfig}}"}})
+	if err != nil {
+		return nil
+	}
+	var r *dockerRegistries
+	if json.Unmarshal([]byte(out), &r) != nil {
+		return nil
+	}
+	return r
+}
+
+// insecure — правило Docker isSecureIndex наоборот: реестр host[:port],
+// объявленный по имени, решает его Secure; иначе — адрес хоста (IP-литерал
+// или то, во что разрешается имя) в одной из сетей InsecureRegistryCIDRs.
+// Имя не разрешилось — не в сети, как у Docker.
+func (r *dockerRegistries) insecure(host string, lookup func(string) ([]string, error)) bool {
+	if index, ok := r.IndexConfigs[host]; ok {
+		return !index.Secure
+	}
+	if len(r.InsecureRegistryCIDRs) == 0 {
+		return false
+	}
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	var addrs []net.IP
+	if ip := net.ParseIP(name); ip != nil {
+		addrs = []net.IP{ip}
+	} else if lookup != nil {
+		resolved, err := lookup(name)
+		if err != nil {
+			return false
+		}
+		for _, a := range resolved {
+			if ip := net.ParseIP(a); ip != nil {
+				addrs = append(addrs, ip)
+			}
+		}
+	}
+	for _, cidr := range r.InsecureRegistryCIDRs {
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		for _, ip := range addrs {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // composeImages — образы итоговой конфигурации compose: stdout c (docker
