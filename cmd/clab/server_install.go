@@ -314,8 +314,12 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		return err
 	}
 	e.info("waiting for the service to become ready (up to %ds)", timeout)
-	if !inst.waitReady(ctx, timeout) {
+	if err := inst.waitReady(ctx, timeout); err != nil {
 		inst.showFailure(ctx, "api", "caddy")
+		var route *routeError
+		if errors.As(err, &route) {
+			return fmt.Errorf("the stack is running, but %s\n  .env is kept; the logs are above", route.explain(inst))
+		}
 		return fmt.Errorf("the stack did not become ready in %ds; the logs are above. .env is kept: fix the cause and run\n%s", timeout, start)
 	}
 

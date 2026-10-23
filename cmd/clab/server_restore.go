@@ -299,8 +299,12 @@ func (i *installation) restoreBlobsAndStart(ctx context.Context, dump, blobs str
 	if err != nil {
 		return err
 	}
-	if !i.waitReady(ctx, timeout) {
-		i.showFailure(ctx, "api")
+	if err := i.waitReady(ctx, timeout); err != nil {
+		i.showFailure(ctx, "api", "caddy")
+		var route *routeError
+		if errors.As(err, &route) {
+			return fmt.Errorf("the dump %s is loaded and the stack is running, but %s\n  The logs are above", filepath.Base(dump), route.explain(i))
+		}
 		return errors.New("the stack did not become ready after the restore; the logs are above")
 	}
 	e.ok("restored %s; Cadence Lab %s is up", filepath.Base(dump), i.version)

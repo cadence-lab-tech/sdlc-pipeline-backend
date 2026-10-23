@@ -38,11 +38,17 @@ type fakeRunner struct {
 	apiContainer    string
 	healthy         bool
 	uiDown          map[string]bool // порты ui, на которых он не отвечает ("80", "8080"); nil — отвечает на обоих (CLAB-247)
-	pullFails       bool
-	dumpBytes       int
-	gitAvailable    bool
-	gitTags         map[string]bool
-	takenBy         string // каталог установки, чьи контейнеры носят проверяемое имя (install)
+	// Маршруты Caddy (CLAB-267): ответ admin API об апстримах загруженного
+	// конфига (пусто — Caddyfile версии стека: api:8080 и ui на первом
+	// порту, где он отвечает; "off" — admin API не отвечает), код ответа /
+	// через Caddy в режиме proxy (0 — 200) и сообщения wget за адресом.
+	upstreams    string
+	rootStatus   int
+	pullFails    bool
+	dumpBytes    int
+	gitAvailable bool
+	gitTags      map[string]bool
+	takenBy      string // каталог установки, чьи контейнеры носят проверяемое имя (install)
 
 	// Внешняя база (CLAB-127).
 	composeVersion string // docker compose version --short
@@ -273,10 +279,43 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		if !f.healthy {
 			return errExit1
 		}
-		for port, down := range f.uiDown {
-			if down && strings.HasSuffix(args, " http://ui:"+port+"/") {
-				return errExit1
+		url := c.args[len(c.args)-1]
+		fail := func(msg string) error {
+			if c.stderr != nil {
+				io.WriteString(c.stderr, "wget: "+msg+"\n")
 			}
+			return errExit1
+		}
+		switch url {
+		case "http://127.0.0.1:2019/reverse_proxy/upstreams":
+			switch f.upstreams {
+			case "off":
+				return fail("can't connect to remote host (127.0.0.1): Connection refused")
+			case "":
+				ui := "ui:8080"
+				if f.uiDown["8080"] {
+					ui = "ui:80"
+				}
+				write(`[{"address":"api:8080","num_requests":0,"fails":0},{"address":"` + ui + `","num_requests":0,"fails":0}]`)
+			default:
+				write(f.upstreams)
+			}
+			return nil
+		case "http://localhost/":
+			if f.rootStatus != 0 && f.rootStatus != 200 {
+				return fail(fmt.Sprintf("server returned error: HTTP/1.1 %d %s", f.rootStatus, http.StatusText(f.rootStatus)))
+			}
+			return nil
+		case "http://api:8080/":
+			return fail("server returned error: HTTP/1.1 404 Not Found")
+		}
+		for port, down := range f.uiDown {
+			if down && url == "http://ui:"+port+"/" {
+				return fail("can't connect to remote host (172.18.0.5): Connection refused")
+			}
+		}
+		if strings.HasPrefix(url, "http://ui:") && url != "http://ui:80/" && url != "http://ui:8080/" {
+			return fail("can't connect to remote host (172.18.0.5): Connection refused")
 		}
 		return nil
 	case strings.HasPrefix(args, "compose exec -T postgres pg_dump"):
