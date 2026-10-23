@@ -394,3 +394,4 @@ Cadence Lab распространяется с открытыми исходн�
 
 Готовый к установке пакет и руководство —
 [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted).
+
