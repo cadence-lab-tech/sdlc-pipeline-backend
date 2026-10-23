@@ -119,11 +119,6 @@ func (i *installation) secretSource(ctx context.Context) secrets.Source {
 	return secrets.Source{Getenv: i.get, Path: i.hostSecretPath, Read: i.readSecretFile(ctx)}
 }
 
-// secretReaderImage — образ одноразового контейнера, который читает файл
-// secrets/, недоступный пользователю; тот же, что у архива тома blobs в
-// backup и restore.
-const secretReaderImage = "alpine:3"
-
 // readSecretFile — чтение файла secrets/ установки (путь — после
 // hostSecretPath) для secrets.Source.Read (CLAB-252). Сначала на этой
 // машине; файл, отданный сервису по admin.md («Secrets in files»: владелец
@@ -158,7 +153,7 @@ func (i *installation) readSecretFile(ctx context.Context) func(string) ([]byte,
 		}
 		var out, stderr bytes.Buffer
 		c := i.docker("run", "--rm", "--log-driver", "none", "--network", "none",
-			"-v", dir+":/s:ro", secretReaderImage, "cat", "/s/"+filepath.ToSlash(rel))
+			"-v", dir+":/s:ro", helperImage, "cat", "/s/"+filepath.ToSlash(rel))
 		c.stdout, c.stderr = &out, &stderr
 		why := ""
 		if err := i.e.run.run(ctx, c); err != nil {
@@ -173,7 +168,7 @@ func (i *installation) readSecretFile(ctx context.Context) func(string) ([]byte,
 			return nil, fmt.Errorf("%v, and reading it with a one-off %s container failed (%s). "+
 				"Make the file readable to you (sudo chown $(id -u):65532 %s && sudo chmod 440 %s) "+
 				"or see docs/admin.md, \"Secrets in files\"",
-				hostErr, secretReaderImage, why, shellQuote(path), shellQuote(path))
+				hostErr, helperImage, why, shellQuote(path), shellQuote(path))
 		}
 		return out.Bytes(), nil
 	}

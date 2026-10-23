@@ -20,7 +20,17 @@ type cmdSpec struct {
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	// detach — команда, после прерывания которой у демона остаётся
+	// состояние, которое надо убрать (docker run временного реестра):
+	// она идёт в своей группе процессов, и Ctrl-C терминала до неё не
+	// доходит, а отмена ctx её не обрывает — запрос доходит до конца, и
+	// уборка видит то, что он создал (CLAB-202, AC-8). Предел — detachTimeout.
+	detach bool
 }
+
+// detachTimeout — предел команды с detach: она не обрывается сигналом, но и
+// висеть бесконечно ей нельзя.
+const detachTimeout = 2 * time.Minute
 
 func (c cmdSpec) String() string { return strings.Join(append([]string{c.name}, c.args...), " ") }
 
@@ -33,7 +43,15 @@ type runner interface {
 type execRunner struct{}
 
 func (execRunner) run(ctx context.Context, c cmdSpec) error {
+	if c.detach {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), detachTimeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, c.name, c.args...)
+	if c.detach {
+		ownProcessGroup(cmd)
+	}
 	cmd.Dir = c.dir
 	cmd.Env = c.env
 	cmd.Stdin = c.stdin

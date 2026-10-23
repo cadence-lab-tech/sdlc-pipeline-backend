@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -62,6 +63,15 @@ type verifier struct {
 	why     string // …или почему его нет
 	noted   bool   // предупреждение о режиме напечатано
 	nothing string // чем кончается отказ: что не сделано
+
+	// Закрытый контур (CLAB-202, решение 0059): trusted_root.json Sigstore
+	// из зеркала релизов той же версии — root, когда он взят; releases и
+	// work — откуда и куда его брать для образов, если подпись пакета его
+	// не взяла (установка на месте); offline — ghcr.io не отвечает, образы
+	// проверяются без него.
+	root           string
+	releases, work string
+	offline        bool
 }
 
 // newVerifier — lib.sh verify_init: значение CADENCE_VERIFY и cosign, до
@@ -84,7 +94,9 @@ func newVerifier(ctx context.Context, e *serverEnv, value, nothing string) (*ver
 		v.why = "cosign 3.x is not installed"
 	} else {
 		var out bytes.Buffer
-		_ = e.run.run(ctx, cmdSpec{name: "cosign", args: []string{"version"}, stdout: &out, stderr: &out})
+		if err := e.run.run(ctx, cmdSpec{name: "cosign", args: []string{"version"}, stdout: &out, stderr: &out}); err != nil && interrupted(ctx, e) {
+			return nil, fmt.Errorf("interrupted. %s", nothing)
+		}
 		ver := ""
 		if m := cosignGitVersion.FindStringSubmatch(out.String()); m != nil {
 			ver = m[1]
@@ -146,8 +158,12 @@ func (v *verifier) runCosign(ctx context.Context, args ...string) (string, error
 }
 
 // tail — последние строки ответа внешней команды перед отказом, как
-// tail -n 5 у скриптов.
-func (v *verifier) tail(s string) {
+// tail -n 5 у скриптов. Прерванной команде сказать нечего: её ответ на
+// Ctrl-C — не причина отказа (O4 тестирования CLAB-202).
+func (v *verifier) tail(ctx context.Context, s string) {
+	if interrupted(ctx, v.e) {
+		return
+	}
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) > 5 {
 		lines = lines[len(lines)-5:]
@@ -155,6 +171,23 @@ func (v *verifier) tail(s string) {
 	if text := strings.Join(lines, "\n"); strings.TrimSpace(text) != "" {
 		fmt.Fprintln(v.e.errw, text)
 	}
+}
+
+// interruptGrace — сколько ждать отмены контекста после отказа внешней
+// команды. Ctrl-C терминала приходит всей группе процессов переднего
+// плана: дочерняя команда умирает от него и отвечает ошибкой чуть раньше,
+// чем signal.NotifyContext отменит ctx.
+const interruptGrace = 300 * time.Millisecond
+
+// interrupted — команду прервали (SIGINT, SIGTERM). Зовётся на пути отказа:
+// прерванная команда говорит «interrupted», а не причину, которую ей
+// приписал бы оборванный вызов (O4 тестирования CLAB-202).
+func interrupted(ctx context.Context, e *serverEnv) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	e.sleep(interruptGrace)
+	return ctx.Err() != nil
 }
 
 // verifyPackage — lib.sh verify_package: подпись dir/checksums.txt версии
@@ -173,15 +206,116 @@ func (v *verifier) verifyPackage(ctx context.Context, releases, version, dir str
 		}
 		return fmt.Errorf("downloading %s of %s failed: %v. %s", verifyBundle, version, err, v.nothing)
 	}
-	out, err := v.runCosign(ctx, "verify-blob", "--bundle", bundle, "--certificate-identity", verifyPackageIdentity,
-		"--certificate-oidc-issuer", verifyIssuer, filepath.Join(dir, "checksums.txt"))
+	out, err := v.cosignBlob(ctx, dir, "")
 	if err != nil {
-		v.tail(out)
+		// Sigstore TUF не отвечает — закрытый контур: корень из зеркала
+		// релизов той же версии (архив clab server images save). Нет его —
+		// отказ, как раньше.
+		if root := v.mirrorRoot(ctx, releases, version, dir); root != "" {
+			if out, err = v.cosignBlob(ctx, dir, root); err == nil {
+				v.e.ok("the signature of checksums.txt of %s verified offline with %s of the mirror: signed by %s", version, trustedRootAsset, verifyPackageIdentity)
+				return nil
+			}
+		}
+	}
+	if err != nil {
+		v.tail(ctx, out)
 		return fmt.Errorf("the signature of checksums.txt of %s did not verify for %s: the release is altered or not ours.\n"+
 			"  Do not use it and report it privately (SECURITY.md). %s", version, verifyPackageIdentity, v.nothing)
 	}
 	v.e.ok("the signature of checksums.txt of %s verified: signed by %s", version, verifyPackageIdentity)
 	return nil
+}
+
+// cosignBlob — cosign verify-blob checksums.txt каталога dir бандлом рядом;
+// root — trusted_root.json для проверки без сети.
+func (v *verifier) cosignBlob(ctx context.Context, dir, root string) (string, error) {
+	args := []string{"verify-blob", "--bundle", filepath.Join(dir, verifyBundle), "--certificate-identity", verifyPackageIdentity,
+		"--certificate-oidc-issuer", verifyIssuer}
+	if root != "" {
+		args = append(args, "--trusted-root", root)
+	}
+	return v.runCosign(ctx, append(args, filepath.Join(dir, "checksums.txt"))...)
+}
+
+// mirrorRoot — trusted_root.json версии из зеркала релизов в dir, если
+// Sigstore TUF с этой машины не отвечает; иначе (или его нет) — пусто.
+func (v *verifier) mirrorRoot(ctx context.Context, releases, version, dir string) string {
+	if releases == "" || v.e.reachable(ctx, verifyTUFProbe) {
+		return ""
+	}
+	dst := filepath.Join(dir, trustedRootAsset)
+	if err := v.e.fetch(ctx, releases+"/download/"+version+"/"+trustedRootAsset, dst); err != nil {
+		os.Remove(dst)
+		return ""
+	}
+	v.root = dst
+	return dst
+}
+
+// verifyChecksumsOffline — подпись checksums.txt каталога dir без сети, по
+// корню root (clab server images load).
+func (v *verifier) verifyChecksumsOffline(ctx context.Context, version, dir, root string) error {
+	if out, err := v.cosignBlob(ctx, dir, root); err != nil {
+		v.tail(ctx, out)
+		return fmt.Errorf("the signature of checksums.txt of %s in the archive did not verify for %s: the archive is altered or not ours.\n"+
+			"  Do not use it and report it privately (SECURITY.md). %s", version, verifyPackageIdentity, v.nothing)
+	}
+	v.e.ok("the signature of checksums.txt of %s verified offline with %s of the archive: signed by %s", version, trustedRootAsset, verifyPackageIdentity)
+	return nil
+}
+
+// verifyImageOffline — подпись образа repo по ссылке с digest target без
+// сети, по корню root; where — откуда корень, для вывода.
+func (v *verifier) verifyImageOffline(ctx context.Context, version, repo, target, root, where string) error {
+	identity := verifyIdentity(repo, version)
+	out, err := v.runCosign(ctx, "verify", "--offline", "--trusted-root", root, "--certificate-identity", identity,
+		"--certificate-oidc-issuer", verifyIssuer, target)
+	if err != nil {
+		v.tail(ctx, out)
+		return fmt.Errorf("the signature of %s (%s %s) did not verify for %s: the image is altered or not ours.\n"+
+			"  Do not run it and report it privately (SECURITY.md). %s", target, repo, version, identity, v.nothing)
+	}
+	v.e.ok("%s is signed by %s (verified offline with %s of %s)", target, identity, trustedRootAsset, where)
+	return nil
+}
+
+// imagesRoot — корень для проверки образов без ghcr.io: взятый подписью
+// пакета, иначе — из зеркала релизов версии (установка на месте).
+func (v *verifier) imagesRoot(ctx context.Context, version string) string {
+	if v.root != "" || v.releases == "" || v.work == "" {
+		return v.root
+	}
+	dst := filepath.Join(v.work, trustedRootAsset)
+	if err := v.e.fetch(ctx, v.releases+"/download/"+version+"/"+trustedRootAsset, dst); err != nil {
+		os.Remove(dst)
+		return ""
+	}
+	v.root = dst
+	return dst
+}
+
+// verifyClosed — образ ref (с pin; «@» на at) в закрытом контуре (q10
+// CLAB-202). В зеркале реестра (CADENCE_REGISTRY) — cosign verify --offline
+// там по digest. Под именем ghcr.io — образ в Docker этой машины ровно по
+// ссылке compose с pin: его подпись проверил clab server images load, а
+// digest равен pin пакета, подпись checksums.txt которого проверена, —
+// значит, это тот же образ. Нет его здесь — решение по режиму, как с
+// недоступным ghcr.io без корня; stop — дальше не проверять.
+func (v *verifier) verifyClosed(ctx context.Context, version, repo, ref string, at int) (stop bool, err error) {
+	registry := ref[:strings.LastIndex(ref[:at], "/"+repo)]
+	if registry != verifyRegistry {
+		return false, v.verifyImageOffline(ctx, version, repo, registry+"/"+repo+"@"+ref[at+1:], v.root, "the mirror of the releases")
+	}
+	if dockerImagePresent(ctx, v.e, ref) {
+		v.e.ok("%s verified when loaded: same digest as the pin of the signed package", ref)
+		return false, nil
+	}
+	if v.mode != "auto" {
+		return true, fmt.Errorf("the images cannot be verified: ghcr.io is unreachable from this host, and %s is not on this machine (load the archive of the version first: clab server images load). %s", ref, v.nothing)
+	}
+	v.e.warn("images not verified: ghcr.io is unreachable from this host, and %s is not on this machine (load the archive of the version first: clab server images load)", ref)
+	return true, nil
 }
 
 // composeImages — образы итоговой конфигурации compose: stdout c (docker
@@ -191,7 +325,7 @@ func composeImages(ctx context.Context, e *serverEnv, c cmdSpec) ([]string, erro
 	var out, errb bytes.Buffer
 	c.stdout, c.stderr = &out, &errb
 	if err := e.run.run(ctx, c); err != nil {
-		(&verifier{e: e}).tail(errb.String())
+		(&verifier{e: e}).tail(ctx, errb.String())
 		return nil, err
 	}
 	var images []string
@@ -254,19 +388,34 @@ func (v *verifier) verifyImages(ctx context.Context, version string, c cmdSpec) 
 			}
 			target := verifyRegistry + "/" + repo + "@" + ref[at+1:]
 			identity := verifyIdentity(repo, version)
+			if v.offline {
+				if stop, err := v.verifyClosed(ctx, version, repo, ref, at); stop || err != nil {
+					return err
+				}
+				continue
+			}
 			out, err := v.runCosign(ctx, "verify", "--certificate-identity", identity, "--certificate-oidc-issuer", verifyIssuer, target)
 			if err == nil {
 				v.e.ok("%s is signed by %s", target, identity)
 				continue
 			}
 			if !v.e.reachable(ctx, verifyRegistryProbe) {
+				// Закрытый контур с корнем Sigstore в зеркале релизов
+				// (CLAB-202): дальше без ghcr.io.
+				if v.imagesRoot(ctx, version) != "" {
+					v.offline = true
+					if stop, err := v.verifyClosed(ctx, version, repo, ref, at); stop || err != nil {
+						return err
+					}
+					continue
+				}
 				if v.mode != "auto" {
 					return fmt.Errorf("the images cannot be verified: ghcr.io is unreachable from this host, and CADENCE_VERIFY=require needs it (the signatures are checked there by digest). %s", v.nothing)
 				}
 				v.e.warn("images not verified: ghcr.io is unreachable from this host (a registry mirror in a closed network?); verify them where it is reachable: docs/admin.md, \"Verifying a release\"")
 				return nil
 			}
-			v.tail(out)
+			v.tail(ctx, out)
 			return fmt.Errorf("the signature of %s (%s %s) did not verify for %s: the image is altered or not ours.\n"+
 				"  Do not run it and report it privately (SECURITY.md). %s", target, repo, version, identity, v.nothing)
 		}

@@ -114,6 +114,7 @@ require refuses without it, off does not verify (docs/admin.md, "Verifying
 a release").
 
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
+  CADENCE_REGISTRY       a registry mirror of our two images; written to .env
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
                          latest/download/<asset> (https://, http:// or file://)
   CADENCE_VERIFY         auto, require or off: the signatures of the release`
@@ -211,6 +212,9 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		return err
 	}
 	defer os.RemoveAll(work)
+	// Корень Sigstore для образов в закрытом контуре — из зеркала релизов,
+	// если подпись пакета его не взяла (установка на месте, CLAB-202).
+	v.releases, v.work = releasesFrom(e.getenv("CADENCE_RELEASES_URL")), work
 	var version, tarball, pkgDir string
 	if inPlace {
 		if version, err = inPlaceVersion(dir, o.version); err != nil {
@@ -297,7 +301,7 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 	}
 	start := fmt.Sprintf("  cd %s && export CADENCE_VERSION=$(cat VERSION) && docker compose up -d", shellQuote(dir))
 	e.info("pulling images of %s", version)
-	if err := inst.composeRun(ctx, false, "pull", "--quiet"); err != nil {
+	if err := inst.pullImages(ctx); err != nil {
 		return fmt.Errorf("could not pull the images of %s: check that the registry (ghcr.io, or CADENCE_REGISTRY in .env) is reachable from this host.\n"+
 			"  .env is kept; then start the stack:\n%s", version, start)
 	}
@@ -543,6 +547,7 @@ type installAnswersT struct {
 	token                         string
 	tokenGenerated                bool
 	postgresPassword, webhook     string
+	registry                      string // CADENCE_REGISTRY окружения установки
 }
 
 // installAnswers — ответы install.sh: флаг, иначе переменная окружения,
@@ -563,6 +568,7 @@ func installAnswers(e *serverEnv, o installOptions) (*installAnswersT, error) {
 		httpAddr: pick(o.httpAddr, "CADENCE_HTTP_ADDR"),
 		team:     pick(o.team, "SDLC_BOOTSTRAP_TEAM"),
 		teamName: pick(o.teamName, "SDLC_BOOTSTRAP_TEAM_NAME"),
+		registry: e.getenv("CADENCE_REGISTRY"),
 	}
 	var err error
 	if a.mode, err = q.ask("Mode: tls (HTTPS on your domain) or proxy (HTTP behind your reverse proxy)", a.mode, "tls"); err != nil {
@@ -667,13 +673,19 @@ func (a *installAnswersT) pairs(name string) []envPair {
 	} else {
 		p = append(p, envPair{"CADENCE_DB", "bundled"})
 	}
-	return append(p,
+	p = append(p,
 		envPair{"POSTGRES_PASSWORD", a.postgresPassword},
 		envPair{"SDLC_ADMIN_TOKEN", a.token},
 		envPair{"SDLC_GITHUB_WEBHOOK_SECRET", a.webhook},
 		envPair{"SDLC_BOOTSTRAP_TEAM", a.team},
 		envPair{"SDLC_BOOTSTRAP_TEAM_NAME", a.teamName},
 	)
+	// Зеркало реестра, с которым ставили, остаётся установке (q4 CLAB-202):
+	// без него в .env backup, restore и upgrade из cron пошли бы в ghcr.io.
+	if a.registry != "" {
+		p = append(p, envPair{"CADENCE_REGISTRY", a.registry})
+	}
+	return p
 }
 
 // asker — вопросы install.sh: «вопрос [текущее]: », пустая строка оставляет

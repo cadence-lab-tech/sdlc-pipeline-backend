@@ -227,7 +227,13 @@ func extractTarGz(archive, dst string, only map[string]bool) error {
 		return fmt.Errorf("%s: %w", filepath.Base(archive), err)
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	return extractTar(gz, archive, dst, only)
+}
+
+// extractTar — то же для несжатого потока tar: архив образов (CLAB-202)
+// не сжимается, его слои сжаты и так.
+func extractTar(r io.Reader, archive, dst string, only map[string]bool) error {
+	tr := tar.NewReader(r)
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
