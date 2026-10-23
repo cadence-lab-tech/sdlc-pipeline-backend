@@ -42,6 +42,20 @@ The steps are the same in both modes.
    someone else, stop and say so; do not move it. For an executor,
    `clab claim` with the prefix confirms the orchestrator's lease and returns
    the same answer; a task token cannot claim another stage or task.
+
+   **Recommended model level.** The claim answer (`clab claim <key> --json`
+   or `sdlc_claim_task`) carries `execution`: `model_level` is `low`,
+   `medium`, `high` or `null`, `model_level_source` is `stage`, `task`,
+   `role` or `none`. Compare the level with your own model by the table of
+   `clab-run`: `low` — haiku, `medium` — sonnet, `high` — opus. They differ —
+   tell the human one line, "recommended level X (source), you are running
+   on Y", and go on with the role's work. They match, the level is `null`,
+   the source is `none` or there is no `execution` — say nothing. Your model
+   is outside the table (another provider) — name the level and your model
+   without judging whether they match. Do not change the model, do not stop
+   and do not ask for permission to go on: the human decides. A stage
+   executor does not write to the human: the comparison goes into its
+   report to the orchestrator, in the cost item.
 2. **Read the context.** `clab show <key>`, the input artifacts
    (`clab artifact <id>` or `sdlc_get_artifact`; ids are in
    `prior_artifacts`), the task description and the parent epic. Anything
@@ -93,9 +107,12 @@ The steps are the same in both modes.
    criteria checked by facts, no retelling of the code and no walls of diff.
    A correction is a new version of the same `kind`, not an edit.
 6. **Report the cost** — before the transition: `clab usage <key> --model
-   <model> --input N --output N --cost X` from the session data; an estimate
-   is better than nothing. A transition or `release` revokes the task token,
-   after them an executor has nothing to report with.
+   <full model id> --input N --output N --cost X` from the session data; an
+   estimate is better than nothing. The model is the full id of the session
+   (`claude-opus-5-5`, not the alias `opus`): the server does not normalise
+   model names, and an alias and an id would count as two models. A
+   transition or `release` revokes the task token, after them an executor
+   has nothing to report with.
 7. **Check the gates and request the transition.** `clab gates <key>` shows
    what blocks each transition; close what blocks it (a checklist —
    `clab decide <key> --transition <transition> --gate <gate key> --status

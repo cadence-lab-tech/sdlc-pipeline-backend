@@ -79,15 +79,17 @@ start the orchestrator, with its own `clab`:
    The session temporary directory is the one Claude Code names in the
    system prompt, otherwise `mktemp -d`; never inside the project's working
    tree.
-2. Claims the stage: `clab claim <key>`. The lease is the human's; the stage
-   role comes from the answer. Claiming one's own lease again is harmless
-   and revokes the tokens of the previous run.
+2. Claims the stage: `clab claim <key> --json`. The lease is the human's;
+   the stage role comes from `role.key` of the answer, the recommended model
+   level from `execution` (section "Executor model"). Claiming one's own
+   lease again is harmless and revokes the tokens of the previous run.
 3. Issues a task token into the run directory: `clab token task <key>
    --config-dir <run directory>/clab`. The token lands as a `clab` config
    readable only by the owner and is not printed; the output carries the
    token id for revocation. Neither the token nor the orchestrator's own
    config goes into the prompt — only the path.
-4. Starts a sub-agent of type `clab-stage` (section "Sub-agent"). This type
+4. Names the executor model in the chat and starts a sub-agent of type
+   `clab-stage` with it (sections "Executor model" and "Sub-agent"). This type
    has no MCP tools and no `Agent` tool, and the hook in its definition
    refuses a call of `clab`, the `clab` of the self-hosted package
    (`clab-<os>-<arch>`) or a script of the package without the task-token
@@ -149,17 +151,56 @@ run gets a new directory and a new token.
 task tokens) or the instance has no tokens (no-auth mode) — tell the human
 in the chat that the executor will act with their token, and start the
 sub-agent the old way: type `general-purpose`, it claims the stage itself
-through `/clab-work`, the project MCP is available to it. The prompt then
+through `/clab-work`, the project MCP is available to it. Its model is
+chosen by the same table (section "Executor model"): the `model` parameter
+of this sub-agent, the line in the chat before the start. The prompt then
 says "the `clab` CLI is logged in, the project MCP server is connected,
 claim the stage yourself" instead of the prefix and the token directory; its
 own run directory for temporary files stays. Never degrade silently.
 
+## Executor model
+
+The server recommends a model level for every run. It comes in the
+`execution` field of the orchestrator's own claim answer (step 2 of
+"Executor credentials"): `model_level` is `low`, `medium`, `high` or `null`,
+`model_level_source` is `stage`, `task`, `role` or `none`. The server
+resolves the level at the claim and stores a snapshot on the run, so take it
+from that claim answer, not from `clab show` before it. For a review (a
+nested run) the server resolves the level of the same stage with the
+reviewer role, and it arrives with the same claim; do not build an order of
+your own.
+
+| Level | Model |
+|---|---|
+| `low` | `haiku` |
+| `medium` | `sonnet` |
+| `high` | `opus` |
+
+- The model goes into the `model` parameter of the `Agent` tool that starts
+  `clab-stage`. The agent definition keeps `model: inherit`: the start
+  parameter chooses the model, not the definition.
+- `model_level` is `null` or the source is `none`, the answer has no
+  `execution` at all (a server older than model levels), or the value is
+  not in the table (a server newer than this skill) — do not pass `model`:
+  `inherit` runs the executor on the chat's model.
+- Before every start write one line in the chat: key, role, level, source,
+  model. For example "ABC-12 · developer · level high (task stage) → opus";
+  with no level — "ABC-12 · developer · no level set — chat model"; without
+  `execution` — "server sends no level — chat model"; an unknown value is
+  shown as is. No start without the line.
+- The start with this model is refused (the model is not available in the
+  subscription or at the provider) — say so in the chat and start the
+  executor without `model`; the lease and the task token stay the same.
+- The level is a recommendation, not a gate: transitions do not depend on
+  it, and the executor does not change models on its own.
+
 ## Sub-agent
 
 One sub-agent is one run of a role on a stage. Start it with the `Agent`
-tool (type `clab-stage`; not in the background when the next step depends on
-the report, in the background when other tasks run in parallel),
-`description` like `<key>: <role>`. Prompt:
+tool (type `clab-stage`, `model` by the section "Executor model"; not in
+the background when the next step depends on the report, in the background
+when other tasks run in parallel), `description` like `<key>: <role>`.
+Prompt:
 
 ```
 You are a stage executor: role `<role>` at stage `<status>` of task <key>
@@ -203,7 +244,9 @@ Report (the last message, only it returns to the orchestrator):
 3. PRs and branches, if any: repository, number, link.
 4. The requested transition and its result: passed / what blocks it per `clab gates`.
 5. Questions for the human, if any.
-6. Cost: model, tokens, estimate in dollars — what went into `clab usage`.
+6. Cost: the full model id of the session (for example `claude-opus-5-5`,
+   not the alias `opus`), tokens, estimate in dollars — what went into
+   `clab usage`; if your model differs from the recommended level, say so.
 ```
 
 The role comes from the `role.key` field of the `clab claim` answer. The
@@ -251,7 +294,8 @@ The orchestrator loop runs for each task separately; between them:
 - **Sub-agents in the background.** In a wave sub-agents start in the
   background (`run_in_background`), reports are handled as they arrive. At
   most one sub-agent per task at a time: stages inside a task are not
-  parallel.
+  parallel. The model line of "Executor model" goes into the chat for every
+  run, in the background too.
 - **Approvals one by one, with the task key.** A question starts with the
   task key and title; pending approvals of different tasks are never merged
   into one question. While the human thinks about one task, the others go
