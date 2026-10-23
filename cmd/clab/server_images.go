@@ -1052,13 +1052,15 @@ func imagesLoad(ctx context.Context, e *serverEnv, args []string) (err error) {
 		err := e.run.run(ctx, cmdSpec{name: "docker", args: []string{"tag", src, named}, stdout: io.Discard, stderr: &errb})
 		// Ссылка временного реестра — только своя, под ней ничего не жило.
 		_ = e.run.run(context.WithoutCancel(ctx), cmdSpec{name: "docker", args: []string{"rmi", src}, stdout: io.Discard, stderr: io.Discard})
+		if !hadNamed {
+			// Ctrl-C может оборвать docker tag, когда демон тег уже поставил:
+			// и на этом отказе ссылку убирает undo.
+			added = append(added, named)
+		}
 		if err != nil {
 			undo()
 			(&verifier{e: e}).tail(ctx, errb.String())
 			return fmt.Errorf("docker could not tag %s (see above). %s", named, nothingLoaded)
-		}
-		if !hadNamed {
-			added = append(added, named)
 		}
 		if !dockerImagePresent(ctx, e, want) {
 			undo()

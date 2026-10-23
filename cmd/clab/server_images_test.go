@@ -1210,6 +1210,27 @@ func TestImagesLoadInterruptedAnywhere(t *testing.T) {
 			}
 		})
 	}
+	// Демон поставил тег, а docker tag оборван Ctrl-C: тег тоже убирается.
+	{
+		f, p := loadSetup(t, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.r.onCall = func(c cmdSpec) error {
+			if !strings.HasPrefix(c.String(), "docker tag") {
+				return nil
+			}
+			f.r.local[c.args[2]] = f.r.local[c.args[1]]
+			cancel()
+			return exitErr(130)
+		}
+		if code := runServer(ctx, f.e, []string{"images", "load", p}); code != 1 || f.errw.String() != "✗ interrupted. "+nothingLoaded+"\n" {
+			t.Errorf("tag applied: %d\n%s", code, f.errw)
+		}
+		f.clean()
+		if len(f.r.local) != 0 {
+			t.Errorf("tag applied, left in Docker: %v", f.r.local)
+		}
+	}
 	// В реестр администратора уже ушёл backend — его и называет.
 	f, p := loadSetup(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
