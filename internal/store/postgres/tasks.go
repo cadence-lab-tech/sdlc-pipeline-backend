@@ -15,7 +15,8 @@ import (
 const taskSelect = `
 	SELECT t.id, t.project_id, p.key, t.parent_id, parent.key, t.key, t.seq, t.title, t.description,
 	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id, assignee.handle,
-	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at
+	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at,
+	       t.model_level, t.stage_settings
 	FROM tasks t
 	JOIN projects p ON p.id = t.project_id
 	JOIN workflow_statuses ws ON ws.id = t.status_id
@@ -27,7 +28,7 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.ParentID, &t.ParentKey, &t.Key, &t.Seq,
 		&t.Title, &t.Description, &t.WorkflowID, &t.StatusID, &t.StatusKey, &t.StatusName,
 		&t.Priority, &t.AssigneeID, &t.AssigneeHandle, &t.ExternalRef, &t.Labels, &t.Properties,
-		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt)
+		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt, &t.ModelLevel, &t.StageSettings)
 	return t, err
 }
 
@@ -182,7 +183,12 @@ type CreateTaskInput struct {
 	// Область задачи — не украшение: на ней стоит гейт repo_scope и по ней
 	// детектор дрейфа понимает, за какими репозиториями следить.
 	Repositories []string
-	CreatedBy    uuid.UUID
+	// Уровень модели задачи и настройки этапов (решение 0060), уже
+	// проверенные движком. Ключи этапов движок сверяет с циклом, который
+	// выберет CreateTask, в той же транзакции. Пусто — не задано.
+	ModelLevel    *string
+	StageSettings json.RawMessage
+	CreatedBy     uuid.UUID
 }
 
 // CreateTask заводит задачу и сразу ставит её на начальный статус цикла.
@@ -244,17 +250,22 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 	if len(externalRef) == 0 {
 		externalRef = json.RawMessage(`{}`)
 	}
+	stageSettings := in.StageSettings
+	if len(stageSettings) == 0 {
+		stageSettings = json.RawMessage(`{}`)
+	}
 
 	var taskID uuid.UUID
 	key := fmt.Sprintf("%s-%d", projectKey, seq)
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO tasks (project_id, parent_id, key, seq, title, description,
 		                   workflow_id, status_id, priority, assignee_id, labels,
-		                   properties, created_by, external_ref)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                   properties, created_by, external_ref, model_level, stage_settings)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16)
 		RETURNING id`,
 		in.ProjectID, parentID, key, seq, in.Title, in.Description,
 		wf.ID, initial.ID, priority, in.AssigneeID, labels, props, in.CreatedBy, externalRef,
+		in.ModelLevel, stageSettings,
 	).Scan(&taskID); err != nil {
 		return domain.Task{}, translate(err)
 	}
@@ -322,7 +333,8 @@ const stageRunSelect = `
 	       sr.role_version_id, sr.attempt, sr.state, sr.claimed_by, pr.handle,
 	       sr.claimed_at, sr.lease_expires_at, sr.heartbeat_at, sr.agent_session_ref,
 	       sr.parent_run_id, sr.gate_id, sr.rejected_from_run_id,
-	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary
+	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary,
+	       sr.model_level, sr.model_level_source
 	FROM stage_runs sr
 	JOIN workflow_statuses ws ON ws.id = sr.status_id
 	LEFT JOIN roles ro       ON ro.id = sr.role_id
@@ -335,7 +347,8 @@ func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) 
 		&r.RoleVersionID, &r.Attempt, &r.State, &r.ClaimedBy, &r.ClaimedHandle,
 		&r.ClaimedAt, &r.LeaseExpires, &r.HeartbeatAt, &r.SessionRef,
 		&r.ParentRunID, &r.GateID, &r.RejectedFromRunID,
-		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary)
+		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary,
+		&r.ModelLevel, &r.ModelLevelSource)
 	if roleKey != nil {
 		r.RoleKey = *roleKey
 	}
@@ -422,12 +435,16 @@ type UpdateTaskFieldsInput struct {
 	Labels      *[]string
 	// Ссылка заменяется целиком, как метки; `{}` снимает все ссылки.
 	ExternalRef *json.RawMessage
+	// Уровень модели задачи; пустая строка снимает его (решение 0060).
+	ModelLevel *string
+	// Настройки этапов целиком — уже слитые движком с прежними.
+	StageSettings *json.RawMessage
 }
 
 // Any отвечает на вопрос, есть ли что писать.
 func (in UpdateTaskFieldsInput) Any() bool {
 	return in.Title != nil || in.Description != nil || in.Priority != nil || in.Labels != nil ||
-		in.ExternalRef != nil
+		in.ExternalRef != nil || in.ModelLevel != nil || in.StageSettings != nil
 }
 
 // UpdateTaskFields пишет переданные поля постановки и двигает updated_at.
@@ -457,16 +474,26 @@ func (s *Store) UpdateTaskFields(ctx context.Context, tx pgx.Tx, taskID uuid.UUI
 			externalRef = []byte(`{}`)
 		}
 	}
+	var stageSettings []byte
+	if in.StageSettings != nil {
+		stageSettings = *in.StageSettings
+		if len(stageSettings) == 0 {
+			stageSettings = []byte(`{}`)
+		}
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE tasks
-		SET title        = coalesce($2, title),
-		    description  = CASE WHEN $3::boolean THEN $4 ELSE description END,
-		    priority     = coalesce($5, priority),
-		    labels       = coalesce($6::text[], labels),
-		    external_ref = coalesce($7::jsonb, external_ref),
-		    updated_at   = now()
+		SET title          = coalesce($2, title),
+		    description    = CASE WHEN $3::boolean THEN $4 ELSE description END,
+		    priority       = coalesce($5, priority),
+		    labels         = coalesce($6::text[], labels),
+		    external_ref   = coalesce($7::jsonb, external_ref),
+		    model_level    = CASE WHEN $8::boolean THEN nullif($9::text, '') ELSE model_level END,
+		    stage_settings = coalesce($10::jsonb, stage_settings),
+		    updated_at     = now()
 		WHERE id = $1`,
-		taskID, in.Title, in.Description != nil, description, in.Priority, labels, externalRef)
+		taskID, in.Title, in.Description != nil, description, in.Priority, labels, externalRef,
+		in.ModelLevel != nil, in.ModelLevel, stageSettings)
 	return translate(err)
 }
 

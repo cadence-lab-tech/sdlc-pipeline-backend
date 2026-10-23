@@ -44,10 +44,13 @@ type RoleVersionInput struct {
 	InputKinds     []string
 	OutputContract json.RawMessage
 	ToolPolicy     json.RawMessage
-	ModelHint      *string
-	RepoScope      []string
-	ContextBudget  json.RawMessage
-	Changelog      *string
+	// Устарел (решение 0060), живёт ради clab и раннера прежних версий.
+	ModelHint *string
+	// Уровень модели роли по умолчанию; nil или "" — не задан.
+	ModelLevel    *string
+	RepoScope     []string
+	ContextBudget json.RawMessage
+	Changelog     *string
 }
 
 type CreateRoleInput struct {
@@ -121,6 +124,10 @@ func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, roleID uuid.UUID,
 	if err := validateOutputContract(in.OutputContract); err != nil {
 		return domain.RoleVersion{}, err
 	}
+	level, err := roleModelLevel(in.ModelLevel)
+	if err != nil {
+		return domain.RoleVersion{}, err
+	}
 	return a.store.CreateRoleVersion(ctx, tx, postgres.CreateRoleVersionInput{
 		RoleID:         roleID,
 		Instructions:   in.Instructions,
@@ -128,11 +135,23 @@ func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, roleID uuid.UUID,
 		OutputContract: in.OutputContract,
 		ToolPolicy:     in.ToolPolicy,
 		ModelHint:      in.ModelHint,
+		ModelLevel:     level,
 		RepoScope:      in.RepoScope,
 		ContextBudget:  in.ContextBudget,
 		Changelog:      in.Changelog,
 		CreatedBy:      actor,
 	})
+}
+
+// roleModelLevel проверяет уровень версии роли; пустая строка — «не задан».
+func roleModelLevel(level *string) (*string, error) {
+	if level == nil || *level == "" {
+		return nil, nil
+	}
+	if err := checkModelLevel(*level, "model_level роли"); err != nil {
+		return nil, err
+	}
+	return level, nil
 }
 
 // validateOutputContract проверяет форму контракта выхода роли.

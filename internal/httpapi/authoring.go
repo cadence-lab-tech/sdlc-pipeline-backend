@@ -34,10 +34,13 @@ type roleVersionRequest struct {
 	InputKinds     []string        `json:"input_kinds"`
 	OutputContract json.RawMessage `json:"output_contract"`
 	ToolPolicy     json.RawMessage `json:"tool_policy"`
-	ModelHint      *string         `json:"model_hint"`
-	RepoScope      []string        `json:"repo_scope"`
-	ContextBudget  json.RawMessage `json:"context_budget"`
-	Changelog      *string         `json:"changelog"`
+	// Устарел (решение 0060): принимается ради клиентов прежних версий.
+	ModelHint *string `json:"model_hint"`
+	// Уровень модели роли по умолчанию: low | medium | high, "" — не задан.
+	ModelLevel    *string         `json:"model_level"`
+	RepoScope     []string        `json:"repo_scope"`
+	ContextBudget json.RawMessage `json:"context_budget"`
+	Changelog     *string         `json:"changelog"`
 }
 
 func (r roleVersionRequest) toInput() workflow.RoleVersionInput {
@@ -47,6 +50,7 @@ func (r roleVersionRequest) toInput() workflow.RoleVersionInput {
 		OutputContract: r.OutputContract,
 		ToolPolicy:     r.ToolPolicy,
 		ModelHint:      r.ModelHint,
+		ModelLevel:     r.ModelLevel,
 		RepoScope:      r.RepoScope,
 		ContextBudget:  r.ContextBudget,
 		Changelog:      r.Changelog,

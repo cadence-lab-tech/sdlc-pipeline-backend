@@ -433,6 +433,10 @@ type UpdateTaskInput struct {
 	Labels      *[]string
 	// Ссылка на основной трекер целиком: `{}` снимает все ссылки (CLAB-95).
 	ExternalRef *json.RawMessage
+	// Уровень модели задачи: пустая строка снимает его (решение 0060).
+	ModelLevel *string
+	// Настройки этапов: сливаются с прежними по ключам статуса и полям.
+	StageSettings *json.RawMessage
 	// Уровень актора в проекте. Ниже сопровождающего действует правило
 	// агента: править можно задачу с его живой арендой и её дочерние —
 	// ровно та рамка, в которой он их заводит. Пусто — правило выключено:
@@ -475,9 +479,23 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		}
 		fields.ExternalRef = &ref
 	}
-	if !fields.Any() {
+	if in.ModelLevel != nil {
+		if err := checkModelLevel(*in.ModelLevel, "model_level"); err != nil {
+			return domain.Task{}, err
+		}
+		fields.ModelLevel = in.ModelLevel
+	}
+	var patch stagePatch
+	if in.StageSettings != nil {
+		var err error
+		if patch, err = parseStagePatch(*in.StageSettings); err != nil {
+			return domain.Task{}, err
+		}
+	}
+	if !fields.Any() && in.StageSettings == nil {
 		return domain.Task{}, apperr.InvalidInput(
-			"не указано ни одно поле: править можно title, description, priority, labels, external_ref")
+			"не указано ни одно поле: править можно title, description, priority, labels, " +
+				"external_ref, model_level, stage_settings")
 	}
 
 	var out domain.Task
@@ -488,6 +506,19 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		}
 		if err := e.agentMayEdit(ctx, tx, actor, task, in.Level); err != nil {
 			return err
+		}
+		// Слияние — под блокировкой задачи: прочитать, слить и записать
+		// одной транзакцией, иначе две правки разных этапов затёрли бы друг
+		// друга.
+		if in.StageSettings != nil {
+			if err := e.checkStageKeys(ctx, tx, task.WorkflowID, patch); err != nil {
+				return err
+			}
+			merged, err := mergeStageSettings(task.StageSettings, patch)
+			if err != nil {
+				return err
+			}
+			fields.StageSettings = &merged
 		}
 		if err := e.store.UpdateTaskFields(ctx, tx, task.ID, fields); err != nil {
 			return err
@@ -513,6 +544,16 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		if fields.ExternalRef != nil {
 			changed["external_ref"] = map[string]any{
 				"from": task.ExternalRef, "to": *fields.ExternalRef,
+			}
+		}
+		if fields.ModelLevel != nil {
+			changed["model_level"] = map[string]any{
+				"from": task.ModelLevel, "to": nullIfEmpty(*fields.ModelLevel),
+			}
+		}
+		if fields.StageSettings != nil {
+			changed["stage_settings"] = map[string]any{
+				"from": task.StageSettings, "to": *fields.StageSettings,
 			}
 		}
 		fieldNames := make([]string, 0, len(changed))
@@ -624,6 +665,10 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		if in.ExternalRef, err = normalizeExternalRef(in.ExternalRef); err != nil {
 			return err
 		}
+		patch, err := prepareTaskModelLevels(&in)
+		if err != nil {
+			return err
+		}
 		if in.AssigneeHandle != "" {
 			assignee, err := e.resolveAssignee(ctx, tx, in.AssigneeHandle)
 			if err != nil {
@@ -637,6 +682,11 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 
 		out, err = e.store.CreateTask(ctx, tx, in.CreateTaskInput)
 		if err != nil {
+			return err
+		}
+		// Ключи этапов сверяются с циклом, который хранилище выбрало по типу:
+		// раньше его не знает никто. Отказ откатывает и задачу.
+		if err := e.checkStageKeys(ctx, tx, out.WorkflowID, patch); err != nil {
 			return err
 		}
 
@@ -675,6 +725,12 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		if string(in.ExternalRef) != "{}" {
 			payload["external_ref"] = in.ExternalRef
 		}
+		if out.ModelLevel != nil {
+			payload["model_level"] = *out.ModelLevel
+		}
+		if string(out.StageSettings) != "{}" {
+			payload["stage_settings"] = out.StageSettings
+		}
 		if err := e.store.AppendEvent(ctx, tx, out.ID, &run.ID, domain.EventTaskCreated, actor,
 			payload); err != nil {
 			return err
@@ -684,6 +740,29 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 	})
 
 	return out, err
+}
+
+// prepareTaskModelLevels проверяет уровни модели заводимой задачи и сводит
+// stage_settings к хранимому виду. Пустые значения при заведении значат «не
+// задано» и в объект не попадают; ключи этапов остаются в разборе — их
+// сверяют с циклом задачи после выбора цикла.
+func prepareTaskModelLevels(in *CreateTaskInput) (stagePatch, error) {
+	if in.ModelLevel != nil {
+		if err := checkModelLevel(*in.ModelLevel, "model_level"); err != nil {
+			return nil, err
+		}
+		if *in.ModelLevel == "" {
+			in.ModelLevel = nil
+		}
+	}
+	patch, err := parseStagePatch(in.StageSettings)
+	if err != nil {
+		return nil, err
+	}
+	if in.StageSettings, err = mergeStageSettings(nil, patch); err != nil {
+		return nil, err
+	}
+	return patch, nil
 }
 
 // agentMayCreate — рамка, в которой агент вправе заводить задачи.

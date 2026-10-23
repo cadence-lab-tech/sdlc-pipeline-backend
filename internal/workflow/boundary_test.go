@@ -34,10 +34,12 @@ func fullClaimResult() ClaimResult {
 			Status: "development", StatusName: "Development", Attempt: 2, Priority: "high",
 			Labels: []string{"security"}, ExternalRef: json.RawMessage(`{"jira":"PROJ-1"}`),
 			Properties: json.RawMessage(`{"type":"task"}`), Type: "task", Parent: str("SDLC-0"),
+			ModelLevel:    str("medium"),
+			StageSettings: json.RawMessage(`{"development":{"model_level":"high"}}`),
 		},
 		Role: &RoleView{Key: "developer", Name: "Разработчик", Version: 1, Instructions: "…",
 			InputKinds: []string{"analysis.requirements"}, OutputContract: json.RawMessage(`[]`),
-			ToolPolicy: json.RawMessage(`{}`), ModelHint: str("opus"), ContextBudget: json.RawMessage(`{}`)},
+			ToolPolicy: json.RawMessage(`{}`), ModelLevel: str("low"), ModelHint: str("opus"), ContextBudget: json.RawMessage(`{}`)},
 		Context: ClaimContext{
 			Repositories:     []RepositoryView{{Owner: "acme", Name: "api", DefaultBranch: "main", Primary: true}},
 			ProjectDocuments: []domain.ProjectDocument{{ID: uuid.New(), Kind: "guideline", Title: "Соглашения"}},
@@ -52,6 +54,7 @@ func fullClaimResult() ClaimResult {
 		GatesAhead:  []TransitionSpec{{Transition: "dev_done", Gates: []GateSpec{}}},
 		Lease:       &Lease{StageRunID: id, ExpiresAt: time.Now(), HeartbeatIntervalSeconds: 300},
 		UsageReport: UsageReportExpected,
+		Execution:   Execution{ModelLevel: str("high"), ModelLevelSource: domain.ModelLevelSourceStage},
 		Boundary:    newBoundary(),
 	}
 }

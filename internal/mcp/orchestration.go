@@ -26,12 +26,18 @@ func (s *Server) registerOrchestrationTools() {
 		"Завести задачу. Оркестратор так нарезает эпик: type задаёт цикл, parent вешает "+
 			"задачу на эпик, blocks задаёт порядок, assignee адресует её исполнителю, "+
 			"external_ref ссылается на тикет основного трекера. "+
+			"model_level — рекомендованный уровень модели задачи (low, medium, high), "+
+			"stage_settings — уровни этапов: {\"development\": {\"model_level\": \"high\"}}, "+
+			"ключи — статусы цикла задачи с ролью-исполнителем. "+
 			"Агент вправе создавать только дочерние задачи той, которую держит, и только "+
 			"внутри её области репозиториев.",
 		s.createTask)
 	add(s, "sdlc_update_task",
 		"Поправить постановку задачи: заголовок, описание, приоритет, метки, ссылку на "+
-			"основной трекер. Так аналитик "+
+			"основной трекер, уровень модели задачи (model_level) и этапов (stage_settings). "+
+			"stage_settings сливается с прежними по ключам статуса и полям этапа: пустое "+
+			"значение снимает уровень, этап без полей уходит, не названные ключи не меняются; "+
+			"model_level \"\" снимает уровень задачи. Так аналитик "+
 			"уточняет нарезку эпика, когда код ушёл вперёд её описания. Агент вправе править "+
 			"задачу, которую держит, и её дочерние. Не переданное поле не меняется, пустое "+
 			"описание очищает его, метки и external_ref заменяются целиком ({} снимает ссылки). Тип, статус, родитель, "+
@@ -65,7 +71,10 @@ type createTaskInput struct {
 	Blocks       []string        `json:"blocks,omitempty" jsonschema:"ключи задач, которые новая блокирует"`
 	// any, а не json.RawMessage: схему тула выводит jsonschema-go, и
 	// RawMessage для него — массив байтов, а не объект.
-	ExternalRef any `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://jira.example.com/browse/PROJ-12\"}}"`
+	ExternalRef any    `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://jira.example.com/browse/PROJ-12\"}}"`
+	ModelLevel  string `json:"model_level,omitempty" jsonschema:"рекомендованный уровень модели задачи: low, medium, high"`
+	// any — по той же причине, что external_ref.
+	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов: {\"development\": {\"model_level\": \"high\"}}; ключи — статусы цикла задачи с ролью-исполнителем"`
 }
 
 func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallToolResult, any, error) {
@@ -93,12 +102,20 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 	if err != nil {
 		return fail(err)
 	}
+	stageSettings, err := rawArgument(in.StageSettings)
+	if err != nil {
+		return fail(err)
+	}
+	var modelLevel *string
+	if in.ModelLevel != "" {
+		modelLevel = &in.ModelLevel
+	}
 	task, err := s.engine.CreateTask(ctx, key, actor(ctx).ID, workflow.CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{
 			ParentKey: in.Parent, TaskType: in.Type, Title: in.Title,
 			Description: description, Priority: in.Priority, Labels: in.Labels,
 			Properties: in.Properties, Repositories: in.Repositories,
-			ExternalRef: externalRef,
+			ExternalRef: externalRef, ModelLevel: modelLevel, StageSettings: stageSettings,
 		},
 		AssigneeHandle: in.Assignee,
 		Blocks:         in.Blocks,
@@ -112,6 +129,7 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		"status": task.StatusKey, "parent": task.ParentKey,
 		"assignee": task.AssigneeHandle, "repositories": repoNames(task),
 		"external_ref": task.ExternalRef,
+		"model_level":  task.ModelLevel, "stage_settings": task.StageSettings,
 	})
 }
 
@@ -135,7 +153,10 @@ type updateTaskInput struct {
 	Priority    *string   `json:"priority,omitempty" jsonschema:"low, normal, high, urgent"`
 	Labels      *[]string `json:"labels,omitempty" jsonschema:"метки целиком: список заменяет прежний набор"`
 	// nil — не трогать: null и отсутствие поля для агента одно и то же.
-	ExternalRef any `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер целиком: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://…\"}}; {} снимает ссылки"`
+	ExternalRef any     `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер целиком: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://…\"}}; {} снимает ссылки"`
+	ModelLevel  *string `json:"model_level,omitempty" jsonschema:"уровень модели задачи: low, medium, high; пустая строка снимает его"`
+	// any — по той же причине, что external_ref; nil — не трогать.
+	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов, сливаются с прежними: {\"testing\": {\"model_level\": \"low\"}}; {\"testing\": {\"model_level\": \"\"}} снимает уровень этапа"`
 }
 
 func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallToolResult, any, error) {
@@ -156,7 +177,14 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 
 	edit := workflow.UpdateTaskInput{
 		Title: in.Title, Description: in.Description, Priority: in.Priority,
-		Labels: in.Labels, Level: level,
+		Labels: in.Labels, ModelLevel: in.ModelLevel, Level: level,
+	}
+	if in.StageSettings != nil {
+		settings, err := rawArgument(in.StageSettings)
+		if err != nil {
+			return fail(err)
+		}
+		edit.StageSettings = &settings
 	}
 	if in.ExternalRef != nil {
 		ref, err := rawArgument(in.ExternalRef)
@@ -173,6 +201,7 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 		"key": task.Key, "title": task.Title, "description": task.Description,
 		"priority": task.Priority, "labels": task.Labels, "status": task.StatusKey,
 		"external_ref": task.ExternalRef,
+		"model_level":  task.ModelLevel, "stage_settings": task.StageSettings,
 	})
 }
 

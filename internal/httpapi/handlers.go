@@ -207,6 +207,10 @@ type createTaskRequest struct {
 	Blocks []string `json:"blocks"`
 	// Ссылка на основной трекер: {"jira": {"key", "url"}}. Проверяет движок.
 	ExternalRef json.RawMessage `json:"external_ref"`
+	// Уровень модели задачи и настройки этапов (решение 0060):
+	// {"development": {"model_level": "high"}}. Проверяет движок.
+	ModelLevel    *string         `json:"model_level"`
+	StageSettings json.RawMessage `json:"stage_settings"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -231,15 +235,17 @@ func (s *Server) createTask(c *gin.Context) {
 	task, err := s.engine.CreateTask(c.Request.Context(), c.Param("projectKey"), actor(c).ID,
 		workflow.CreateTaskInput{
 			CreateTaskInput: postgres.CreateTaskInput{
-				ParentKey:    req.ParentKey,
-				TaskType:     req.Type,
-				Title:        req.Title,
-				Description:  req.Description,
-				Priority:     req.Priority,
-				Labels:       req.Labels,
-				Properties:   req.Properties,
-				Repositories: req.Repositories,
-				ExternalRef:  req.ExternalRef,
+				ParentKey:     req.ParentKey,
+				TaskType:      req.Type,
+				Title:         req.Title,
+				Description:   req.Description,
+				Priority:      req.Priority,
+				Labels:        req.Labels,
+				Properties:    req.Properties,
+				Repositories:  req.Repositories,
+				ExternalRef:   req.ExternalRef,
+				ModelLevel:    req.ModelLevel,
+				StageSettings: req.StageSettings,
 			},
 			AssigneeHandle: req.Assignee,
 			Blocks:         req.Blocks,
@@ -507,6 +513,10 @@ type updateTaskRequest struct {
 	Labels      *[]string `json:"labels"`
 	// Ссылка на основной трекер целиком; {} снимает её.
 	ExternalRef *json.RawMessage `json:"external_ref"`
+	// Уровень модели задачи: "" снимает. Настройки этапов сливаются с
+	// прежними по ключам статуса и полям этапа (решение 0060).
+	ModelLevel    *string          `json:"model_level"`
+	StageSettings *json.RawMessage `json:"stage_settings"`
 }
 
 // updateTask меняет постановку задачи. Право проверяет движок: у агента она
@@ -529,12 +539,14 @@ func (s *Server) updateTask(c *gin.Context) {
 
 	task, err := s.engine.UpdateTask(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
 		workflow.UpdateTaskInput{
-			Title:       req.Title,
-			Description: req.Description,
-			Priority:    req.Priority,
-			Labels:      req.Labels,
-			ExternalRef: req.ExternalRef,
-			Level:       level,
+			Title:         req.Title,
+			Description:   req.Description,
+			Priority:      req.Priority,
+			Labels:        req.Labels,
+			ExternalRef:   req.ExternalRef,
+			ModelLevel:    req.ModelLevel,
+			StageSettings: req.StageSettings,
+			Level:         level,
 		})
 	if err != nil {
 		fail(c, s.log, err)

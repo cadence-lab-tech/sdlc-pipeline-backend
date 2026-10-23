@@ -10,12 +10,12 @@ import (
 )
 
 const roleVersionCols = `id, role_id, version, instructions, input_kinds, output_contract,
-	       tool_policy, model_hint, repo_scope, context_budget, changelog, created_at`
+	       tool_policy, model_hint, model_level, repo_scope, context_budget, changelog, created_at`
 
 func scanRoleVersion(row interface{ Scan(...any) error }) (domain.RoleVersion, error) {
 	var rv domain.RoleVersion
 	err := row.Scan(&rv.ID, &rv.RoleID, &rv.Version, &rv.Instructions, &rv.InputKinds,
-		&rv.OutputContract, &rv.ToolPolicy, &rv.ModelHint, &rv.RepoScope,
+		&rv.OutputContract, &rv.ToolPolicy, &rv.ModelHint, &rv.ModelLevel, &rv.RepoScope,
 		&rv.ContextBudget, &rv.Changelog, &rv.CreatedAt)
 	return rv, err
 }
@@ -166,6 +166,7 @@ type CreateRoleVersionInput struct {
 	OutputContract json.RawMessage
 	ToolPolicy     json.RawMessage
 	ModelHint      *string
+	ModelLevel     *string
 	RepoScope      []string
 	ContextBudget  json.RawMessage
 	Changelog      *string
@@ -197,12 +198,12 @@ func (s *Store) CreateRoleVersion(ctx context.Context, q Querier, in CreateRoleV
 	rv, err := scanRoleVersion(q.QueryRow(ctx, `
 		INSERT INTO role_versions (role_id, version, instructions, input_kinds,
 		            output_contract, tool_policy, model_hint, repo_scope,
-		            context_budget, changelog, created_by)
-		SELECT $1, coalesce(max(version), 0) + 1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		            context_budget, changelog, created_by, model_level)
+		SELECT $1, coalesce(max(version), 0) + 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 		FROM role_versions WHERE role_id = $1
 		RETURNING `+roleVersionCols,
 		in.RoleID, in.Instructions, in.InputKinds, in.OutputContract, in.ToolPolicy,
-		in.ModelHint, in.RepoScope, in.ContextBudget, in.Changelog, in.CreatedBy))
+		in.ModelHint, in.RepoScope, in.ContextBudget, in.Changelog, in.CreatedBy, in.ModelLevel))
 	if err != nil {
 		return rv, translate(err)
 	}

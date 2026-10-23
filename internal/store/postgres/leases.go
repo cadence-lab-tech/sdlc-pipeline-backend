@@ -132,6 +132,16 @@ func (s *Store) ClaimStageRun(ctx context.Context, tx pgx.Tx, runID, actor uuid.
 	return s.GetStageRun(ctx, tx, runID)
 }
 
+// SnapshotModelLevel пишет на прогон рекомендованный уровень модели и его
+// источник (решение 0060). Закрытый прогон не переписывается: снимок — то, что
+// рекомендовали при захвате, и правка уровней потом его не трогает.
+func (s *Store) SnapshotModelLevel(ctx context.Context, tx pgx.Tx, runID uuid.UUID, level *string, source string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE stage_runs SET model_level = $2, model_level_source = $3
+		WHERE id = $1 AND finished_at IS NULL`, runID, level, source)
+	return translate(err)
+}
+
 // ExtendLease продлевает аренду. Продлить может только держатель: heartbeat
 // чужого агента не должен удерживать задачу за тем, кто её уже потерял.
 func (s *Store) ExtendLease(ctx context.Context, tx pgx.Tx, runID, actor uuid.UUID, expires time.Time) (bool, error) {
