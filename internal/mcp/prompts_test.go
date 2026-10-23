@@ -86,6 +86,36 @@ func TestWorkPromptCarriesTrustRule(t *testing.T) {
 	}
 }
 
+// CLAB-261, AC-6 и AC-7: после захвата промпт велит сверить модель с
+// execution.model_level и при расхождении сказать «рекомендован уровень X, вы
+// работаете на Y», при none — молчать, модель не менять; учёт — до перехода
+// (CLAB-225: после перехода прогон не удерживается и отчёт не примут).
+func TestWorkPromptModelLevel(t *testing.T) {
+	cs := connectPrompts(t)
+	for _, args := range []map[string]string{
+		{"task": "SDLC-42"}, {"task": "SDLC-42", "role": "developer"},
+	} {
+		text := promptText(t, cs, "work_on_task", args)
+		for _, want := range []string{
+			"execution", "model_level", "рекомендован уровень", "вы работаете на",
+			"low — haiku", "medium — sonnet", "high — opus",
+			"none", "ничего не говори", "Модель не меняй", "полным id модели",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("work_on_task %v: нет %q", args, want)
+			}
+		}
+		claim := strings.Index(text, "sdlc_claim_task")
+		level := strings.Index(text, "рекомендован уровень")
+		usage := strings.Index(text, "sdlc_report_usage")
+		transition := strings.Index(text, "sdlc_request_transition")
+		if claim < 0 || !(claim < level && level < usage && usage < transition) {
+			t.Errorf("work_on_task %v: порядок захват → уровень → учёт → переход нарушен: %d, %d, %d, %d",
+				args, claim, level, usage, transition)
+		}
+	}
+}
+
 // CLAB-209, критерий 7: перенос правил считает переносимое материалом, а
 // подозрительные строки показывает человеку в отчёте dry_run.
 func TestImportRulesCarriesTrustRule(t *testing.T) {
