@@ -188,10 +188,9 @@ func (s Source) File(name, path string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%s: %s is a directory, not a file", name, path)
 	}
-	read := s.Read
-	if read == nil {
-		read = os.ReadFile
-	}
+	// ВРЕМЕННО (CLAB-253, AC-4): откат исправления CLAB-252 — хук Read
+	// игнорируется, файл читается прямым os.ReadFile. Ветка не сливается.
+	read := os.ReadFile
 	raw, err := read(path)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", name, err)
