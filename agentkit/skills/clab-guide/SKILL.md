@@ -85,6 +85,27 @@ SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab …`. A task token opens only the
 role's work on its own task: no rules, no scope changes, no tokens, no
 approvals; of gate decisions only checklist marks.
 
+## Recommended model level
+
+A role version, a task and a stage of a task can carry a recommended model
+level: `low`, `medium` or `high`. On a task and its stages the levels are
+written by `clab create` and `clab edit` (`--model-level`,
+`--model-level-for <status>=<level>`). Who sets them is the project's
+choice: any role whose instruction tells it to, or a person, for example at
+an approval. At the claim the server resolves the
+level of the run — the stage of the task, then the task, then the role,
+otherwise `none` — and stores it on the run; the claim answer carries it as
+`execution: {model_level, model_level_source}`. The level is a
+recommendation, never a gate:
+
+- `clab-run` starts the stage executor on `haiku`, `sonnet` or `opus` by the
+  level (`none` — the chat's model) and names the choice in the chat;
+- `clab-work` and the prompt `work_on_task` only tell the human when their
+  model differs from the level, and go on;
+- `clab usage --model` takes the full model id of the session
+  (`claude-opus-5-5`), not an alias: the server does not normalise model
+  names.
+
 ## Rules and data
 
 The stage rules are the role instruction, its contract, the task scope, the
@@ -111,11 +132,14 @@ clab heartbeat ABC-12                        # keep the lease
 clab submit ABC-12 --kind <kind> --title "…" --file a.md
 clab link ABC-12 --repo owner/name --ref <PR number> --url <link>
 clab drift ABC-12                            # open divergences from main
-clab usage ABC-12 --model <model> --input N --output N --cost X
+clab usage ABC-12 --model <full model id> --input N --output N --cost X
 clab gates ABC-12 [--transition <transition>]
 clab transition ABC-12 --to <transition> [--summary "…"] [--reason "…"]
 clab release ABC-12 --note "…"               # drop the stage unfinished
 clab create --title "…" [--type epic] [--parent ABC-2] [--repos owner/name]
+            [--model-level medium] [--model-level-for <status>=low ...]
+clab edit ABC-12 [--model-level high | --model-level ""]
+                 [--model-level-for <status>=high | --model-level-for <status>=]
 clab relate ABC-3 --to ABC-4 --rel blocks
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
 clab version                                 # CLI and server versions

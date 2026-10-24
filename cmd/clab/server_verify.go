@@ -273,11 +273,48 @@ func (v *verifier) verifyImageOffline(ctx context.Context, version, repo, target
 		"--certificate-oidc-issuer", verifyIssuer, target)
 	if err != nil {
 		v.tail(ctx, out)
+		if cosignUnsigned(err, out) {
+			registry := target[:strings.LastIndex(target, "/"+repo+"@")]
+			return fmt.Errorf("%s (%s %s) has no signature in %s: this happens when the archive is loaded there with CADENCE_VERIFY=off, "+
+				"or the images are copied without their referrers. Its digest is the pin of the signed package.\n"+
+				"  Load the archive again with verification (cosign 3.x, without CADENCE_VERIFY=off): clab server images load FILE --registry %s,\n"+
+				"  or skip the signatures on purpose: run again with CADENCE_VERIFY=off (docs/admin.md, \"Air-gapped installation\"). %s",
+				target, repo, version, registry, registry, v.nothing)
+		}
 		return fmt.Errorf("the signature of %s (%s %s) did not verify for %s: the image is altered or not ours.\n"+
 			"  Do not run it and report it privately (SECURITY.md). %s", target, repo, version, identity, v.nothing)
 	}
 	v.e.ok("%s is signed by %s (verified offline with %s of %s)", target, identity, trustedRootAsset, where)
 	return nil
+}
+
+// cosignNoSignatures — ответ cosign 3.x на verify образа, у которого в
+// реестре нет ни одной подписи: код выхода 10 и строка ошибки, как у
+// v3.1.3 на registry:3 с образом без referrers (CLAB-278). Тот же ответ —
+// на digest, которого в реестре нет вовсе; выходы для него те же (load
+// заново кладёт и образ). Чужой бандл отвечает иначе — «no matching …»,
+// код 1.
+const (
+	cosignNoSignaturesCode = 10
+	cosignNoSignatures     = "Error: no signatures found"
+)
+
+// cosignUnsigned — cosign отказал потому, что подписей нет вовсе, а не
+// потому, что они не сошлись. Нужны и код, и строка: всё прочее — реестр не
+// ответил, не пустил, незнакомый ответ — остаётся отказом «altered or not
+// ours» (R4 CLAB-278). Исход от этого не меняется, только текст: образ по
+// pin подписанного пакета — содержимое релиза, и потеряна у него лишь
+// подпись.
+func cosignUnsigned(err error, out string) bool {
+	if exitCode(err) != cosignNoSignaturesCode {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == cosignNoSignatures {
+			return true
+		}
+	}
+	return false
 }
 
 // imagesRoot — корень для проверки образов без ghcr.io: взятый подписью
