@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -143,30 +147,131 @@ func firstLine(s string) string {
 // любой из них, а образ без :80 выходит через релиз после неё (CLAB-247).
 var uiProbes = []string{"http://ui:8080/", "http://ui:80/"}
 
+// Маршруты Caddy (CLAB-267). Прямая проба ui не видит маршрута Caddyfile:
+// свой маршрут администратора на ui:80 после образа только на :8080 отдаёт
+// 502, а прямая проба довольна. Поэтому после прямых проб waitReady
+// спрашивает admin API Caddy об апстримах загруженного конфига и пробует
+// каждый из контейнера caddy, а в режиме proxy ещё и / маршрутом —
+// http://localhost/ внутри контейнера. Всё — plain HTTP: в режиме tls ни
+// HTTPS, ни SDLC_DOMAIN не спрашиваются, сертификат на готовность не влияет,
+// а busybox wget не запускает ssl_client (docs/admin.md, «Third-party
+// images»).
+const (
+	caddyUpstreamsURL = "http://127.0.0.1:2019/reverse_proxy/upstreams"
+	caddyRootURL      = "http://localhost/"
+	// routeProbeTimeout — -T busybox wget для проб маршрута: апстрим, который
+	// не отвечает и не отказывает, не должен держать шаг 900 с по умолчанию.
+	routeProbeTimeout = "5"
+	// routeFailSteps — сколько шагов подряд маршрут может не проходить при
+	// готовых api и ui, прежде чем ожидание кончится: конфиг Caddy после
+	// reload сам не исправится, ждать CADENCE_READY_TIMEOUT незачем.
+	routeFailSteps = 3
+)
+
+// errNotReady — стек не дождался готовности за таймаут.
+var errNotReady = errors.New("not ready")
+
+// routeError — api и ui готовы, а маршрут Caddy не доходит до апстрима:
+// какие апстримы загруженного конфига не отвечают и чем ответил / в режиме
+// proxy (502 или 504; 0 — не провал).
+type routeError struct {
+	down []string
+	root int
+}
+
+func (r *routeError) Error() string {
+	var what []string
+	if len(r.down) > 0 {
+		what = append(what, fmt.Sprintf("the upstream %s of the loaded Caddy configuration does not answer from the caddy container", strings.Join(r.down, ", ")))
+	}
+	if r.root != 0 {
+		what = append(what, fmt.Sprintf("the route / through Caddy (%s in the caddy container) answers %d", caddyRootURL, r.root))
+	}
+	return strings.Join(what, ", and ")
+}
+
+// explain — отказ готовности по маршруту для человека: что сломано, что это
+// значит для сайта, как лечить и чем проверить.
+func (r *routeError) explain(i *installation) string {
+	status := 502
+	if r.root != 0 {
+		status = r.root
+	}
+	return fmt.Sprintf("%s.\n"+
+		"  The api and ui services are up (ui answers directly), but the site answers %d everywhere except /v1, /mcp, /webhooks, /healthz and /readyz.\n"+
+		"  The UI image listens on port 8080 only from v0.16.0: point the route of your Caddyfile at ui:8080, then reload Caddy:\n"+
+		"%s  export CADENCE_VERSION=$(cat VERSION)\n"+
+		"  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile\n"+
+		"  Check the site: curl -sS -o /dev/null -w '%%{http_code}\\n' %s\n"+
+		"  See docs/admin.md, \"The UI on port 8080\".",
+		r.Error(), status, i.cdHint(), i.siteURL())
+}
+
+// siteURL — адрес сайта для проверки curl: SDLC_DOMAIN в режиме tls, адрес
+// публикации в режиме proxy.
+func (i *installation) siteURL() string {
+	if i.getDefault("CADENCE_MODE", "tls") == "proxy" {
+		return "http://" + i.getDefault("CADENCE_HTTP_ADDR", "127.0.0.1:8080") + "/ (and the public address of your proxy)"
+	}
+	return "https://" + i.get("SDLC_DOMAIN") + "/"
+}
+
 // waitReady — lib.sh wait_ready: API здоров по своей проверке (/readyz:
-// сервис поднят и база отвечает), а интерфейс отвечает через Caddy на одном
-// из uiProbes. Ожидание считается шагами по 3 секунды, как в скрипте:
+// сервис поднят и база отвечает), интерфейс отвечает из контейнера caddy на
+// одном из uiProbes, и маршруты Caddy доходят до своих апстримов
+// (routesAnswer). Ожидание считается шагами по 3 секунды, как в скрипте:
 // нулевой таймаут — «не готов» без единой проверки, на этом стоит сценарий
-// отката в ci/.
-func (i *installation) waitReady(ctx context.Context, timeout int) bool {
+// отката в ci/. nil — готов; *routeError — маршрут не прошёл routeFailSteps
+// шагов подряд при готовых api и ui (или до таймаута); errNotReady — иначе.
+func (i *installation) waitReady(ctx context.Context, timeout int) error {
+	var routeErr *routeError
+	fails := 0
+	warned := false
 	for waited := 0; waited < timeout; waited += 3 {
 		if ctx.Err() != nil {
-			return false
+			return errNotReady
 		}
-		if api := i.containerOf(ctx, "api"); api != "" {
-			health, _ := output(ctx, i.e.run, i.docker("inspect", "-f", "{{.State.Health.Status}}", api))
-			if strings.TrimSpace(health) == "healthy" && i.uiAnswers(ctx) {
-				return true
+		if i.apiHealthy(ctx) && i.uiAnswers(ctx) {
+			rerr, checked := i.routesAnswer(ctx)
+			if !checked && !warned {
+				warned = true
+				also := ""
+				if i.getDefault("CADENCE_MODE", "tls") == "proxy" {
+					also = " and / through Caddy"
+				}
+				i.e.warn("the routes of Caddy are not checked: its admin API (%s in the caddy container) does not answer, as with 'admin off' in your own Caddyfile; readiness is the direct probes only%s", caddyUpstreamsURL, also)
 			}
+			if rerr == nil {
+				return nil
+			}
+			routeErr = rerr
+			if fails++; fails >= routeFailSteps {
+				return routeErr
+			}
+		} else {
+			fails = 0
 		}
 		i.e.sleep(3 * time.Second)
 	}
-	return false
+	if fails > 0 {
+		return routeErr
+	}
+	return errNotReady
+}
+
+// apiHealthy — healthcheck контейнера api — healthy.
+func (i *installation) apiHealthy(ctx context.Context) bool {
+	api := i.containerOf(ctx, "api")
+	if api == "" {
+		return false
+	}
+	health, _ := output(ctx, i.e.run, i.docker("inspect", "-f", "{{.State.Health.Status}}", api))
+	return strings.TrimSpace(health) == "healthy"
 }
 
 // uiAnswers — интерфейс отвечает на одном из uiProbes: wget из контейнера
-// caddy, как в lib.sh, прямо в ui. Маршрут Caddyfile пакета этим не
-// проверяется — он сменит порт вместе с образом в одном релизе (CLAB-248).
+// caddy, как в lib.sh, прямо в ui, мимо маршрута — его проверяет
+// routesAnswer.
 func (i *installation) uiAnswers(ctx context.Context) bool {
 	for _, url := range uiProbes {
 		if _, err := output(ctx, i.e.run, i.compose("exec", "-T", "caddy", "wget", "-q", "-O", "/dev/null", url)); err == nil {
@@ -174,6 +279,88 @@ func (i *installation) uiAnswers(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// caddyWget — busybox wget в контейнере caddy с пределом routeProbeTimeout:
+// тело ответа (dst "-") и сообщение об ошибке.
+func (i *installation) caddyWget(ctx context.Context, dst, url string) (string, string, error) {
+	var stderr bytes.Buffer
+	c := i.compose("exec", "-T", "caddy", "wget", "-q", "-T", routeProbeTimeout, "-O", dst, url)
+	c.stderr = &stderr
+	out, err := output(ctx, i.e.run, c)
+	return out, stderr.String(), err
+}
+
+// httpError — код ответа из «server returned error: HTTP/1.1 502 Bad
+// Gateway» busybox wget; 0 — ответа HTTP не было (отказ соединения, имя не
+// резолвится, таймаут).
+var httpError = regexp.MustCompile(`server returned error: HTTP/[0-9.]+ ([0-9]{3})`)
+
+func httpStatus(stderr string) int {
+	m := httpError.FindStringSubmatch(stderr)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// routesAnswer — маршруты Caddy доходят до апстримов. checked — admin API
+// ответил списком апстримов; не ответил — маршруты не проверены, и это
+// предупреждение, а не отказ (свой Caddyfile с admin off). Апстрим отвечает,
+// если на http://<апстрим>/ пришёл любой ответ HTTP, 4xx тоже. В режиме
+// proxy / маршрутом проверяется всегда, провал — только 502 и 504: 401
+// своего basicauth и 404 — ответ маршрута.
+func (i *installation) routesAnswer(ctx context.Context) (*routeError, bool) {
+	var r routeError
+	upstreams, checked := i.caddyUpstreams(ctx)
+	for _, addr := range upstreams {
+		_, stderr, err := i.caddyWget(ctx, "/dev/null", "http://"+addr+"/")
+		if err != nil && httpStatus(stderr) == 0 {
+			r.down = append(r.down, addr)
+		}
+	}
+	if i.getDefault("CADENCE_MODE", "tls") == "proxy" {
+		if _, stderr, err := i.caddyWget(ctx, "/dev/null", caddyRootURL); err != nil {
+			if s := httpStatus(stderr); s == 502 || s == 504 {
+				r.root = s
+			}
+		}
+	}
+	if len(r.down) == 0 && r.root == 0 {
+		return nil, checked
+	}
+	return &r, checked
+}
+
+// caddyUpstreams — адреса апстримов загруженного конфига из admin API, без
+// повторов; то, что не host:port (сокеты unix, плейсхолдеры), не
+// пробуется. false — admin API не ответил списком.
+func (i *installation) caddyUpstreams(ctx context.Context) ([]string, bool) {
+	out, _, err := i.caddyWget(ctx, "-", caddyUpstreamsURL)
+	if err != nil {
+		return nil, false
+	}
+	var list []struct {
+		Address string `json:"address"`
+	}
+	if json.Unmarshal([]byte(out), &list) != nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	var addrs []string
+	for _, u := range list {
+		a := u.Address
+		if seen[a] || strings.ContainsAny(a, "/{} ") {
+			continue
+		}
+		if host, port, err := net.SplitHostPort(a); err != nil || host == "" || port == "" {
+			continue
+		}
+		seen[a] = true
+		addrs = append(addrs, a)
+	}
+	return addrs, true
 }
 
 // showFailure — что скрипты печатают, когда стек не поднялся: состояние

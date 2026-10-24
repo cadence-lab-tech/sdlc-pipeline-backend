@@ -362,8 +362,14 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		return err
 	}
 	e.info("waiting for readiness (up to %ds)", timeout)
-	if !i.waitReady(ctx, timeout) {
-		i.showFailure(ctx, "api", "worker")
+	if err := i.waitReady(ctx, timeout); err != nil {
+		i.showFailure(ctx, "api", "worker", "caddy")
+		var route *routeError
+		if errors.As(err, &route) {
+			return fmt.Errorf("the stack runs %s, but %s\n"+
+				"  The database may already be migrated: fixing the route needs no new upgrade. Or return to %s and its backup:\n%s",
+				target, route.explain(i), oldVersion, rollback)
+		}
 		return fmt.Errorf("%s did not become ready in %ds (logs above). The database may already be migrated.\n"+
 			"  To return to %s and its backup:\n%s", target, timeout, oldVersion, rollback)
 	}
