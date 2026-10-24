@@ -679,11 +679,31 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return writeFile(dst, in, mode)
 }
 
+// createPartial — временный файл .<имя>.<случайное>.partial рядом с
+// output с правами обычного нового файла, 0666 &^ umask (CLAB-257).
+// os.CreateTemp создаёт 0600 и umask не учитывает: архив под sudo
+// оставался root 0600, и администратор не мог посчитать сумму и
+// скопировать его без sudo. Права применяет ядро при создании, поэтому
+// строгий umask администратора уважается, umask процесса не читается
+// (syscall.Umask нет на Windows и он общий на все горутины), а под
+// настоящим именем файл сразу появляется с итоговыми правами.
+func createPartial(output string) (*os.File, error) {
+	dir, base := filepath.Dir(output), filepath.Base(output)
+	for range 10000 {
+		f, err := os.OpenFile(filepath.Join(dir, "."+base+"."+randomSuffix()+".partial"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return f, err
+	}
+	return nil, fmt.Errorf("%s: no free name for the temporary archive", dir)
+}
+
 // writeArchive — каталог tree одним несжатым tar в output: во временный
 // файл в том же каталоге и переименование, чтобы обрыв не оставил
 // половину архива под настоящим именем. Возвращает sha256 и размер.
 func writeArchive(tree, output string) (string, int64, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(output), "."+filepath.Base(output)+".*.partial")
+	tmp, err := createPartial(output)
 	if err != nil {
 		return "", 0, err
 	}
