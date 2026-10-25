@@ -690,7 +690,7 @@ func (e *Engine) evalDependenciesClosed(ctx context.Context, q postgres.Querier,
 // ── attempts_limit ──────────────────────────────────────────────────────────
 
 // errNoMaxAttempts — в config гейта предела нет: гейт ничего не держит.
-var errNoMaxAttempts = errors.New("max_attempts не задан")
+var errNoMaxAttempts = errors.New("не задан")
 
 // maxAttempts читает предел из config гейта attempts_limit. Число строго
 // целое и не меньше единицы: 2.5, "3", null и 0 — не предел, а ошибка в
@@ -702,7 +702,7 @@ func maxAttempts(config json.RawMessage) (int, error) {
 	}
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal(config, &cfg); err != nil {
-		return 0, fmt.Errorf("config — не объект JSON: %w", err)
+		return 0, fmt.Errorf("не прочитать: config — не объект JSON: %w", err)
 	}
 	raw, ok := cfg["max_attempts"]
 	if !ok {
@@ -712,21 +712,21 @@ func maxAttempts(config json.RawMessage) (int, error) {
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return 0, fmt.Errorf("max_attempts: %w", err)
+		return 0, fmt.Errorf("не прочитать: %w", err)
 	}
 	num, ok := v.(json.Number)
 	if !ok {
-		return 0, fmt.Errorf("max_attempts должен быть целым числом, а не %s", string(raw))
+		return 0, fmt.Errorf("нужно целое число, а не %s", string(raw))
 	}
 	n, err := num.Int64()
 	if err != nil {
-		return 0, fmt.Errorf("max_attempts должен быть целым числом, а не %s", num)
+		return 0, fmt.Errorf("нужно целое число, а не %s", num)
 	}
 	if n < 1 {
-		return 0, fmt.Errorf("max_attempts должен быть не меньше 1, а не %d", n)
+		return 0, fmt.Errorf("нужно не меньше 1, а не %d", n)
 	}
 	if n > math.MaxInt32 {
-		return 0, fmt.Errorf("max_attempts слишком велик: %d", n)
+		return 0, fmt.Errorf("слишком велик: %d", n)
 	}
 	return int(n), nil
 }
@@ -746,7 +746,7 @@ func (e *Engine) evalAttemptsLimit(ctx context.Context, q postgres.Querier, in E
 		// не валит переход: предел необязателен, и без числа его нет.
 		reason := "предел не задан"
 		if !errors.Is(err, errNoMaxAttempts) {
-			reason = "предел задан неверно (" + err.Error() + ") и не действует"
+			reason = "предел задан неверно (max_attempts: " + err.Error() + ") и не действует"
 		}
 		return base(in.Gate, domain.GateResultPassed, reason), nil
 	}

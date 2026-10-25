@@ -241,7 +241,7 @@ func checkAttemptsLimit(t domain.Transition, g domain.Gate, statusByID map[uuid.
 	if _, err := maxAttempts(g.Config); err != nil {
 		out = append(out, Problem{
 			Code: "attempts_limit_invalid", Transition: t.Key, Gate: g.Key,
-			Message: "у гейта предела попыток неверный config.max_attempts — нужно целое не меньше 1: " + err.Error()})
+			Message: "у гейта предела попыток неверный config.max_attempts (целое не меньше 1): " + err.Error()})
 	}
 	if to, ok := statusByID[t.ToStatusID]; ok && to.IsTerminal {
 		out = append(out, Problem{
