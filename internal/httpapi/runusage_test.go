@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"math"
 	"net/http"
 	"reflect"
@@ -64,6 +65,18 @@ func TestRunUsageInTaskCard(t *testing.T) {
 	// want — ожидаемый usage; числа JSON приходят float64, null — nil.
 	check := func(name string, got map[string]any, want map[string]any) {
 		t.Helper()
+		// Поля CLAB-216 (решение 0062) только добавлены: строки этого теста
+		// без признака оплаты, поэтому вся стоимость — деньги без признака,
+		// а условной нет.
+		want = maps.Clone(want)
+		for _, k := range []string{"api_cost_usd", "unspecified_cost_usd"} {
+			if _, set := want[k]; !set {
+				want[k] = want["cost_usd"]
+			}
+		}
+		if _, set := want["subscription_cost_usd"]; !set {
+			want["subscription_cost_usd"] = nil
+		}
 		if len(got) != len(want) {
 			t.Errorf("%s: поля usage %v, ожидали %v", name, got, want)
 		}

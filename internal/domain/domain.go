@@ -207,6 +207,9 @@ type BudgetState struct {
 	Period   string  `json:"period,omitempty"`
 	LimitUSD float64 `json:"limit_usd,omitempty"`
 	SpentUSD float64 `json:"spent_usd"`
+	// Условная стоимость на подписке за то же окно (решение 0062): только
+	// для сведения, в SpentUSD и в предел не входит никогда.
+	SubscriptionUSD float64 `json:"subscription_usd"`
 }
 
 // Exceeded — исчерпан ли предел.
@@ -516,6 +519,27 @@ const (
 	ModelLevelSourceNone  = "none"
 )
 
+// Признак оплаты строки учёта (решение 0062): деньги по ключу API или
+// условная стоимость на подписке. Строка без признака — «не указано» и
+// считается деньгами: из бюджета выходит только явно заявленная подписка.
+const (
+	BillingAPI          = "api"
+	BillingSubscription = "subscription"
+)
+
+// Billings — признаки, которые допускает CHECK в схеме
+// (migrations/000030_usage_billing.up.sql).
+var Billings = []string{BillingAPI, BillingSubscription}
+
+func ValidBilling(billing string) bool {
+	for _, b := range Billings {
+		if b == billing {
+			return true
+		}
+	}
+	return false
+}
+
 func ValidModelLevel(level string) bool {
 	for _, l := range ModelLevels {
 		if l == level {
@@ -646,6 +670,8 @@ type StageRunUsage struct {
 	ReportedBy       *uuid.UUID      `json:"reported_by,omitempty"`
 	ReportedAt       time.Time       `json:"reported_at"`
 	Details          json.RawMessage `json:"details"`
+	// api, subscription или null — не указано, считается как api (решение 0062).
+	Billing *string `json:"billing"`
 }
 
 // RunUsage — учёт одного прогона в карточке задачи: сумма строк
@@ -666,6 +692,13 @@ type RunUsage struct {
 	CacheWriteTokens *int64   `json:"cache_write_tokens"`
 	CostUSD          *float64 `json:"cost_usd"`
 	DurationMS       *int64   `json:"duration_ms"`
+	// Раздельно по признаку оплаты (решение 0062): CostUSD — всё сообщённое,
+	// APICostUSD — деньги (api и не указано), UnspecifiedCostUSD — часть денег
+	// без признака, SubscriptionCostUSD — условная стоимость. null — строк с
+	// такой стоимостью нет, а не ноль.
+	APICostUSD          *float64 `json:"api_cost_usd"`
+	UnspecifiedCostUSD  *float64 `json:"unspecified_cost_usd"`
+	SubscriptionCostUSD *float64 `json:"subscription_cost_usd"`
 }
 
 // NoRunUsage — учёт прогона, о котором никто не отчитался.
@@ -729,6 +762,16 @@ type UsageSummary struct {
 	ReportedRuns   int     `json:"reported_runs"`
 	// Прогоны, о которых никто не отчитался: их стоимость неизвестна.
 	SilentRuns int `json:"silent_runs"`
+	// Раздельно по признаку оплаты (решение 0062). CostUSD и SubtreeCostUSD —
+	// по-прежнему всё сообщённое: CostUSD = APICostUSD + SubscriptionCostUSD.
+	// Деньги — строки api и без признака; UnspecifiedCostUSD — часть денег без
+	// признака; SubscriptionCostUSD — условная стоимость на подписке.
+	APICostUSD                 float64 `json:"api_cost_usd"`
+	UnspecifiedCostUSD         float64 `json:"unspecified_cost_usd"`
+	SubscriptionCostUSD        float64 `json:"subscription_cost_usd"`
+	SubtreeAPICostUSD          float64 `json:"subtree_api_cost_usd"`
+	SubtreeUnspecifiedCostUSD  float64 `json:"subtree_unspecified_cost_usd"`
+	SubtreeSubscriptionCostUSD float64 `json:"subtree_subscription_cost_usd"`
 }
 
 // Результаты гейтов.
