@@ -115,7 +115,7 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		_ = json.Unmarshal(raw, &want)
 		got := map[string]any{}
 		for k, v := range runs[order[i]] {
-			if k != "usage" {
+			if k != "usage" && k != "role_version" && k != "gate_results" && k != "exit" {
 				got[k] = v
 			}
 		}

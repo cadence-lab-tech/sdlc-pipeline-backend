@@ -157,10 +157,12 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 	return out, translate(rows.Err())
 }
 
-// CardStageRuns — прогоны задачи для карточки вместе с их учётом. Одно место
-// для REST (getTask) и MCP (sdlc_get_task), чтобы транспорты отдавали одно и
-// то же (решение 0011). ListStageRuns остаётся без учёта: его зовёт ещё
-// сборка контекста захвата, где учёт не нужен.
+// CardStageRuns — прогоны задачи для карточки вместе с их учётом, номером
+// версии роли, вердиктами гейтов и выходом (CLAB-283). Одно место для REST
+// (getTask) и MCP (sdlc_get_task), чтобы транспорты отдавали одно и то же
+// (решение 0011). Каждое из дополнений читается одним запросом на задачу, а
+// не на прогон. ListStageRuns остаётся без дополнений: его зовёт ещё сборка
+// контекста захвата, где они не нужны.
 func (s *Store) CardStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.CardStageRun, error) {
 	runs, err := s.ListStageRuns(ctx, q, taskID)
 	if err != nil {
@@ -170,13 +172,35 @@ func (s *Store) CardStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) 
 	if err != nil {
 		return nil, err
 	}
+	versions, err := s.RoleVersionsByTask(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
+	verdicts, err := s.GateVerdictsByTask(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
+	exits, err := s.RunExitsByTask(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.CardStageRun, 0, len(runs))
 	for _, r := range runs {
 		u, ok := usage[r.ID]
 		if !ok {
 			u = domain.NoRunUsage()
 		}
-		out = append(out, domain.CardStageRun{StageRun: r, Usage: u})
+		card := domain.CardStageRun{StageRun: r, Usage: u, GateResults: []domain.RunGateVerdict{}}
+		if v, ok := versions[r.ID]; ok {
+			card.RoleVersion = &v
+		}
+		if g, ok := verdicts[r.ID]; ok {
+			card.GateResults = g
+		}
+		if x, ok := exits[r.ID]; ok {
+			card.Exit = &x
+		}
+		out = append(out, card)
 	}
 	return out, nil
 }

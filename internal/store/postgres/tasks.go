@@ -389,6 +389,33 @@ func (s *Store) ListStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) 
 	return out, translate(rows.Err())
 }
 
+// RoleVersionsByTask — номер версии роли (role_versions.version) каждого
+// прогона задачи одним запросом (CLAB-283). Прогона без роли в ответе нет.
+func (s *Store) RoleVersionsByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID]int, error) {
+	rows, err := q.Query(ctx, `
+		SELECT sr.id, rv.version
+		FROM stage_runs sr
+		JOIN role_versions rv ON rv.id = sr.role_version_id
+		WHERE sr.task_id = $1`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]int{}
+	for rows.Next() {
+		var (
+			id uuid.UUID
+			v  int
+		)
+		if err := rows.Scan(&id, &v); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = v
+	}
+	return out, translate(rows.Err())
+}
+
 func (s *Store) FinishStageRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, state, outcome string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE stage_runs
