@@ -91,9 +91,10 @@ start the orchestrator, with its own `clab`:
 4. Names the executor model in the chat and starts a sub-agent of type
    `clab-stage` with it (sections "Executor model" and "Sub-agent"). This type
    has no MCP tools and no `Agent` tool, and the hook in its definition
-   refuses a call of `clab`, the `clab` of the self-hosted package
-   (`clab-<os>-<arch>`) or a script of the package without the task-token
-   directory. The definition
+   refuses, without the task-token directory, a call of clab under any name
+   `clab*` (bare `clab`, the `clab` of the self-hosted package
+   `clab-<os>-<arch>`, a built `clab-v0.17.0`, `clab-runner`), `go run` of
+   the package `cmd/clab*` or a script of the package. The definition
    lives in `.claude/agents/clab-stage.md` (installed by `clab setup`);
    Claude Code picks up the first definition in `.claude/agents/` after a
    session restart.
