@@ -1,9 +1,12 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -66,6 +69,7 @@ func (e *Engine) registerEvaluators() {
 		domain.GateAgentReview:        e.evalAgentReview,
 		domain.GateExternalCheck:      e.evalExternalCheck,
 		domain.GateDependenciesClosed: e.evalDependenciesClosed,
+		domain.GateAttemptsLimit:      e.evalAttemptsLimit,
 	}
 }
 
@@ -679,6 +683,97 @@ func (e *Engine) evalDependenciesClosed(ctx context.Context, q postgres.Querier,
 	sort.Strings(keys)
 	out := base(in.Gate, domain.GateResultFailed,
 		"не закрыты задачи: "+strings.Join(keys, ", "))
+	out.Details = details
+	return out, nil
+}
+
+// ── attempts_limit ──────────────────────────────────────────────────────────
+
+// errNoMaxAttempts — в config гейта предела нет: гейт ничего не держит.
+var errNoMaxAttempts = errors.New("не задан")
+
+// maxAttempts читает предел из config гейта attempts_limit. Число строго
+// целое и не меньше единицы: 2.5, "3", null и 0 — не предел, а ошибка в
+// цикле, и валидатор держит из-за неё активацию. Разбор один на валидатор и
+// вычислитель, чтобы они не разошлись в том, что считать пределом.
+func maxAttempts(config json.RawMessage) (int, error) {
+	if len(bytes.TrimSpace(config)) == 0 {
+		return 0, errNoMaxAttempts
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(config, &cfg); err != nil {
+		return 0, fmt.Errorf("не прочитать: config — не объект JSON: %w", err)
+	}
+	raw, ok := cfg["max_attempts"]
+	if !ok {
+		return 0, errNoMaxAttempts
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return 0, fmt.Errorf("не прочитать: %w", err)
+	}
+	num, ok := v.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("нужно целое число, а не %s", string(raw))
+	}
+	n, err := num.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("нужно целое число, а не %s", num)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("нужно не меньше 1, а не %d", n)
+	}
+	if n > math.MaxInt32 {
+		return 0, fmt.Errorf("слишком велик: %d", n)
+	}
+	return int(n), nil
+}
+
+// evalAttemptsLimit держит переход, если следующий вход в его целевой статус
+// дал бы попытку сверх предела.
+//
+// Номер попытки считает то же выражение, что и EnterStatus: в счёт идут все
+// входы в статус — начальный, прямой переход и любой откат, от любого актора.
+// Вердикт failed, а не pending: агенту тут закрывать нечего, ещё одну попытку
+// даёт человек решением waived (DecideGate), и оно действует на один переход:
+// следующий откат идёт из нового прогона и считается заново.
+func (e *Engine) evalAttemptsLimit(ctx context.Context, q postgres.Querier, in EvalInput) (GateOutcome, error) {
+	limit, err := maxAttempts(in.Gate.Config)
+	if err != nil {
+		// Валидатор такой цикл не активирует; если он всё же активен, гейт
+		// не валит переход: предел необязателен, и без числа его нет.
+		reason := "предел не задан"
+		if !errors.Is(err, errNoMaxAttempts) {
+			reason = "предел задан неверно (max_attempts: " + err.Error() + ") и не действует"
+		}
+		return base(in.Gate, domain.GateResultPassed, reason), nil
+	}
+
+	next, err := e.store.NextStageAttempt(ctx, q, in.Task.ID, in.Transition.ToStatusID)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+	target, err := e.store.GetStatus(ctx, q, in.Transition.ToStatusID)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+
+	details := map[string]any{
+		"status":       target.Key,
+		"next_attempt": next,
+		"max_attempts": limit,
+		"transition":   in.Transition.Key,
+	}
+	attempt := fmt.Sprintf("попытка %d из %d в статус %s", next, limit, target.Key)
+	if next <= limit {
+		out := base(in.Gate, domain.GateResultPassed, attempt)
+		out.Details = details
+		return out, nil
+	}
+	out := base(in.Gate, domain.GateResultFailed,
+		attempt+"; ещё одну попытку даёт человек — решение waived по этому гейту")
 	out.Details = details
 	return out, nil
 }
