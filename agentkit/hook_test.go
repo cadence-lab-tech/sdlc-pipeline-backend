@@ -135,6 +135,9 @@ var hookCaught = []string{
 	"go run -race ./cmd/clab version",
 	"cd w && go run ./cmd/clab-runner",
 	"env FOO=1 go run ./cmd/clab whoami",
+	// Флаг в кавычках перед путём пакета: в JSON кавычка приходит как \".
+	`go run -ldflags "-X main.version=v0.17.0" ./cmd/clab version`,
+	`go run -tags 'a b' ./cmd/clab whoami`,
 }
 
 // Имя скрипта или бинаря как аргумент чужой команды, путь и ветка — не

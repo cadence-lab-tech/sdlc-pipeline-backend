@@ -25,8 +25,9 @@ hooks:
             # Known and kept: sh -n install.sh is refused too, and so is | inside
             # quotes (grep 'a|clab x'): a safety net, not a shell parser. Not
             # caught: a clab built under a name that does not start with clab
-            # (go build -o /tmp/x), go run . inside cmd/clab, go run with a quoted
-            # flag before the package path.
+            # (go build -o /tmp/x), go run . inside cmd/clab, go run of a file or
+            # of ./cmd/clab/. (go run ./cmd/clab/main.go), go run with ; & | or a
+            # tab inside a quoted flag before the package path.
             # Newline and tab arrive from JSON as \n and \t.
             # Claude Code runs the hook only when the project folder is trusted;
             # /clab-run checks that it is alive with a probe before the first run.
