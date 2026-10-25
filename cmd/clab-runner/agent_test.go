@@ -635,3 +635,69 @@ func TestDefaultCommandStrictMCP(t *testing.T) {
 		t.Fatalf("команда по умолчанию без --strict-mcp-config: %s", argv)
 	}
 }
+
+// CLAB-214, AC-3 и AC-4: упавший агент, который успел напечатать JSON, —
+// строка учёта раннера, и только потом release с прежней причиной; вывод,
+// который не разобрался, строки не пишет ни при каком коде выхода.
+func TestFailedAgentUsageBeforeRelease(t *testing.T) {
+	for name, tc := range map[string]struct {
+		script    string
+		wantUsage bool
+		released  bool
+	}{
+		"упал с JSON":        {script: agentOK + "\nexit 1", wantUsage: true, released: true},
+		"упал без JSON":      {script: "echo 'Error: limit'\nexit 1", released: true},
+		"отработал без JSON": {script: "echo 'done'"},
+		"отработал с JSON":   {script: agentOK, wantUsage: true},
+		"упал с пустым JSON": {script: "echo '{}'\nexit 2", released: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			command, _ := stubAgent(t, tc.script)
+			var logs bytes.Buffer
+			r := testRunner(t, api, command, &logs)
+			if err := r.run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			usage, release := -1, -1
+			var usageBody, releaseBody string
+			for i, c := range api.seen() {
+				switch {
+				case c.Method == http.MethodPost && c.Path == "/v1/tasks/CLAB-1/runs/run-1/usage":
+					if usage >= 0 {
+						t.Fatal("два отчёта о стоимости на прогон")
+					}
+					usage, usageBody = i, c.Body
+				case c.Method == http.MethodPost && c.Path == "/v1/tasks/CLAB-1/release":
+					release, releaseBody = i, c.Body
+				}
+			}
+			if (usage >= 0) != tc.wantUsage {
+				t.Fatalf("отчёт о стоимости: %v, ожидали %v; журнал:\n%s", usage >= 0, tc.wantUsage, logs.String())
+			}
+			if (release >= 0) != tc.released {
+				t.Fatalf("release: %v, ожидали %v", release >= 0, tc.released)
+			}
+			if tc.wantUsage {
+				var body struct {
+					Model   string         `json:"model"`
+					CostUSD float64        `json:"cost_usd"`
+					Details map[string]any `json:"details"`
+				}
+				if err := json.Unmarshal([]byte(usageBody), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Model != "claude-sonnet-5" || body.CostUSD != 0.5 || body.Details["reported_by"] != "clab-runner" {
+					t.Fatalf("тело отчёта: %s", usageBody)
+				}
+			}
+			if tc.wantUsage && tc.released && usage > release {
+				t.Fatalf("release (%d) раньше учёта (%d): отчёт после снятия аренды", release, usage)
+			}
+			if tc.released && !strings.Contains(releaseBody, "агент завершился с ошибкой") {
+				t.Fatalf("причина release: %s", releaseBody)
+			}
+		})
+	}
+}

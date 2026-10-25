@@ -337,16 +337,20 @@ func (s *Server) registerWorkPrompt() {
 		Arguments: []*sdk.PromptArgument{
 			{Name: "task", Description: "ключ задачи, например SDLC-42", Required: true},
 			{Name: "role", Description: "ключ роли, если этап адресован конкретной"},
+			// Аргументы слэш-команды позиционные: usage идёт после role, и
+			// раннер, который его ставит, обязан передать и роль.
+			{Name: "usage", Description: "runner — стоимость сообщит раннер, который запустил агента; без него агент отчитывается сам"},
 		},
 	}
 	s.addPrompt(prompt, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
 		if err := requirePromptArguments(prompt, req); err != nil {
 			return nil, err
 		}
-		task, role := req.Params.Arguments["task"], req.Params.Arguments["role"]
-		text := workPromptText(task, role)
+		args := req.Params.Arguments
+		byRunner := strings.TrimSpace(args["usage"]) == usageByRunner
+		text := workPromptText(args["task"], args["role"], byRunner)
 		return &sdk.GetPromptResult{
-			Description: "работа над задачей " + task,
+			Description: "работа над задачей " + args["task"],
 			Messages: []*sdk.PromptMessage{{
 				Role:    "user",
 				Content: &sdk.TextContent{Text: text},
@@ -378,7 +382,33 @@ func requirePromptArguments(prompt *sdk.Prompt, req *sdk.GetPromptRequest) error
 	}
 }
 
-func workPromptText(task, role string) string {
+// usageByRunner — значение аргумента usage промпта work_on_task: стоимость
+// прогона сообщает раннер по выводу агента (CLAB-214). Любое другое значение
+// даёт прежний текст: агент отчитается сам, и в худшем случае строк учёта
+// будет две, а не ноль, и промпт не упадёт у раннера, который пришлёт
+// значение новее сервера.
+const usageByRunner = "runner"
+
+// usageStep — шаг 7 промпта work_on_task: отчёт о стоимости или, под
+// раннером, запрет на него.
+func usageStep(byRunner bool) string {
+	if byRunner {
+		return `7. О стоимости не отчитывайся: не вызывай sdlc_report_usage и clab usage,
+   даже если ответ захвата ждёт отчёта (usage_report). Тебя запустил
+   раннер, он сообщит стоимость прогона по твоему выводу сам, и второй
+   отчёт удвоил бы её.`
+	}
+	return `7. До перехода отчитайся о стоимости: sdlc_report_usage с полным id модели из
+   сессии (claude-opus-5-5, а не алиас opus), токенами и деньгами. Переход
+   отпускает прогон, и отчёт после него уже не примут; без отчёта прогон
+   стоит «неизвестно».`
+}
+
+// workPromptText — текст промпта work_on_task. byRunner — агента поднял
+// раннер и о стоимости отчитается сам: у прогона один источник учёта, и
+// шаг отчёта агенту заменён запретом. Ответ захвата при этом всё равно
+// приносит usage_report: expected, поэтому одного пропуска шага мало.
+func workPromptText(task, role string, byRunner bool) string {
 	head := "Возьми задачу " + task + " в работу."
 	if role == "" {
 		head = "Возьми задачу " + task + " в работу ролью, которой адресован её текущий этап."
@@ -410,10 +440,7 @@ func workPromptText(task, role string) string {
    sdlc_create_task (parent — ключ этого эпика) и задай порядок sdlc_link_tasks.
 6. Сдай результат sdlc_submit_artifact ровно тех видов, что перечислены в
    контракте роли. Код изменений живёт в PR: привяжи его sdlc_link_repo_ref.
-7. До перехода отчитайся о стоимости: sdlc_report_usage с полным id модели из
-   сессии (claude-opus-5-5, а не алиас opus), токенами и деньгами. Переход
-   отпускает прогон, и отчёт после него уже не примут; без отчёта прогон
-   стоит «неизвестно».
+` + usageStep(byRunner) + `
 8. sdlc_check_gates покажет, что мешает переходу. Закрой мешающее и позови
    sdlc_request_transition.
 

@@ -116,6 +116,55 @@ func TestWorkPromptModelLevel(t *testing.T) {
 	}
 }
 
+// CLAB-214, AC-2 и AC-7: с usage=runner шага отчёта о стоимости нет, есть
+// прямой запрет на sdlc_report_usage и clab usage, правило о данных и сверка
+// уровня на месте. Без признака, с незнакомым значением и с лишним
+// незнакомым аргументом — прежний текст с шагом отчёта.
+func TestWorkPromptRunnerUsage(t *testing.T) {
+	cs := connectPrompts(t)
+	const selfReport = "7. До перехода отчитайся о стоимости: sdlc_report_usage с полным id модели из\n" +
+		"   сессии (claude-opus-5-5, а не алиас opus), токенами и деньгами."
+
+	plain := promptText(t, cs, "work_on_task", map[string]string{"task": "SDLC-42", "role": "developer"})
+	if !strings.Contains(plain, selfReport) {
+		t.Fatalf("без признака нет шага отчёта:\n%s", plain)
+	}
+	for name, args := range map[string]map[string]string{
+		"пустой признак":      {"task": "SDLC-42", "role": "developer", "usage": ""},
+		"незнакомое значение": {"task": "SDLC-42", "role": "developer", "usage": "agent"},
+		"незнакомый аргумент": {"task": "SDLC-42", "role": "developer", "billing": "subscription"},
+	} {
+		if got := promptText(t, cs, "work_on_task", args); got != plain {
+			t.Errorf("%s: текст разошёлся с прежним:\n%s", name, got)
+		}
+	}
+
+	runner := promptText(t, cs, "work_on_task", map[string]string{"task": "SDLC-42", "role": "developer", "usage": "runner"})
+	if strings.Contains(runner, "До перехода отчитайся") {
+		t.Fatalf("в режиме раннера остался шаг отчёта:\n%s", runner)
+	}
+	for _, want := range []string{
+		"не вызывай sdlc_report_usage и clab usage", "раннер", "usage_report",
+		trust.Rule, "рекомендован уровень", "Модель не меняй", "sdlc_request_transition",
+	} {
+		if !strings.Contains(runner, want) {
+			t.Errorf("в режиме раннера нет %q", want)
+		}
+	}
+	claim := strings.Index(runner, "sdlc_claim_task")
+	level := strings.Index(runner, "рекомендован уровень")
+	noReport := strings.Index(runner, "О стоимости не отчитывайся")
+	transition := strings.Index(runner, "sdlc_request_transition")
+	if claim < 0 || !(claim < level && level < noReport && noReport < transition) {
+		t.Errorf("порядок захват → уровень → запрет отчёта → переход нарушен: %d, %d, %d, %d",
+			claim, level, noReport, transition)
+	}
+	// Шаги те же, кроме седьмого: остальной текст не разошёлся.
+	if strings.Replace(runner, usageStep(true), usageStep(false), 1) != plain {
+		t.Error("режим раннера меняет не только шаг 7")
+	}
+}
+
 // CLAB-209, критерий 7: перенос правил считает переносимое материалом, а
 // подозрительные строки показывает человеку в отчёте dry_run.
 func TestImportRulesCarriesTrustRule(t *testing.T) {
