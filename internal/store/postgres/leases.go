@@ -344,6 +344,23 @@ func (s *Store) GetTaskByID(ctx context.Context, q Querier, taskID uuid.UUID) (d
 	return t, nil
 }
 
+// EverClaimedRun — забирал ли актор этот прогон когда-либо: по событиям
+// stage.claimed в ленте задачи, а не по claimed_by, который release, уход в
+// gating и протухание аренды обнуляют. Нужен отчёту о стоимости, который
+// приходит после выхода агента (CLAB-214).
+func (s *Store) EverClaimedRun(ctx context.Context, q Querier, taskID, runID, actor uuid.UUID) (bool, error) {
+	var claimed bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM task_events
+			WHERE task_id = $1 AND stage_run_id = $2 AND type = $3 AND actor_id = $4)`,
+		taskID, runID, domain.EventStageClaimed, actor).Scan(&claimed)
+	if err != nil {
+		return false, translate(err)
+	}
+	return claimed, nil
+}
+
 // LastRunClaimedBy — последний прогон задачи, который забирал этот актор.
 // Нужен отчёту о стоимости: раннер отчитывается, когда этап уже закрыт
 // переходом и текущий прогон принадлежит следующему статусу.
