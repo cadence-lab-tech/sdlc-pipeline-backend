@@ -202,6 +202,12 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	}
 	defer home.cleanup()
 
+	if claim.roleKey(item.RoleKey) == "" {
+		// Признак режима раннера — позиционный аргумент после роли: без роли
+		// его не передать, и агент отчитается о стоимости сам, рядом с
+		// отчётом раннера.
+		log.Warn("роль этапа неизвестна: промпт без режима раннера, стоимость прогона может посчитаться дважды")
+	}
 	argv := r.argv(item, claim, home.mcpConfig, workdir)
 	log.Info("запуск агента", append(choice.logAttrs(), "command", argv[0], "workdir", workdir,
 		"credentials", creds.kind())...)
@@ -217,24 +223,41 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	out, err := cmd.Output()
 	stop()
 
+	// Под раннером о стоимости отчитывается только он (CLAB-214): агенту
+	// промпт это запрещает, поэтому отчёт идёт и за упавшего агента — Claude
+	// Code печатает JSON и при ненулевом коде выхода.
+	report := parseUsage(out)
 	if err != nil {
+		log.Error("агент завершился с ошибкой", "error", err)
+		// Сначала учёт, потом release: отпуск снимает аренду, и без истории
+		// захвата отчёт после него отбился бы.
+		r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
 		// Агент умер — аренда протухнет сама, но отпустить задачу сразу
 		// честнее: следующий слот возьмёт её, не дожидаясь протухания.
-		log.Error("агент завершился с ошибкой", "error", err)
 		r.releaseQuietly(ctx, item.Task.Key, "агент завершился с ошибкой")
 		return
 	}
-
-	if report := parseUsage(out); report != nil {
-		if err := r.api.reportUsage(ctx, item.Task.Key, claim.StageRunID, report); err != nil {
-			log.Warn("отчёт о стоимости не принят", "error", err)
-		} else {
-			log.Info("агент отработал", "cost_usd", report["cost_usd"], "model", report["model"])
-		}
-	} else {
-		// Молчание честнее выдуманного нуля: прогон останется «неизвестно».
-		log.Info("агент отработал, стоимость неизвестна")
+	if r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report) {
+		log.Info("агент отработал", "cost_usd", report["cost_usd"], "model", report["model"])
 	}
+}
+
+// reportUsage отправляет разобранный вывод агента своим токеном раннера и
+// отвечает, принят ли отчёт. Неразобранный вывод строки не пишет:
+// молчание честнее выдуманного нуля, прогон останется «неизвестно».
+func (r *runner) reportUsage(ctx context.Context, log *slog.Logger, task, runID string, report map[string]any) bool {
+	if report == nil {
+		log.Info("стоимость неизвестна: вывод агента не разобран")
+		return false
+	}
+	// Отчёт переживает остановку раннера так же, как release после него.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	if err := r.api.reportUsage(ctx, task, runID, report); err != nil {
+		log.Warn("отчёт о стоимости не принят", "error", err)
+		return false
+	}
+	return true
 }
 
 // agentCreds — чем агент представляется серверу: токеном задачи, а у
@@ -393,12 +416,22 @@ func trimDanglingFlag(argv []string) []string {
 // prompt — единая точка старта работы: тот же промпт, которым пользуется
 // человек. В Claude Code промпт MCP-сервера доступен как слэш-команда, и
 // агент забирает его с того же сервера, к которому подключён.
+//
+// Третий аргумент — usage=runner: стоимость сообщит раннер, и агенту промпт
+// отчитываться запрещает (CLAB-214). Аргументы слэш-команды позиционные,
+// поэтому признак ставится только вместе с ролью. Сервер прежней версии
+// лишний аргумент пропускает и отдаёт прежний текст.
 func prompt(task, role string) string {
 	if role == "" {
 		return "/mcp__sdlc__work_on_task " + task
 	}
-	return "/mcp__sdlc__work_on_task " + task + " " + role
+	return "/mcp__sdlc__work_on_task " + task + " " + role + " " + usageByRunner
 }
+
+// usageByRunner — значение аргумента usage промпта work_on_task. Та же
+// константа есть в internal/mcp: раннер не тянет пакет сервера ради одной
+// строки, значение держат тесты с обеих сторон.
+const usageByRunner = "runner"
 
 // agentDir — временный каталог агента: mcp.json и конфиг clab с его
 // учётными данными. Живёт ровно столько, сколько работает агент.

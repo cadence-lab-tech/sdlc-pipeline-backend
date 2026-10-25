@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,15 @@ func TestArgvSubstitutions(t *testing.T) {
 	}
 	if !strings.Contains(argv, "/mcp__sdlc__work_on_task") {
 		t.Fatalf("раннер обязан стартовать тем же промптом, что человек: %s", argv)
+	}
+	// CLAB-214, AC-1: промпт несёт роль и признак режима раннера — агент не
+	// отчитывается о стоимости, это делает раннер.
+	if got := r.argv(item, claim, "/tmp/mcp.json", ""); !slices.Contains(got, "/mcp__sdlc__work_on_task SDLC-42 developer runner") {
+		t.Fatalf("промпт без роли или признака режима раннера: %q", got)
+	}
+	// Без роли признак не передать: аргументы позиционные.
+	if got := prompt("SDLC-42", ""); got != "/mcp__sdlc__work_on_task SDLC-42" {
+		t.Fatalf("промпт без роли: %q", got)
 	}
 
 	// Роль без подсказки модели — законный случай: флаг уходит целиком.

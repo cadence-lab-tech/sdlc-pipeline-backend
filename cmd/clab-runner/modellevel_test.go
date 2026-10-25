@@ -125,14 +125,16 @@ func TestChooseModel(t *testing.T) {
 	}
 
 	// Против сервера без execution argv тот же, что у раннера прежней
-	// версии: с таблицей и без неё.
+	// версии: с таблицей и без неё. Признак режима раннера в промпте
+	// (CLAB-214) раннер ставит всегда: сервер прежней версии лишний
+	// аргумент промпта пропускает.
 	old := levelClaim(nil, "", "opus")
 	withTable := newRunner(Config{Project: "CLAB", Command: defaultCommand, ModelLevels: table}, slog.Default())
 	without := newRunner(Config{Project: "CLAB", Command: defaultCommand}, slog.Default())
 	a := strings.Join(withTable.argv(item, old, "/tmp/mcp.json", ""), " ")
 	b := strings.Join(without.argv(item, old, "/tmp/mcp.json", ""), " ")
 	want := "claude -p --output-format json --mcp-config /tmp/mcp.json --strict-mcp-config --model opus " +
-		"/mcp__sdlc__work_on_task CLAB-1 developer"
+		"/mcp__sdlc__work_on_task CLAB-1 developer runner"
 	if a != b || a != want {
 		t.Fatalf("argv против старого сервера:\n%s\n%s\nждали\n%s", a, b, want)
 	}

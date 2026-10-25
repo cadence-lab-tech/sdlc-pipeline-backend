@@ -61,7 +61,11 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 
 		// Отчитаться можно только о своей работе: чужой прогон не станет
 		// дешевле или дороже от того, что мимо прошёл другой агент.
-		if run.ClaimedBy == nil || *run.ClaimedBy != actor {
+		claimed, err := e.claimedRun(ctx, tx, run, actor)
+		if err != nil {
+			return err
+		}
+		if !claimed {
 			return apperr.Forbidden(
 				"о прогоне %s отчитывается тот, кто его забирал", run.ID)
 		}
@@ -85,6 +89,18 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 	})
 
 	return out, err
+}
+
+// claimedRun — забирал ли актор этот прогон. Текущий держатель — да; иначе
+// ответ по ленте: аренду к моменту отчёта могли снять — release самого
+// агента, уход прогона в gating под перепроверку, протухание, — и
+// claimed_by тогда пуст, хотя работу оплатил именно этот актор. Раннер
+// отчитывается после выхода агента и других путей не имеет (CLAB-214).
+func (e *Engine) claimedRun(ctx context.Context, q postgres.Querier, run domain.StageRun, actor uuid.UUID) (bool, error) {
+	if run.ClaimedBy != nil && *run.ClaimedBy == actor {
+		return true, nil
+	}
+	return e.store.EverClaimedRun(ctx, q, run.TaskID, run.ID, actor)
 }
 
 // TaskUsage — стоимость задачи и её поддерева: карточка эпика показывает,
