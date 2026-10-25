@@ -358,8 +358,8 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 //
 // bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
 // Исполнитель этапа решает только passed по чек-листу своего этапа, а гейты
-// из humanOnlyGates (human_approval, attempts_limit, stage_time_limit) не закрывает, даже если
-// держатель аренды — человек.
+// из humanOnlyGates (human_approval, attempts_limit, stage_time_limit) не
+// закрывает, даже если держатель аренды — человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
 	var out GateOutcome
 

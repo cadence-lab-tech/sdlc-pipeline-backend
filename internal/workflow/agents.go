@@ -279,14 +279,12 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		// гаснут: без этого они ожили бы вместе с новой арендой того же
 		// принципала, не дождавшись воркера.
 		newLease := !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now()))
-		// Просроченный этап закрыт для новых аренд исполнителей, как и
-		// исчерпанный бюджет: начатое не обрывается, новое не выдаётся.
 		if newLease {
+			// Просроченный этап закрыт для новых аренд исполнителей, как и
+			// исчерпанный бюджет: начатое не обрывается, новое не выдаётся.
 			if err := e.stageTimeAllows(ctx, tx, task, run, actor, opts.OnlyRun != nil); err != nil {
 				return err
 			}
-		}
-		if newLease {
 			if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
 				return err
 			}
