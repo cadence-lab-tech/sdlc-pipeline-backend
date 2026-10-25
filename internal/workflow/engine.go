@@ -195,6 +195,11 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			if o.Type == domain.GateChecklist || o.Type == domain.GateHumanApproval {
 				continue
 			}
+			// Снятие гейта, который решает только человек, — тоже его
+			// решение: перезапись вердиктом движка стёрла бы, кто дал попытку.
+			if o.Status == domain.GateResultWaived && humanOnly(o.Type) {
+				continue
+			}
 			if err := e.store.RecordGateResult(ctx, tx, run.ID, gate.ID, transition.ID,
 				o.Status, o.Details, nil); err != nil {
 				return err
@@ -351,8 +356,9 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 // потому что гейтов на переходе несколько и закрывать их можно в любом порядке.
 //
 // bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
-// Исполнитель этапа решает только passed по чек-листу своего этапа, а
-// human_approval не закрывает, даже если держатель аренды — человек.
+// Исполнитель этапа решает только passed по чек-листу своего этапа, а гейты
+// из humanOnlyGates (human_approval, attempts_limit) не закрывает, даже если
+// держатель аренды — человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
 	var out GateOutcome
 
@@ -382,9 +388,11 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 			return err
 		}
 
+		rule, onlyHuman := humanOnlyGates[gate.Type]
+
 		// Токен задачи апрув не ставит, даже если аренду держит человек
 		// (/clab-run): проверка по виду токена, а не только принципала.
-		if bound != nil && gate.Type == domain.GateHumanApproval {
+		if bound != nil && onlyHuman {
 			return executorRefused(bound, fmt.Sprintf("гейт %q закрывает человек", gate.Key))
 		}
 		if bound != nil {
@@ -396,7 +404,7 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 		// Апрув человека ставит человек. Агент, представившийся человеком,
 		// в режиме токенов не пройдёт аутентификацию; в режиме заголовка
 		// это защита от случайного самоапрува агентом, а не от злого умысла.
-		if gate.Type == domain.GateHumanApproval {
+		if onlyHuman {
 			who, err := e.store.GetPrincipal(ctx, tx, actor)
 			if err != nil {
 				return err
@@ -404,6 +412,11 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 			if who.Kind != domain.PrincipalUser {
 				return apperr.Forbidden("гейт %q закрывает человек, а не %s %q",
 					gate.Key, who.Kind, who.Handle)
+			}
+			if rule.waiveOnly && status != domain.GateResultWaived {
+				return apperr.InvalidInput(
+					"по гейту %q вердикт выносит движок; человек может только снять его: "+
+						"status waived, а не %q", gate.Key, status)
 			}
 		}
 
@@ -430,6 +443,26 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 	})
 
 	return out, err
+}
+
+// humanGate — как человек решает гейт, который решает только он.
+type humanGate struct {
+	// waiveOnly: вердикт выносит движок, а человек может лишь снять гейт —
+	// waived. passed и failed здесь не решение, а подмена вычисления.
+	waiveOnly bool
+}
+
+// humanOnlyGates — типы гейтов, решение по которым выносит только человек:
+// принципал вида user и не токеном задачи. Предел этапа (решение 0061)
+// добавляет сюда свой тип строкой, а не второй копией проверки.
+var humanOnlyGates = map[string]humanGate{
+	domain.GateHumanApproval: {},
+	domain.GateAttemptsLimit: {waiveOnly: true},
+}
+
+func humanOnly(gateType string) bool {
+	_, ok := humanOnlyGates[gateType]
+	return ok
 }
 
 func validGateDecision(status string) bool {

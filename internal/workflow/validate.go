@@ -163,6 +163,15 @@ func validateWorkflow(wf domain.Workflow, implemented func(string) bool, strict 
 		}
 	}
 
+	// Конфигурация гейтов, которую проверить можно только на цикле целиком.
+	for _, t := range wf.Transitions {
+		for _, g := range t.Gates {
+			if check, ok := gateConfigChecks[g.Type]; ok {
+				v.Problems = append(v.Problems, check(t, g, statusByID)...)
+			}
+		}
+	}
+
 	// Статус, на котором кто-то должен работать, но исполнитель не назначен:
 	// задача войдёт в него и встанет, потому что забирать её будет некому.
 	for _, st := range wf.Statuses {
@@ -210,6 +219,35 @@ func unreachable(wf domain.Workflow, initial uuid.UUID) []string {
 		if !reached[st.ID] {
 			out = append(out, st.Key)
 		}
+	}
+	return out
+}
+
+// gateConfigCheck — проверка config гейта своего типа на версии цикла.
+// Проблемы держат активацию: гейт с негодной настройкой собран неверно.
+type gateConfigCheck func(t domain.Transition, g domain.Gate, statusByID map[uuid.UUID]domain.Status) []Problem
+
+// gateConfigChecks — проверки по типу гейта. Новый тип с настройкой
+// добавляет сюда свою функцию, а не ветку в чужой (CLAB-218, CLAB-221).
+var gateConfigChecks = map[string]gateConfigCheck{
+	domain.GateAttemptsLimit: checkAttemptsLimit,
+}
+
+// checkAttemptsLimit: предел — целое не меньше единицы, и переход ведёт в
+// статус, куда задача может вернуться. Вид перехода не важен: обычно предел
+// ставят на откат, но годится и advance.
+func checkAttemptsLimit(t domain.Transition, g domain.Gate, statusByID map[uuid.UUID]domain.Status) []Problem {
+	var out []Problem
+	if _, err := maxAttempts(g.Config); err != nil {
+		out = append(out, Problem{
+			Code: "attempts_limit_invalid", Transition: t.Key, Gate: g.Key,
+			Message: "у гейта предела попыток неверный config.max_attempts — нужно целое не меньше 1: " + err.Error()})
+	}
+	if to, ok := statusByID[t.ToStatusID]; ok && to.IsTerminal {
+		out = append(out, Problem{
+			Code: "attempts_limit_terminal", Transition: t.Key, Gate: g.Key, Status: to.Key,
+			Message: fmt.Sprintf(
+				"предел попыток на переходе в терминальный статус %q ничего не держит: повторного входа туда нет", to.Key)})
 	}
 	return out
 }
