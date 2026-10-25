@@ -104,3 +104,39 @@ func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateI
 	}
 	return n, nil
 }
+
+// GateVerdictsByTask — вердикты гейтов всех прогонов задачи одним запросом
+// (CLAB-283): этапы и вложенные перепроверки, по образцу RunUsageByTask.
+// Прогона без записей в ответе нет — пустой список дописывает тот, кто
+// склеивает (CardStageRuns). Порядок внутри прогона не зависит от плана
+// запроса: по времени записи, затем по позиции и ключу гейта.
+func (s *Store) GateVerdictsByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID][]domain.RunGateVerdict, error) {
+	rows, err := q.Query(ctx, `
+		SELECT gr.stage_run_id, g.key, g.name, g.type, t.key, gr.status, gr.details,
+		       p.handle, gr.decided_at
+		FROM gate_results gr
+		JOIN stage_runs sr           ON sr.id = gr.stage_run_id
+		JOIN gates g                 ON g.id = gr.gate_id
+		JOIN workflow_transitions t  ON t.id = gr.transition_id
+		LEFT JOIN principals p       ON p.id = gr.decided_by
+		WHERE sr.task_id = $1
+		ORDER BY gr.stage_run_id, gr.created_at, g.position, g.key`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID][]domain.RunGateVerdict{}
+	for rows.Next() {
+		var (
+			runID uuid.UUID
+			v     domain.RunGateVerdict
+		)
+		if err := rows.Scan(&runID, &v.GateKey, &v.GateName, &v.GateType, &v.TransitionKey,
+			&v.Status, &v.Details, &v.DecidedByHandle, &v.DecidedAt); err != nil {
+			return nil, translate(err)
+		}
+		out[runID] = append(out[runID], v)
+	}
+	return out, translate(rows.Err())
+}

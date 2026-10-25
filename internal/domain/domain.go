@@ -676,9 +676,49 @@ func NoRunUsage() RunUsage {
 // CardStageRun — прогон в карточке задачи (GET /v1/tasks/:key и
 // sdlc_get_task): прежние поля прогона и его учёт. Отдельный тип, а не поле
 // StageRun: прогон ходит и в других ответах, где учёта нет.
+//
+// Поля CLAB-283 только добавлены к прежним: номер версии роли, вердикты
+// гейтов и выход прогона. Все три лежат в базе (role_versions, gate_results,
+// task_events), карточка читает их по одному запросу на задачу.
 type CardStageRun struct {
 	StageRun
 	Usage RunUsage `json:"usage"`
+	// Номер версии роли (role_versions.version); null у прогона без роли.
+	RoleVersion *int `json:"role_version"`
+	// Вердикты гейтов прогона из gate_results; у прогона без записей — [].
+	GateResults []RunGateVerdict `json:"gate_results"`
+	// Чем прогон закончен; null, пока идёт, и у прогона перепроверки (его
+	// итог — outcome и summary).
+	Exit *RunExit `json:"exit"`
+}
+
+// RunGateVerdict — запись gate_results вместе с именем гейта и ключом
+// перехода: карточке не нужны uuid, ей нужно «какой гейт, на каком переходе,
+// чем кончился, кто решил». В таблице последнее состояние, а не история.
+type RunGateVerdict struct {
+	GateKey       string          `json:"gate_key"`
+	GateName      string          `json:"gate_name"`
+	GateType      string          `json:"gate_type"`
+	TransitionKey string          `json:"transition_key"`
+	Status        string          `json:"status"`
+	Details       json.RawMessage `json:"details"`
+	// Хэндл принципала, решившего гейт; null, если вердикт вынес движок.
+	DecidedByHandle *string    `json:"decided_by_handle"`
+	DecidedAt       *time.Time `json:"decided_at"`
+}
+
+// RunExit — выход прогона: переход, которым он закончен. Берётся из события
+// task.advanced / task.rejected / task.cancelled этого прогона (payload.
+// transition, to, comment), поэтому миграция не нужна.
+type RunExit struct {
+	// advanced | rejected | cancelled — тип события перехода без префикса.
+	Kind       string  `json:"kind"`
+	Transition string  `json:"transition"`
+	ToStatus   string  `json:"to_status"`
+	Comment    *string `json:"comment"`
+	// Хэндл того, кто запросил переход.
+	ByHandle *string   `json:"by_handle"`
+	At       time.Time `json:"at"`
 }
 
 // UsageSummary — стоимость задачи: своя и вместе с дочерними задачами.

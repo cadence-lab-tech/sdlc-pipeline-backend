@@ -601,7 +601,10 @@ func (s *Server) listEvents(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	events, err := s.store.ListEvents(ctx, q, task.ID, limit)
+	// ?status=<ключ статуса> — события прогонов этого статуса, включая
+	// вложенные перепроверки; предел считается после фильтра, незнакомый
+	// ключ даёт пустую ленту (CLAB-283).
+	events, err := s.store.ListEventsByStatus(ctx, q, task.ID, c.Query("status"), limit)
 	if err != nil {
 		fail(c, s.log, err)
 		return

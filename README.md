@@ -103,7 +103,7 @@ development) каждый запрос несёт `Authorization: Bearer <token>
 | `POST`/`PATCH`/`DELETE` | `.../transitions/{transition}/gates[/{gate}]` | гейты черновика |
 | `GET`/`POST` | `/v1/projects/{key}/tasks` | список и создание задач |
 | `GET` | `/v1/tasks/{key}` | карточка: задача, попытки этапов, артефакты, вердикт гейтов |
-| `GET` | `/v1/tasks/{key}/timeline` | лента событий |
+| `GET` | `/v1/tasks/{key}/timeline` | лента событий; `?status=<ключ статуса>` — события прогонов этого статуса |
 | `PATCH` | `/v1/tasks/{key}/scope` | свойства и область задачи: `add_repositories`, `remove_repositories` (сопровождающий), `note` |
 | `GET`/`POST` | `/v1/tasks/{key}/artifacts` | артефакты текущей попытки этапа |
 | `GET` | `/v1/tasks/{key}/transitions` | доступные переходы с прогоном гейтов |
