@@ -55,6 +55,11 @@ type Config struct {
 	RetryDelay    time.Duration
 	RetryDelayMax time.Duration
 	LimitPause    time.Duration
+	// Тип оплаты прогонов из SDLC_RUNNER_BILLING (решение 0062): api или
+	// subscription; пусто — не указан, поле в отчёт не идёт, и сервер
+	// считает строку деньгами. По окружению не угадывается: вход в Claude
+	// Code через консоль тоже оплачивается по API, а снаружи выглядит так же.
+	Billing string
 }
 
 // Значения защиты от петли захватов по умолчанию; их же берёт раннер,
@@ -65,6 +70,9 @@ const (
 	defaultRetryDelayMax = 15 * time.Minute
 	defaultLimitPause    = time.Hour
 )
+
+// billings — типы оплаты из решения 0062; других значений сервер не примет.
+var billings = []string{"api", "subscription"}
 
 // modelLevels — уровни из решения 0060; других ключей таблица не знает.
 var modelLevels = []string{"low", "medium", "high"}
@@ -124,6 +132,9 @@ func loadConfig() (Config, error) {
 		return c, err
 	}
 	c.ModelLevels = levels
+	if c.Billing, err = parseBilling(env("SDLC_RUNNER_BILLING", "")); err != nil {
+		return c, err
+	}
 	if err := c.loadWorkspaces(); err != nil {
 		return c, err
 	}
@@ -194,6 +205,17 @@ func parseModelLevels(raw string) (map[string]string, error) {
 		table[level] = model
 	}
 	return table, nil
+}
+
+// parseBilling разбирает SDLC_RUNNER_BILLING. Опечатка — отказ старта, а не
+// молчаливый запуск: прогоны на подписке ушли бы в бюджет команды деньгами, а
+// «API» вместо api сервер всё равно бы отбил на каждом отчёте.
+func parseBilling(raw string) (string, error) {
+	if raw == "" || slices.Contains(billings, raw) {
+		return raw, nil
+	}
+	return "", fmt.Errorf("SDLC_RUNNER_BILLING: %q не поддерживается, допустимы %s; "+
+		"без переменной тип оплаты не указан и прогоны считаются по API", raw, strings.Join(billings, ", "))
 }
 
 // modelLevelsString — таблица для журнала в порядке уровней.
