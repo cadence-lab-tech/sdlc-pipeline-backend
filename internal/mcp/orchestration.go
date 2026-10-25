@@ -50,7 +50,9 @@ func (s *Server) registerOrchestrationTools() {
 	add(s, "sdlc_report_usage",
 		"Отчитаться о стоимости прогона этапа: модель, токены, деньги, время. "+
 			"Отчитывается тот, кто забирал этап, — сам агент или запустивший его раннер. "+
-			"Без отчёта прогон стоит «неизвестно», а не ноль.",
+			"Без отчёта прогон стоит «неизвестно», а не ноль. "+
+			"billing — тип оплаты: api или subscription; условная стоимость на подписке "+
+			"в бюджет команды не входит, без признака строка считается как api.",
 		s.reportUsage)
 	add(s, "sdlc_assign_task",
 		"Назначить задачу принципалу: забрать её сможет только он. Пустой assignee снимает назначение.",
@@ -248,6 +250,7 @@ type reportUsageInput struct {
 	CostUSD          *float64        `json:"cost_usd,omitempty" jsonschema:"стоимость в долларах"`
 	DurationMS       *int64          `json:"duration_ms,omitempty"`
 	Details          json.RawMessage `json:"details,omitempty"`
+	Billing          string          `json:"billing,omitempty" jsonschema:"тип оплаты: api или subscription; пусто — не указано, считается как api"`
 }
 
 func (s *Server) reportUsage(ctx context.Context, in reportUsageInput) (*sdk.CallToolResult, any, error) {
@@ -262,6 +265,7 @@ func (s *Server) reportUsage(ctx context.Context, in reportUsageInput) (*sdk.Cal
 		Model: in.Model, InputTokens: in.InputTokens, OutputTokens: in.OutputTokens,
 		CacheReadTokens: in.CacheReadTokens, CacheWriteTokens: in.CacheWriteTokens,
 		CostUSD: in.CostUSD, DurationMS: in.DurationMS, Details: in.Details,
+		Billing: in.Billing,
 	}
 	if in.StageRunID != "" {
 		id, err := uuid.Parse(in.StageRunID)

@@ -426,19 +426,24 @@ func (s *Store) EffectiveRole(ctx context.Context, q Querier, projectID, princip
 // Расход команды — это стоимость прогонов в проектах, которыми она владеет
 // (`projects.owner_team_id`). Проект, где команда просто участвует, платит его
 // владелец: иначе один и тот же доллар считался бы дважды.
+//
+// Бюджет считает только деньги (решение 0062): строки api и без признака.
+// Условная стоимость на подписке в расход не входит никогда — её сумма за то
+// же окно идёт рядом, для сведения.
 const teamSpendQuery = `
-	SELECT coalesce(sum(u.cost_usd), 0)::float8
+	SELECT coalesce(sum(u.cost_usd) FILTER (WHERE ` + moneyPredicate + `), 0)::float8,
+	       coalesce(sum(u.cost_usd) FILTER (WHERE ` + subscriptionPredicate + `), 0)::float8
 	FROM stage_run_usage u
 	JOIN stage_runs sr ON sr.id = u.run_id
 	JOIN tasks t ON t.id = sr.task_id
 	JOIN projects p ON p.id = t.project_id
 	WHERE p.owner_team_id = $1 AND u.reported_at >= date_trunc($2, now())`
 
-// TeamSpend — сколько команда потратила с начала окна.
-func (s *Store) TeamSpend(ctx context.Context, q Querier, teamID uuid.UUID, period string) (float64, error) {
-	var spent float64
-	err := q.QueryRow(ctx, teamSpendQuery, teamID, period).Scan(&spent)
-	return spent, translate(err)
+// TeamSpend — сколько команда потратила денег с начала окна и сколько за то
+// же окно прошло условной стоимостью на подписке.
+func (s *Store) TeamSpend(ctx context.Context, q Querier, teamID uuid.UUID, period string) (spent, subscription float64, err error) {
+	err = q.QueryRow(ctx, teamSpendQuery, teamID, period).Scan(&spent, &subscription)
+	return spent, subscription, translate(err)
 }
 
 // ListTeamBudgets — пределы команды по окнам.
@@ -491,7 +496,8 @@ func (s *Store) DeleteTeamBudget(ctx context.Context, q Querier, teamID uuid.UUI
 // Period означает, что превышения нет.
 //
 // Одним запросом: проверка стоит на пути каждого захвата этапа, и три похода
-// в базу там дороже, чем выглядят.
+// в базу там дороже, чем выглядят. Считаются только деньги — тем же
+// предикатом, что TeamSpend (решение 0062).
 func (s *Store) ExceededBudget(ctx context.Context, q Querier, projectID uuid.UUID) (domain.BudgetState, error) {
 	var out domain.BudgetState
 	err := q.QueryRow(ctx, `
@@ -509,6 +515,7 @@ func (s *Store) ExceededBudget(ctx context.Context, q Querier, projectID uuid.UU
 			           JOIN projects p ON p.id = t.project_id
 			           WHERE p.owner_team_id = o.team_id
 			             AND u.reported_at >= date_trunc(b.period, now())
+			             AND `+moneyPredicate+`
 			       ), 0)::float8 AS spent
 			FROM owner o
 			JOIN team_budgets b ON b.team_id = o.team_id

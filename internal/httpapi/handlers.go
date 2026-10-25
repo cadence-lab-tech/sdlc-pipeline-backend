@@ -377,6 +377,9 @@ type reportUsageRequest struct {
 	CostUSD          *float64        `json:"cost_usd"`
 	DurationMS       *int64          `json:"duration_ms"`
 	Details          json.RawMessage `json:"details"`
+	// api или subscription; пусто — не указано (решение 0062). Значение
+	// проверяет движок.
+	Billing string `json:"billing"`
 }
 
 // reportUsage принимает отчёт о стоимости прогона. Сюда ходит раннер после
@@ -392,6 +395,7 @@ func (s *Server) reportUsage(c *gin.Context) {
 		Model: req.Model, InputTokens: req.InputTokens, OutputTokens: req.OutputTokens,
 		CacheReadTokens: req.CacheReadTokens, CacheWriteTokens: req.CacheWriteTokens,
 		CostUSD: req.CostUSD, DurationMS: req.DurationMS, Details: req.Details,
+		Billing: req.Billing,
 	}
 	if raw := c.Param("runID"); raw != "" {
 		id, err := uuid.Parse(raw)
