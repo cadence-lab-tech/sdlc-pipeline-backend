@@ -105,6 +105,9 @@ recommendation, never a gate:
 - `clab usage --model` takes the full model id of the session
   (`claude-opus-5-5`), not an alias: the server does not normalise model
   names.
+- `clab usage --billing api|subscription` says how the run was paid: on a
+  subscription the cost is notional and stays out of the team budget;
+  without the flag the row counts as money, like `api`.
 
 ## Rules and data
 

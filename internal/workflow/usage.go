@@ -7,6 +7,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,6 +29,24 @@ type ReportUsageInput struct {
 	CostUSD          *float64
 	DurationMS       *int64
 	Details          json.RawMessage
+	// Признак оплаты (решение 0062): api, subscription или пусто — не
+	// указано, строка считается деньгами. Проверка одна, здесь: все
+	// транспорты передают значение как пришло.
+	Billing string
+}
+
+// parseBilling — признак оплаты строки учёта: пусто — не указано (nil),
+// иначе одно из domain.Billings. Регистр не приводится: «API» — не api.
+func parseBilling(raw string) (*string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	if !domain.ValidBilling(raw) {
+		return nil, apperr.InvalidInput(
+			"billing: %q не поддерживается, допустимы %s; пусто — не указано, считается как api",
+			raw, strings.Join(domain.Billings, ", "))
+	}
+	return &raw, nil
 }
 
 // ReportUsage записывает, во что обошёлся прогон этапа.
@@ -36,8 +55,12 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 	if in.Model == "" {
 		return out, apperr.InvalidInput("нужна модель: без неё отчёт не с чем сравнивать")
 	}
+	billing, err := parseBilling(in.Billing)
+	if err != nil {
+		return out, err
+	}
 
-	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+	err = e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.GetTaskByKey(ctx, tx, taskKey)
 		if err != nil {
 			return err
@@ -75,7 +98,7 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 			InputTokens: in.InputTokens, OutputTokens: in.OutputTokens,
 			CacheReadTokens: in.CacheReadTokens, CacheWriteTokens: in.CacheWriteTokens,
 			CostUSD: in.CostUSD, DurationMS: in.DurationMS,
-			ReportedBy: actor, Details: in.Details,
+			Billing: billing, ReportedBy: actor, Details: in.Details,
 		})
 		if err != nil {
 			return err
@@ -84,6 +107,9 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 		payload := map[string]any{"model": in.Model, "stage_run_id": run.ID.String()}
 		if in.CostUSD != nil {
 			payload["cost_usd"] = *in.CostUSD
+		}
+		if billing != nil {
+			payload["billing"] = *billing
 		}
 		return e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventUsageReported, actor, payload)
 	})

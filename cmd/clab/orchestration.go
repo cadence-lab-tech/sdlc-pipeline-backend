@@ -254,7 +254,7 @@ func cmdAssign(ctx context.Context, c *Client, args []string) error {
 // запущенный им агент закончил: сервер стоимость не измеряет и без отчёта
 // прогон остаётся «неизвестно», а не нулём (решение 0026).
 func cmdUsage(ctx context.Context, c *Client, args []string) error {
-	var model, run, details string
+	var model, run, details, billing string
 	var in, out64, cacheRead, cacheWrite, duration int64
 	var cost float64
 	var show bool
@@ -269,6 +269,7 @@ func cmdUsage(ctx context.Context, c *Client, args []string) error {
 		fs.Float64Var(&cost, "cost", -1, "стоимость в долларах")
 		fs.Int64Var(&duration, "duration-ms", -1, "длительность работы агента")
 		fs.StringVar(&details, "details", "", "произвольные подробности объектом JSON")
+		fs.StringVar(&billing, "billing", "", "тип оплаты: api или subscription; пусто — не указано, считается как api")
 		fs.BoolVar(&show, "show", false, "показать стоимость задачи, ничего не записывая")
 	})
 	if err != nil {
@@ -298,6 +299,11 @@ func cmdUsage(ctx context.Context, c *Client, args []string) error {
 	setInt(body, "duration_ms", duration)
 	if cost >= 0 {
 		body["cost_usd"] = cost
+	}
+	// Значение проверяет сервер и отвечает перечнем допустимых: список
+	// признаков один, в движке (решение 0062).
+	if billing != "" {
+		body["billing"] = billing
 	}
 	if details != "" {
 		var raw json.RawMessage
