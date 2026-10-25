@@ -241,7 +241,7 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 		if transition.Kind == "reject" {
 			rejectedFrom = &run.ID
 		}
-		newRun, err := e.store.EnterStatus(ctx, tx, task.ID, toStatus.ID, rejectedFrom)
+		newRun, err := e.store.EnterStatus(ctx, tx, task.ID, toStatus.ID, rejectedFrom, &transition.ID)
 		if err != nil {
 			return err
 		}
@@ -259,7 +259,8 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			return err
 		}
 		if err := e.store.AppendEvent(ctx, tx, task.ID, &newRun.ID, domain.EventStageEntered, actor,
-			map[string]any{"status": toStatus.Key, "attempt": newRun.Attempt}); err != nil {
+			map[string]any{"status": toStatus.Key, "attempt": newRun.Attempt,
+				"transition": transition.Key}); err != nil {
 			return err
 		}
 
@@ -357,7 +358,7 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 //
 // bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
 // Исполнитель этапа решает только passed по чек-листу своего этапа, а гейты
-// из humanOnlyGates (human_approval, attempts_limit) не закрывает, даже если
+// из humanOnlyGates (human_approval, attempts_limit, stage_time_limit) не закрывает, даже если
 // держатель аренды — человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
 	var out GateOutcome
@@ -419,6 +420,9 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 						"status waived, а не %q", gate.Key, status)
 			}
 		}
+		if err := enteredVia(task, run, transition, *gate); err != nil {
+			return err
+		}
 
 		if err := e.store.RecordGateResult(ctx, tx, run.ID, gate.ID, transition.ID,
 			status, json.RawMessage(details), &actor); err != nil {
@@ -458,6 +462,8 @@ type humanGate struct {
 var humanOnlyGates = map[string]humanGate{
 	domain.GateHumanApproval: {},
 	domain.GateAttemptsLimit: {waiveOnly: true},
+	// Предел этапа (CLAB-221): waived снимает его до конца текущего прогона.
+	domain.GateStageTimeLimit: {waiveOnly: true},
 }
 
 func humanOnly(gateType string) bool {

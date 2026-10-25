@@ -302,12 +302,20 @@ func (s *Server) getTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Предел этапа — соседним полем к transitions (CLAB-221): форма
+	// массива переходов не меняется, старые клиенты поля не видят.
+	limit, err := s.engine.StageLimit(ctx, task)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"task":        task,
 		"stage_runs":  runs,
 		"artifacts":   artifacts,
 		"transitions": transitions,
+		"stage_limit": limit,
 		"children":    children,
 		"links":       links,
 		"usage":       usage,
@@ -437,7 +445,12 @@ func (s *Server) listTransitions(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"transitions": transitions})
+	limit, err := s.engine.StageLimit(c.Request.Context(), task)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"transitions": transitions, "stage_limit": limit})
 }
 
 type executeTransitionRequest struct {

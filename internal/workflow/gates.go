@@ -70,6 +70,7 @@ func (e *Engine) registerEvaluators() {
 		domain.GateExternalCheck:      e.evalExternalCheck,
 		domain.GateDependenciesClosed: e.evalDependenciesClosed,
 		domain.GateAttemptsLimit:      e.evalAttemptsLimit,
+		domain.GateStageTimeLimit:     e.evalStageTimeLimit,
 	}
 }
 

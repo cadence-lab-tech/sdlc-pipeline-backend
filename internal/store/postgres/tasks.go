@@ -284,7 +284,7 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 		}
 	}
 
-	if _, err := s.EnterStatus(ctx, tx, taskID, initial.ID, nil); err != nil {
+	if _, err := s.EnterStatus(ctx, tx, taskID, initial.ID, nil, nil); err != nil {
 		return domain.Task{}, err
 	}
 
@@ -322,7 +322,10 @@ func (s *Store) NextStageAttempt(ctx context.Context, q Querier, taskID, statusI
 // attempt считается от уже существующих попыток на этой паре (задача, статус):
 // повторный заход после отката — это новый stage_run, а не переписанный старый,
 // поэтому история "аналитика делалась дважды" остаётся целой (решение 0003).
-func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, rejectedFrom *uuid.UUID) (domain.StageRun, error) {
+//
+// via — переход, которым задача входит в статус; nil у начального статуса.
+// По нему считается предел этапа stage_time_limit (CLAB-221).
+func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, rejectedFrom, via *uuid.UUID) (domain.StageRun, error) {
 	roleID, roleVersionID, err := s.PrimaryRole(ctx, tx, statusID)
 	if err != nil {
 		return domain.StageRun{}, err
@@ -331,10 +334,10 @@ func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uui
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO stage_runs (task_id, status_id, role_id, role_version_id, attempt,
-		                        state, rejected_from_run_id)
-		VALUES ($1, $2, $3, $4, (`+nextAttemptSQL+`), 'pending', $5)
+		                        state, rejected_from_run_id, entered_via_transition_id)
+		VALUES ($1, $2, $3, $4, (`+nextAttemptSQL+`), 'pending', $5, $6)
 		RETURNING id`,
-		taskID, statusID, roleID, roleVersionID, rejectedFrom).Scan(&id); err != nil {
+		taskID, statusID, roleID, roleVersionID, rejectedFrom, via).Scan(&id); err != nil {
 		return domain.StageRun{}, translate(err)
 	}
 
@@ -351,7 +354,8 @@ const stageRunSelect = `
 	       sr.claimed_at, sr.lease_expires_at, sr.heartbeat_at, sr.agent_session_ref,
 	       sr.parent_run_id, sr.gate_id, sr.rejected_from_run_id,
 	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary,
-	       sr.model_level, sr.model_level_source
+	       sr.model_level, sr.model_level_source,
+	       sr.entered_via_transition_id, sr.overdue_at
 	FROM stage_runs sr
 	JOIN workflow_statuses ws ON ws.id = sr.status_id
 	LEFT JOIN roles ro       ON ro.id = sr.role_id
@@ -365,7 +369,8 @@ func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) 
 		&r.ClaimedAt, &r.LeaseExpires, &r.HeartbeatAt, &r.SessionRef,
 		&r.ParentRunID, &r.GateID, &r.RejectedFromRunID,
 		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary,
-		&r.ModelLevel, &r.ModelLevelSource)
+		&r.ModelLevel, &r.ModelLevelSource,
+		&r.EnteredViaTransitionID, &r.OverdueAt)
 	if roleKey != nil {
 		r.RoleKey = *roleKey
 	}

@@ -484,24 +484,38 @@ func logJobError(ctx context.Context, log *slog.Logger, job string, err error) {
 //
 // Ошибка прохода не роняет воркер: база могла быть недоступна секунду, а
 // следующий тик всё равно наступит.
+//
+// Тем же проходом отмечаются этапы, открытые дольше предела stage_time_limit
+// (CLAB-221): своей переменной интервала у этого нет, а имя задания в
+// метриках прежнее — оно часть правил оповещения пакета self-hosted.
+// Просрочка аренду не трогает: этап остаётся открытым, решение за человеком.
 func sweepLeases(ctx context.Context, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, m *metrics.Worker) {
-	var n int
-	err := m.Job(ctx, jobLeaseSweep, func() (err error) {
-		n, err = engine.ExpireLeases(ctx, system, 100)
+	var n, overdue int
+	err := m.Job(ctx, jobLeaseSweep, func() error {
+		expired, err := engine.ExpireLeases(ctx, system, 100)
+		if err != nil {
+			return err
+		}
+		// Считаем только после удачного прохода: при ошибке транзакция
+		// откатилась, и число не значит ничего. Аренды и просрочка — разные
+		// транзакции: сбой отметки просрочки вернувшихся аренд не откатывает.
+		n = expired
+		overdue, err = engine.MarkOverdueStages(ctx, system, 100)
 		return err
 	})
+	m.LeasesExpired(n)
+	if n > 0 {
+		log.Info("аренды истекли, задачи возвращены в общий доступ", "count", n)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Error("проход по протухшим арендам не удался", "error", err)
+		log.Error("проход по протухшим арендам и просроченным этапам не удался", "error", err)
 		return
 	}
-	// Считаем только после удачного прохода: при ошибке транзакция откатилась,
-	// и n не значит ничего.
-	m.LeasesExpired(n)
-	if n > 0 {
-		log.Info("аренды истекли, задачи возвращены в общий доступ", "count", n)
+	if overdue > 0 {
+		log.Info("этапы открыты дольше предела, ждут решения человека", "count", overdue)
 	}
 }
 

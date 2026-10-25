@@ -230,7 +230,8 @@ type gateConfigCheck func(t domain.Transition, g domain.Gate, statusByID map[uui
 // gateConfigChecks — проверки по типу гейта. Новый тип с настройкой
 // добавляет сюда свою функцию, а не ветку в чужой (CLAB-218, CLAB-221).
 var gateConfigChecks = map[string]gateConfigCheck{
-	domain.GateAttemptsLimit: checkAttemptsLimit,
+	domain.GateAttemptsLimit:  checkAttemptsLimit,
+	domain.GateStageTimeLimit: checkStageTimeLimit,
 }
 
 // checkAttemptsLimit: предел — целое не меньше единицы, и переход ведёт в
@@ -248,6 +249,32 @@ func checkAttemptsLimit(t domain.Transition, g domain.Gate, statusByID map[uuid.
 			Code: "attempts_limit_terminal", Transition: t.Key, Gate: g.Key, Status: to.Key,
 			Message: fmt.Sprintf(
 				"предел попыток на переходе в терминальный статус %q ничего не держит: повторного входа туда нет", to.Key)})
+	}
+	return out
+}
+
+// checkStageTimeLimit: предел — положительная длительность не больше года,
+// переход ведёт в статус, где кто-то может стоять (в терминальном ждать
+// нечего), и на переходе он один: два предела одного этапа — какой из них
+// действует, человек не поймёт.
+func checkStageTimeLimit(t domain.Transition, g domain.Gate, statusByID map[uuid.UUID]domain.Status) []Problem {
+	var out []Problem
+	if _, _, err := maxDuration(g.Config); err != nil {
+		out = append(out, Problem{
+			Code: "stage_time_limit_invalid", Transition: t.Key, Gate: g.Key,
+			Message: "у гейта предела этапа неверный config.max_duration (длительность вроде \"4h\", больше нуля): " + err.Error()})
+	}
+	if to, ok := statusByID[t.ToStatusID]; ok && to.IsTerminal {
+		out = append(out, Problem{
+			Code: "stage_time_limit_terminal", Transition: t.Key, Gate: g.Key, Status: to.Key,
+			Message: fmt.Sprintf(
+				"предел этапа на переходе в терминальный статус %q ничего не держит: этапа там нет", to.Key)})
+	}
+	if first := stageTimeGate(t); first != nil && first.Key != g.Key {
+		out = append(out, Problem{
+			Code: "stage_time_limit_duplicate", Transition: t.Key, Gate: g.Key,
+			Message: fmt.Sprintf(
+				"на переходе уже есть предел этапа %q: второй на том же переходе не нужен", first.Key)})
 	}
 	return out
 }

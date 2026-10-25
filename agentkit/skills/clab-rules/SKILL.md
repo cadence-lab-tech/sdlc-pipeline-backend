@@ -29,13 +29,23 @@ it, and show them what exactly changes before applying.
    transitions and gates. Gate types: `artifacts_required`,
    `schema_validation`, `checklist`, `human_approval`, `agent_review`,
    `external_check`, `repo_ref_required`, `drift_clear`, `repo_scope`,
-   `dependencies_closed`, `attempts_limit`. The role in `agent_review` cannot
-   be the role executing the status — validation refuses it.
+   `dependencies_closed`, `attempts_limit`, `stage_time_limit`. The role in
+   `agent_review` cannot be the role executing the status — validation
+   refuses it.
    `attempts_limit` caps how many times a task may enter the transition's
    target status: `{"max_attempts": 3}`, an integer of at least 1, never on a
    transition into a terminal status. It goes on the transition itself,
    usually a `reject`; roles carry no such setting. Only a human lifts it, with
    `waived`, one attempt per decision.
+   `stage_time_limit` caps how long the stage opened by this transition may
+   stay open: `{"max_duration": "4h"}`, a Go duration (`90m`, `4h`, `24h`;
+   a day is `24h`, there is no `d`), above zero and at most a year, one per
+   transition, never into a terminal status. The clock runs from entering the
+   status, wall time, through every claim and release. It never blocks the
+   transition itself and never moves the task: once overdue, new claims by
+   agents and runners fail with `stage_time_exceeded`, a live lease keeps
+   working. Only a human lifts it, with `waived` on the entry transition,
+   until the stage ends.
 3. **Dry run**: `clab import --file bundle.json --dry-run`. In the report
    roles are `unchanged | new_version`, cycles `draft_created`, and
    `workflow_validations[].valid` must be `true`. Show the report to the

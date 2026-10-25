@@ -644,17 +644,26 @@ func cmdGates(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	var items []transitionPreview
+	var limit *stageLimitView
 	if err := decode(raw, &struct {
 		Transitions *[]transitionPreview `json:"transitions"`
-	}{&items}); err != nil {
+		StageLimit  **stageLimitView     `json:"stage_limit"`
+	}{&items, &limit}); err != nil {
 		return err
 	}
+	// Предел этапа — строкой над переходами (CLAB-221); --json отдаёт
+	// переходы в прежней форме.
+	printLimit := func() {
+		if limit != nil {
+			fmt.Println("Предел этапа: " + limit.line(task))
+		}
+	}
 	if transition == "" {
-		return emit(out.Transitions, func() error { return renderTransitions(items) })
+		return emit(out.Transitions, func() error { printLimit(); return renderTransitions(items) })
 	}
 	for i, t := range items {
 		if t.Key == transition {
-			return emit(out.Transitions[i], func() error { return renderTransitions(items[i : i+1]) })
+			return emit(out.Transitions[i], func() error { printLimit(); return renderTransitions(items[i : i+1]) })
 		}
 	}
 	return fmt.Errorf("перехода %q нет из текущего статуса", transition)
