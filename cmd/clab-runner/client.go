@@ -126,10 +126,13 @@ type queueItem struct {
 		StatusKey  string  `json:"status_key"`
 		AssigneeID *string `json:"assignee_id"`
 	} `json:"task"`
+	// Сервер отдаёт прогон полем stage_run (postgres.OpenRun); до CLAB-215
+	// раннер читал его как run и получал пустой прогон, но и не пользовался
+	// им. Теперь по нему считаются сбои подряд.
 	Run struct {
 		ID   string `json:"id"`
 		Kind string `json:"kind"`
-	} `json:"run"`
+	} `json:"stage_run"`
 	RoleKey   string `json:"role_key"`
 	Claimable bool   `json:"claimable"`
 }
