@@ -29,8 +29,13 @@ it, and show them what exactly changes before applying.
    transitions and gates. Gate types: `artifacts_required`,
    `schema_validation`, `checklist`, `human_approval`, `agent_review`,
    `external_check`, `repo_ref_required`, `drift_clear`, `repo_scope`,
-   `dependencies_closed`. The role in `agent_review` cannot be the role
-   executing the status — validation refuses it.
+   `dependencies_closed`, `attempts_limit`. The role in `agent_review` cannot
+   be the role executing the status — validation refuses it.
+   `attempts_limit` caps how many times a task may enter the transition's
+   target status: `{"max_attempts": 3}`, an integer of at least 1, never on a
+   transition into a terminal status. It goes on the transition itself,
+   usually a `reject`; roles carry no such setting. Only a human lifts it, with
+   `waived`, one attempt per decision.
 3. **Dry run**: `clab import --file bundle.json --dry-run`. In the report
    roles are `unchanged | new_version`, cycles `draft_created`, and
    `workflow_validations[].valid` must be `true`. Show the report to the

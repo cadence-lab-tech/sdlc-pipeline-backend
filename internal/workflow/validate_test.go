@@ -254,3 +254,76 @@ func TestValidateReviewerRole(t *testing.T) {
 		})
 	}
 }
+
+// CLAB-217, критерии 1–3: предел попыток — целое ≥ 1 в config, и переход
+// ведёт не в терминальный статус. Негодный предел — проблема, а не
+// предупреждение: активацию он держит.
+func TestValidateAttemptsLimit(t *testing.T) {
+	dev := status("development", true, false)
+	review := status("review", false, false)
+	done := status("done", false, true)
+
+	cycle := func(config string, onTerminal bool) domain.Workflow {
+		g := domain.Gate{Key: "attempts", Type: domain.GateAttemptsLimit,
+			Blocking: true, Config: json.RawMessage(config)}
+		back := transition("reject_to_development", &review, dev, g)
+		back.Kind = "reject"
+		finish := transition("finish", &review, done)
+		if onTerminal {
+			finish.Gates = []domain.Gate{g}
+		}
+		return wf([]domain.Status{dev, review, done},
+			transition("dev_done", &dev, review), back, finish)
+	}
+
+	cases := []struct {
+		name, config string
+		terminal     bool
+		want         string
+	}{
+		{"предел 2", `{"max_attempts": 2}`, false, ""},
+		{"предел 1", `{"max_attempts":1}`, false, ""},
+		{"пустой config", `{}`, false, "attempts_limit_invalid"},
+		{"config отсутствует", ``, false, "attempts_limit_invalid"},
+		{"ноль", `{"max_attempts": 0}`, false, "attempts_limit_invalid"},
+		{"отрицательный", `{"max_attempts": -1}`, false, "attempts_limit_invalid"},
+		{"дробный", `{"max_attempts": 2.5}`, false, "attempts_limit_invalid"},
+		{"строкой", `{"max_attempts": "3"}`, false, "attempts_limit_invalid"},
+		{"null", `{"max_attempts": null}`, false, "attempts_limit_invalid"},
+		{"на терминальный статус", `{"max_attempts": 2}`, true, "attempts_limit_terminal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := validateWorkflow(cycle(tc.config, tc.terminal), allImplemented, true)
+			if tc.want == "" {
+				if !v.Valid {
+					t.Fatalf("цикл с пределом собран верно: %v", v.Problems)
+				}
+				return
+			}
+			if v.Valid {
+				t.Fatalf("цикл с негодным пределом прошёл проверку")
+			}
+			var found *Problem
+			for i, p := range v.Problems {
+				if p.Code == tc.want {
+					found = &v.Problems[i]
+				}
+			}
+			if found == nil {
+				t.Fatalf("нет проблемы %q: %v", tc.want, v.Problems)
+			}
+			if found.Gate != "attempts" || found.Transition == "" {
+				t.Fatalf("проблема без ключей перехода и гейта: %+v", found)
+			}
+			if tc.want == "attempts_limit_invalid" && !strings.Contains(found.Message, "max_attempts") {
+				t.Fatalf("причина не называет max_attempts: %q", found.Message)
+			}
+			for _, w := range v.Warnings {
+				if w.Code == tc.want {
+					t.Fatalf("негодный предел попал в предупреждения: %+v", w)
+				}
+			}
+		})
+	}
+}

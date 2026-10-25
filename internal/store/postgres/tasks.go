@@ -298,6 +298,25 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 	return t, nil
 }
 
+// nextAttemptSQL — номер попытки, который получит следующий вход задачи $1 в
+// статус $2. Одно выражение на EnterStatus и гейт attempts_limit: разойдись
+// они, гейт пускал бы задачу на попытку, которой не будет, или держал бы ту,
+// что ещё в пределе. Прогоны перепроверки (kind = 'review') делят статус с
+// этапом, но входом в статус не являются и в счёт не идут.
+const nextAttemptSQL = `
+	SELECT coalesce(max(attempt), 0) + 1
+	FROM stage_runs WHERE task_id = $1 AND status_id = $2 AND kind = 'stage'`
+
+// NextStageAttempt — номер попытки следующего входа задачи в статус: тот же,
+// что выдаст EnterStatus, если переход состоится сейчас.
+func (s *Store) NextStageAttempt(ctx context.Context, q Querier, taskID, statusID uuid.UUID) (int, error) {
+	var n int
+	if err := q.QueryRow(ctx, nextAttemptSQL, taskID, statusID).Scan(&n); err != nil {
+		return 0, translate(err)
+	}
+	return n, nil
+}
+
 // EnterStatus открывает новую попытку прохождения статуса.
 //
 // attempt считается от уже существующих попыток на этой паре (задача, статус):
@@ -313,9 +332,7 @@ func (s *Store) EnterStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uui
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO stage_runs (task_id, status_id, role_id, role_version_id, attempt,
 		                        state, rejected_from_run_id)
-		SELECT $1, $2, $3, $4,
-		       coalesce(max(attempt), 0) + 1, 'pending', $5
-		FROM stage_runs WHERE task_id = $1 AND status_id = $2 AND kind = 'stage'
+		VALUES ($1, $2, $3, $4, (`+nextAttemptSQL+`), 'pending', $5)
 		RETURNING id`,
 		taskID, statusID, roleID, roleVersionID, rejectedFrom).Scan(&id); err != nil {
 		return domain.StageRun{}, translate(err)
