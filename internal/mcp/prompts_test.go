@@ -227,3 +227,24 @@ func TestWorkPromptBlockedRejectReleases(t *testing.T) {
 		}
 	}
 }
+
+// CLAB-218, критерий 12: упёршийся в предел, который снимает человек
+// (попыток или перепроверок), отпускает задачу с причиной и останавливается.
+// Текст промпта переносится по строкам, поэтому пробелы сравниваются как один.
+func TestWorkPromptHumanLimitReleases(t *testing.T) {
+	cs := connectPrompts(t)
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	for _, args := range []map[string]string{
+		{"task": "SDLC-42"}, {"task": "SDLC-42", "role": "developer"},
+	} {
+		text := flat(promptText(t, cs, "work_on_task", args))
+		for _, want := range []string{
+			"предел, который снимает человек, — попыток или перепроверок",
+			"новой перепроверки не будет, отпусти задачу с причиной и остановись",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("work_on_task %v: нет %q", args, want)
+			}
+		}
+	}
+}
