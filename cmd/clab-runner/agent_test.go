@@ -79,7 +79,7 @@ func (f *fakeAPI) serve(w http.ResponseWriter, req *http.Request) {
 	switch {
 	case req.Method == http.MethodGet && call.Path == "/v1/projects/CLAB/queue":
 		json.NewEncoder(w).Encode(map[string]any{"queue": []any{map[string]any{
-			"task": map[string]any{"key": "CLAB-1"}, "run": map[string]any{"id": "run-1"},
+			"task": map[string]any{"key": "CLAB-1"}, "stage_run": map[string]any{"id": "run-1"},
 			"role_key": "developer", "claimable": true,
 		}}})
 	case call.Path == "/v1/tasks/CLAB-1/claim":

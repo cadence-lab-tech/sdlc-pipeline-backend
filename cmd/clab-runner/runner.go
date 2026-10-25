@@ -26,12 +26,36 @@ type runner struct {
 	// подменяется.
 	environ func() []string
 
+	// Часы раннера: паузы считаются от них, в тестах они подменяются.
+	now func() time.Time
+	// Сбои подряд по прогону (CLAB-215).
+	fails *failures
+
 	mu      sync.Mutex
 	running map[string]bool
+	// Пауза всех слотов по лимиту подписки агента (CLAB-215): до
+	// pauseUntil раннер не забирает ни одной задачи.
+	paused     bool
+	pauseUntil time.Time
 }
 
 func newRunner(cfg Config, log *slog.Logger) *runner {
-	r := &runner{cfg: cfg, log: log, api: newClient(cfg), environ: os.Environ, running: map[string]bool{}}
+	// Раннер, собранный в обход loadConfig, получает те же значения по
+	// умолчанию: нулевой предел значил бы пропуск после первого же сбоя.
+	if cfg.MaxFailures <= 0 {
+		cfg.MaxFailures = defaultMaxFailures
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = defaultRetryDelay
+	}
+	if cfg.RetryDelayMax < cfg.RetryDelay {
+		cfg.RetryDelayMax = max(defaultRetryDelayMax, cfg.RetryDelay)
+	}
+	if cfg.LimitPause <= 0 {
+		cfg.LimitPause = defaultLimitPause
+	}
+	r := &runner{cfg: cfg, log: log, api: newClient(cfg), environ: os.Environ, running: map[string]bool{},
+		now: time.Now, fails: newFailures(cfg.MaxFailures, cfg.RetryDelay, cfg.RetryDelayMax)}
 	if cfg.ReposDir != "" {
 		r.ws = newWorkspaces(cfg.ReposDir, cfg.WorktreesDir, log)
 	}
@@ -70,7 +94,14 @@ func (r *runner) run(ctx context.Context) error {
 }
 
 // dispatch забирает столько задач, сколько свободно слотов.
+//
+// На паузе по лимиту подписки раннер не спрашивает даже очередь, а прогон на
+// паузе после сбоя или пропущенный после K сбоев отсеивается до claim:
+// пропуск не оставляет в ленте ни stage.claimed, ни запроса захвата.
 func (r *runner) dispatch(ctx context.Context, slots chan struct{}, wg *sync.WaitGroup) int {
+	if r.pausedNow() {
+		return 0
+	}
 	items, err := r.fetch(ctx)
 	if err != nil {
 		r.log.Warn("очередь недоступна", "error", err)
@@ -81,6 +112,14 @@ func (r *runner) dispatch(ctx context.Context, slots chan struct{}, wg *sync.Wai
 	for _, item := range items {
 		if !item.Claimable || r.busy(item.Task.Key) {
 			continue
+		}
+		if r.fails.blocked(runKey(item), r.now()) {
+			r.log.Debug("прогон после сбоя ждёт", "task", item.Task.Key, "run", runKey(item))
+			continue
+		}
+		if r.pausedNow() {
+			// Пока шёл этот опрос, агент другого слота упёрся в лимит.
+			return took
 		}
 		select {
 		case slots <- struct{}{}:
@@ -134,6 +173,99 @@ func (r *runner) fetch(ctx context.Context) ([]queueItem, error) {
 	return out, nil
 }
 
+// runKey — ключ счётчика сбоев: прогон из очереди. Задача, вернувшаяся в
+// статус, приходит новым прогоном, и её счёт начинается с нуля. Строки
+// очереди без прогона раннер считает по задаче — так защита не пропадает.
+func runKey(item queueItem) string {
+	if item.Run.ID != "" {
+		return item.Run.ID
+	}
+	return "task:" + item.Task.Key
+}
+
+// pausedNow — раннер на паузе по лимиту подписки. Выход из паузы пишется в
+// журнал один раз, первым опросом после её конца.
+func (r *runner) pausedNow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.paused {
+		return false
+	}
+	if r.now().Before(r.pauseUntil) {
+		return true
+	}
+	r.paused = false
+	r.log.Info("пауза по лимиту подписки снята: раннер продолжает опрос", "resume_at", r.pauseUntil.Format(time.RFC3339))
+	return false
+}
+
+// pauseForLimit ставит все слоты на паузу до сброса лимита и отвечает, до
+// какого момента раннер стоит. Работающих агентов пауза не трогает: если и
+// они упрутся в лимит, пауза продлевается до более поздней границы, но не
+// сокращается.
+func (r *runner) pauseForLimit(log *slog.Logger, lim agentLimit) time.Time {
+	now := r.now()
+	until, known := lim.resetAt, !lim.resetAt.IsZero()
+	if !known {
+		until = now.Add(r.cfg.LimitPause)
+	}
+
+	r.mu.Lock()
+	active := r.paused && now.Before(r.pauseUntil)
+	extended := !active || until.After(r.pauseUntil)
+	if extended {
+		r.pauseUntil = until
+	}
+	r.paused = true
+	resume := r.pauseUntil
+	r.mu.Unlock()
+
+	attrs := []any{"resume_at", resume.Format(time.RFC3339), "reset_known", known}
+	switch {
+	case !active && known:
+		log.Warn("лимит подписки агента исчерпан: раннер на паузе до сброса", attrs...)
+	case !active:
+		log.Warn("лимит подписки агента исчерпан, время сброса неизвестно: раннер на паузе SDLC_RUNNER_LIMIT_PAUSE",
+			append(attrs, "limit_pause", r.cfg.LimitPause)...)
+	case extended:
+		log.Warn("лимит подписки агента исчерпан ещё раз: пауза продлена", attrs...)
+	default:
+		log.Info("лимит подписки агента исчерпан, раннер уже на паузе", attrs...)
+	}
+	return resume
+}
+
+// limitNote — причина release по лимиту подписки.
+func limitNote(resume time.Time, known bool) string {
+	note := "лимит подписки агента исчерпан, раннер на паузе до " + resume.Format(time.RFC3339)
+	if !known {
+		note += " (время сброса неизвестно)"
+	}
+	return note
+}
+
+// fail — единственный путь release из-за поломки: агент упал или убит по
+// таймауту, не подготовлена рабочая копия, не выпущен токен задачи, не
+// собран каталог агента. Путь, который обошёл бы его, остался бы петлёй
+// захватов. Остановка раннера сбоем прогона не считается: виноват не он.
+func (r *runner) fail(ctx context.Context, log *slog.Logger, item queueItem, reason string) {
+	if ctx.Err() != nil {
+		r.releaseQuietly(ctx, item.Task.Key, reason+"; раннер остановлен")
+		return
+	}
+	v := r.fails.fail(runKey(item), r.now())
+	if v.skipped {
+		log.Warn("прогон пропускается до перезапуска раннера", "run", runKey(item), "failures", v.n, "max_failures", v.max)
+	} else {
+		log.Info("повторный захват прогона после паузы", "run", runKey(item), "failures", v.n,
+			"max_failures", v.max, "retry_in", v.delay)
+	}
+	r.releaseQuietly(ctx, item.Task.Key, reason+"; "+v.note())
+	// До возврата из work прогон занят слотом, и dispatch его не возьмёт:
+	// пауза начинается после release, как написано в причине.
+	r.fails.holdFrom(runKey(item), r.now())
+}
+
 func (r *runner) busy(task string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -166,7 +298,7 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 		// Агент в чужом каталоге хуже, чем агент, который не запустился:
 		// задача вернётся в очередь, а причина останется в ленте.
 		log.Error("рабочая копия не подготовлена", "error", err)
-		r.releaseQuietly(ctx, item.Task.Key, "раннер не подготовил рабочую копию: "+err.Error())
+		r.fail(ctx, log, item, "раннер не подготовил рабочую копию: "+err.Error())
 		return
 	}
 	defer r.cleanupWorkspace(ctx, space)
@@ -188,8 +320,9 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 		return
 	}
 
-	creds, ok := r.agentCredentials(ctx, log, item.Task.Key)
+	creds, reason, ok := r.agentCredentials(ctx, log, item.Task.Key)
 	if !ok {
+		r.fail(ctx, log, item, reason)
 		return
 	}
 	defer r.revokeQuietly(ctx, log, creds)
@@ -197,7 +330,7 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	home, err := r.agentHome(creds)
 	if err != nil {
 		log.Error("не собрать конфигурацию агента", "error", err)
-		r.releaseQuietly(ctx, item.Task.Key, "раннер не смог подготовить запуск")
+		r.fail(ctx, log, item, "раннер не смог подготовить запуск")
 		return
 	}
 	defer home.cleanup()
@@ -227,16 +360,27 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	// промпт это запрещает, поэтому отчёт идёт и за упавшего агента — Claude
 	// Code печатает JSON и при ненулевом коде выхода.
 	report := parseUsage(out)
+	// Лимит подписки проверяется при любом коде выхода и в счётчик сбоев не
+	// идёт: задача в нём не виновата, а раннер встаёт целиком.
+	if lim, hit := detectLimit(out, r.now()); hit {
+		log.Warn("агент упёрся в лимит подписки", "exit_error", err)
+		r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
+		resume := r.pauseForLimit(log, lim)
+		r.releaseQuietly(ctx, item.Task.Key, limitNote(resume, !lim.resetAt.IsZero()))
+		return
+	}
 	if err != nil {
 		log.Error("агент завершился с ошибкой", "error", err)
 		// Сначала учёт, потом release: отпуск снимает аренду, и без истории
 		// захвата отчёт после него отбился бы.
 		r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
 		// Агент умер — аренда протухнет сама, но отпустить задачу сразу
-		// честнее: следующий слот возьмёт её, не дожидаясь протухания.
-		r.releaseQuietly(ctx, item.Task.Key, "агент завершился с ошибкой")
+		// честнее: следующий слот возьмёт её после паузы, не дожидаясь
+		// протухания.
+		r.fail(ctx, log, item, "агент завершился с ошибкой")
 		return
 	}
+	r.fails.reset(runKey(item))
 	if r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report) {
 		log.Info("агент отработал", "cost_usd", report["cost_usd"], "model", report["model"])
 	}
@@ -285,18 +429,20 @@ func (c agentCreds) LogValue() slog.Value { return slog.StringValue(c.kind()) }
 // agentCredentials выпускает токен задачи. Откат на учётные данные раннера —
 // только у сервера, который ручки не знает: любой другой отказ значит, что
 // с арендой что-то не так, и агент не запускается вовсе.
-func (r *runner) agentCredentials(ctx context.Context, log *slog.Logger, task string) (agentCreds, bool) {
+//
+// Отказ возвращается причиной для release: отпускает задачу work, через
+// учёт сбоев.
+func (r *runner) agentCredentials(ctx context.Context, log *slog.Logger, task string) (agentCreds, string, bool) {
 	issued, err := r.api.issueTaskToken(ctx, task)
 	switch {
 	case err == nil:
-		return agentCreds{token: issued.Token, tokenID: issued.Record.ID}, true
+		return agentCreds{token: issued.Token, tokenID: issued.Record.ID}, "", true
 	case noRoute(err):
 		log.Warn("сервер не выдаёт токен задачи: агент получил токен раннера; обновите сервер")
-		return agentCreds{token: r.cfg.Token, actor: r.cfg.Actor}, true
+		return agentCreds{token: r.cfg.Token, actor: r.cfg.Actor}, "", true
 	default:
 		log.Error("токен задачи не выпущен, агент не запущен", "error", err)
-		r.releaseQuietly(ctx, task, "раннер не выпустил токен задачи: "+errCode(err))
-		return agentCreds{}, false
+		return agentCreds{}, "раннер не выпустил токен задачи: " + errCode(err), false
 	}
 }
 

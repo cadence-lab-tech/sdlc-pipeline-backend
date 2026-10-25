@@ -47,7 +47,24 @@ type Config struct {
 	// сервер рекомендует уровень, а какая модель ему отвечает под подписку
 	// владельца раннера — знает только раннер. nil — таблицы нет.
 	ModelLevels map[string]string
+	// Защита от петли захватов (CLAB-215): сколько сбоев подряд прогону
+	// прощается, с какой паузы начинается повторный захват и до какой
+	// растёт, и на сколько встать, когда агент упёрся в лимит подписки, а
+	// время сброса не назвал.
+	MaxFailures   int
+	RetryDelay    time.Duration
+	RetryDelayMax time.Duration
+	LimitPause    time.Duration
 }
+
+// Значения защиты от петли захватов по умолчанию; их же берёт раннер,
+// собранный без loadConfig (тесты).
+const (
+	defaultMaxFailures   = 3
+	defaultRetryDelay    = time.Minute
+	defaultRetryDelayMax = 15 * time.Minute
+	defaultLimitPause    = time.Hour
+)
 
 // modelLevels — уровни из решения 0060; других ключей таблица не знает.
 var modelLevels = []string{"low", "medium", "high"}
@@ -73,6 +90,11 @@ func loadConfig() (Config, error) {
 		Command:  env("SDLC_RUNNER_COMMAND", defaultCommand),
 		Once:     env("SDLC_RUNNER_ONCE", "") != "",
 		DryRun:   env("SDLC_RUNNER_DRY_RUN", "") != "",
+
+		MaxFailures:   defaultMaxFailures,
+		RetryDelay:    defaultRetryDelay,
+		RetryDelayMax: defaultRetryDelayMax,
+		LimitPause:    defaultLimitPause,
 	}
 	// Адреса по умолчанию нет, как и у clab (CLAB-147): подставленный адрес
 	// dev-стека у клиента self-hosted оказался бы стеком разработчика, и
@@ -111,7 +133,32 @@ func loadConfig() (Config, error) {
 	if c.Timeout, err = envDuration("SDLC_RUNNER_TIMEOUT", c.Timeout); err != nil {
 		return c, err
 	}
+	if err := c.loadRetry(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// loadRetry читает настройки защиты от петли захватов (CLAB-215).
+func (c *Config) loadRetry() error {
+	var err error
+	if c.MaxFailures, err = envPositiveInt("SDLC_RUNNER_MAX_FAILURES", c.MaxFailures); err != nil {
+		return err
+	}
+	if c.RetryDelay, err = envDuration("SDLC_RUNNER_RETRY_DELAY", c.RetryDelay); err != nil {
+		return err
+	}
+	if c.RetryDelayMax, err = envDuration("SDLC_RUNNER_RETRY_DELAY_MAX", c.RetryDelayMax); err != nil {
+		return err
+	}
+	if c.RetryDelayMax < c.RetryDelay {
+		return fmt.Errorf("SDLC_RUNNER_RETRY_DELAY_MAX: потолок паузы %s меньше SDLC_RUNNER_RETRY_DELAY %s",
+			c.RetryDelayMax, c.RetryDelay)
+	}
+	if c.LimitPause, err = envDuration("SDLC_RUNNER_LIMIT_PAUSE", c.LimitPause); err != nil {
+		return err
+	}
+	return nil
 }
 
 // parseModelLevels разбирает SDLC_RUNNER_MODEL_LEVELS вида
@@ -213,6 +260,9 @@ func env(key, def string) string {
 	return def
 }
 
+// envDuration читает положительную длительность. Ноль и отрицательное —
+// отказ старта: с ними раннер падал бы в time.NewTicker или убивал агента
+// сразу после запуска.
 func envDuration(key string, def time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -222,5 +272,21 @@ func envDuration(key string, def time.Duration) (time.Duration, error) {
 	if err != nil {
 		return def, fmt.Errorf("%s: %w", key, err)
 	}
+	if d <= 0 {
+		return def, fmt.Errorf("%s: нужна положительная длительность, например 1m, а не %q", key, raw)
+	}
 	return d, nil
+}
+
+// envPositiveInt читает целое не меньше единицы.
+func envPositiveInt(key string, def int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def, fmt.Errorf("%s: нужно целое число не меньше 1, а не %q", key, raw)
+	}
+	return n, nil
 }
