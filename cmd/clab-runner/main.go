@@ -19,6 +19,20 @@
 //	SDLC_RUNNER_INTERVAL  как часто опрашивать очередь (по умолчанию 15s)
 //	SDLC_RUNNER_COMMAND   чем запускать агента (по умолчанию Claude Code)
 //	SDLC_RUNNER_TIMEOUT   сколько ждать агента, прежде чем считать его мёртвым
+//	SDLC_RUNNER_MAX_FAILURES
+//	                      сколько сбоев подряд прогону прощается (по умолчанию
+//	                      3): после стольких раннер его не забирает до своего
+//	                      перезапуска. Сбой — агент упал или убит по таймауту,
+//	                      не подготовлена копия, не выпущен токен задачи
+//	SDLC_RUNNER_RETRY_DELAY
+//	                      пауза перед повторным захватом после первого сбоя
+//	                      (по умолчанию 1m); с каждым сбоем удваивается
+//	SDLC_RUNNER_RETRY_DELAY_MAX
+//	                      потолок этой паузы (по умолчанию 15m)
+//	SDLC_RUNNER_LIMIT_PAUSE
+//	                      пауза всех слотов, когда агент упёрся в лимит
+//	                      подписки, а время сброса не назвал (по умолчанию 1h);
+//	                      названное время раннер ждёт само
 //	SDLC_RUNNER_ONCE      забрать одну задачу и выйти: удобно в CI
 //	SDLC_RUNNER_DRY_RUN   ничего не запускать: захватить, напечатать argv,
 //	                      уровень, его источник и модель, отпустить задачу
@@ -86,6 +100,8 @@ func main() {
 	if cfg.ReposDir == "" {
 		log.Warn("SDLC_RUNNER_REPOS не задан: агент работает в каталоге раннера, без рабочей копии задачи")
 	}
+	log.Info("защита от петли захватов", "max_failures", cfg.MaxFailures, "retry_delay", cfg.RetryDelay,
+		"retry_delay_max", cfg.RetryDelayMax, "limit_pause", cfg.LimitPause)
 	if len(cfg.ModelLevels) > 0 {
 		log.Info("таблица уровней модели", "model_levels", modelLevelsString(cfg.ModelLevels))
 	}

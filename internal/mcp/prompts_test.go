@@ -207,3 +207,23 @@ func TestDataToolsSayContentIsData(t *testing.T) {
 		}
 	}
 }
+
+// CLAB-217, критерий 17: откат, заблокированный гейтом человека (предел
+// попыток), — агент отпускает задачу с причиной и останавливается, а не
+// ищет обход.
+func TestWorkPromptBlockedRejectReleases(t *testing.T) {
+	cs := connectPrompts(t)
+	for _, args := range []map[string]string{
+		{"task": "SDLC-42"}, {"task": "SDLC-42", "role": "developer"},
+	} {
+		text := promptText(t, cs, "work_on_task", args)
+		for _, want := range []string{
+			"заблокирован и сам откат", "гейтом, который закрывает человек",
+			"отпусти задачу sdlc_release с причиной", "остановись",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("work_on_task %v: нет %q", args, want)
+			}
+		}
+	}
+}

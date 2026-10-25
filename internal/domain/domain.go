@@ -361,6 +361,9 @@ const (
 	GateDriftClear         = "drift_clear"
 	GateRepoScope          = "repo_scope"
 	GateDependenciesClosed = "dependencies_closed"
+	// Предел попыток целевого статуса перехода (CLAB-217): вердикт выносит
+	// движок, снять гейт — дать ещё попытку — может только человек.
+	GateAttemptsLimit = "attempts_limit"
 )
 
 type Gate struct {
