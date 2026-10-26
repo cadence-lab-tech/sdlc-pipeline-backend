@@ -219,6 +219,35 @@ func TestHookPrefixThenStackEnv(t *testing.T) {
 	}
 }
 
+// Обёртка долгой команды (CLAB-288, критерий 8): с префиксом проходит, без
+// него — отказ, как любой clab; команда после «--» на решение не влияет.
+func TestHookHeartbeatWrapper(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("нет sh — хук не запустить")
+	}
+	script := hookCommand(t)
+	wrapped := "clab heartbeat K -- backend/dev/stack.sh exec K frontend npm run e2e"
+	for _, c := range []string{
+		"env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=/x/clab " + wrapped,
+		hookPrefix + "SDLC_PROJECT=CLAB clab heartbeat K --every 5m -- make test-integration",
+		"cd w && " + hookPrefix + wrapped,
+	} {
+		if code, msg := runHook(t, script, c); code != 0 {
+			t.Errorf("%q: код %d, %q — ждали 0", c, code, msg)
+		}
+	}
+	for _, c := range []string{
+		wrapped,
+		"SDLC_PROJECT=CLAB " + wrapped,
+		"clab heartbeat K --every 5m",
+		"cd w && clab heartbeat K -- go test ./...",
+	} {
+		if code, msg := runHook(t, script, c); code != 2 || !strings.Contains(msg, "CLAB_CONFIG_DIR=") {
+			t.Errorf("%q без префикса: код %d, %q — ждали отказ 2", c, code, msg)
+		}
+	}
+}
+
 // Известное и оставленное поведение (CLAB-249, AC-4; решение q7): хук — страховка,
 // а не разбор shell. sh с флагами считается запуском, даже `sh -n`; `|`
 // внутри кавычек считается разделителем команд.
