@@ -188,7 +188,25 @@ func (s *Store) GetTransitionByKey(ctx context.Context, q Querier, workflowID uu
 	if err != nil {
 		return t, notFound(err, "переход %q не найден в цикле", key)
 	}
+	return s.withGates(ctx, q, t)
+}
 
+// GetTransition — переход по идентификатору вместе с гейтами. Нужен пределу
+// этапа: прогон помнит переход входа идентификатором (CLAB-221).
+func (s *Store) GetTransition(ctx context.Context, q Querier, id uuid.UUID) (domain.Transition, error) {
+	var t domain.Transition
+	err := q.QueryRow(ctx, `
+		SELECT id, workflow_id, key, name, from_status_id, to_status_id, kind, auto, position
+		FROM workflow_transitions WHERE id = $1`, id,
+	).Scan(&t.ID, &t.WorkflowID, &t.Key, &t.Name, &t.FromStatusID,
+		&t.ToStatusID, &t.Kind, &t.Auto, &t.Position)
+	if err != nil {
+		return t, notFound(err, "переход не найден")
+	}
+	return s.withGates(ctx, q, t)
+}
+
+func (s *Store) withGates(ctx context.Context, q Querier, t domain.Transition) (domain.Transition, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, transition_id, key, name, type, config, blocking, position
 		FROM gates WHERE transition_id = $1 ORDER BY position, key`, t.ID)

@@ -56,6 +56,8 @@ func fullClaimResult() ClaimResult {
 		UsageReport: UsageReportExpected,
 		Execution:   Execution{ModelLevel: str("high"), ModelLevelSource: domain.ModelLevelSourceStage},
 		Boundary:    newBoundary(),
+		StageLimit: &StageLimit{StageRunID: id, Gate: "time", Transition: "qa_failed",
+			Status: "development", MaxDuration: "4h", Overdue: true, Waived: true, WaivedBy: str("user:lead")},
 	}
 }
 

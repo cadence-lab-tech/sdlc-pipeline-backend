@@ -94,6 +94,8 @@ type stateView struct {
 	// Рекомендация прогона (решение 0060). Сервер прежней версии её не
 	// отдаёт — тогда строк уровня в сводке нет.
 	Execution *executionView `json:"execution"`
+	// Предел времени этапа (CLAB-221); nil — предела нет или сервер старый.
+	StageLimit *stageLimitView `json:"stage_limit"`
 	// Граница правил и данных (CLAB-209). Старый сервер её не отдаёт —
 	// тогда подписи секций те же, а правило берётся своё.
 	Boundary *struct {
@@ -213,6 +215,9 @@ func printSummary(s stateView, rejectionLine bool) {
 		len(s.Context.PriorArtifacts), len(s.Context.Drift)))
 	if s.Context.Rejection != nil && rejectionLine {
 		pairs = append(pairs, "Возврат:", trunc(s.Context.Rejection.Reason, 120))
+	}
+	if s.StageLimit != nil {
+		pairs = append(pairs, "Предел этапа:", s.StageLimit.line(s.Task.Key))
 	}
 	lines := kvLines(pairs...)
 	if s.Execution != nil {
