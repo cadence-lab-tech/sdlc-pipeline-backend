@@ -26,6 +26,9 @@ const (
 	// журнала действий (audit.go).
 	ctxErrorCode = "error_code"
 	ctxRejected  = "rejected_identity"
+	// Было и стало у правки настройки: ручка кладёт, журнал пишет рядом с
+	// телом запроса — по телу видно только «стало».
+	ctxAuditChange = "audit_change"
 
 	// ActorHeader несёт хэндл действующего лица в режиме без аутентификации
 	// (SDLC_AUTH_MODE=header). В режиме токенов игнорируется: кто пришёл,

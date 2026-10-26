@@ -355,6 +355,17 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
 - **Стоимость — самоотчёт, и «неизвестно» отличается от нуля.** Числа в
   `stage_run_usage` nullable, прогоны без отчёта считаются отдельно
   (`silent_runs`). Не заполнять их нулями: молчание — это факт, а ноль — цифра.
+- **«Без учёта» — одно определение** (CLAB-219): состояние учёта прогона
+  `reported` (есть строка, даже без стоимости), `missing` (прогон забирали —
+  событие `stage.claimed`, — а строк нет) или `not_applicable` (не забирал
+  никто). Выражение одно — `usageStateSQL` в `store/postgres/usage.go`; его
+  берут карточка (`usage.state`), `TaskUsage`, `CostMetrics` и долг политики
+  учёта (`UsageDebts`). Второй подсчёт «тихих» рядом не писать.
+- **Политика учёта проекта держит только агентов и только новую аренду**
+  (`workflow/usagepolicy.go`). `projects.settings.usage_policy`, по умолчанию
+  `off`; `usageAllows` стоит в `ClaimWith` в ветке `newLease` рядом с
+  бюджетом, отказ — `usage_report_required` (409). Меняет политику человек
+  уровня admin; агент — нет, даже с admin.
 
 - **Учётные данные GitHub выбираются по репозиторию, от частного к общему**
   ([решение 0034](../docs/decisions/0034-github-installation-on-tenant.md)):
