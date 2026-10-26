@@ -30,6 +30,10 @@ const (
 	CodeDriftUnresolved         Code = "drift_unresolved"
 	CodeUnknownRepository       Code = "unknown_repository"
 	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"
+	// Этап открыт дольше предела stage_time_limit (CLAB-221): новый захват
+	// агентом отбит, снять предел может человек. Раннер отличает его от
+	// прочих отказов и задачу пропускает.
+	CodeStageTimeExceeded Code = "stage_time_exceeded"
 	// Политика учёта проекта (CLAB-219): у агентского принципала есть
 	// закрытые прогоны без отчёта о стоимости, новый захват отбит до отчёта.
 	// Долг на принципале, а не на задаче, — раннер по этому коду перестаёт

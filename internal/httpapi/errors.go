@@ -43,7 +43,7 @@ func statusFor(code apperr.Code) int {
 		apperr.CodeTransitionNotAllowed, apperr.CodeOutOfTaskScope,
 		apperr.CodeTaskNotClaimable, apperr.CodeLeaseHeldByOther,
 		apperr.CodeLeaseExpired, apperr.CodeDriftUnresolved,
-		apperr.CodeScopeExpansionForbidden,
+		apperr.CodeScopeExpansionForbidden, apperr.CodeStageTimeExceeded,
 		apperr.CodeUsageReportRequired:
 		return http.StatusConflict
 	default:

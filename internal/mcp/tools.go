@@ -388,6 +388,7 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 		"gates_ahead":  state.GatesAhead,
 		"boundary":     state.Boundary,
 		"execution":    state.Execution,
+		"stage_limit":  state.StageLimit,
 		"stage_runs":   runs,
 		"transitions":  previews,
 		"timeline":     events,
@@ -663,7 +664,11 @@ func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallT
 	if err != nil {
 		return fail(err)
 	}
-	return ok(map[string]any{"transitions": previews})
+	limit, err := s.engine.StageLimit(ctx, task)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(map[string]any{"transitions": previews, "stage_limit": limit})
 }
 
 type transitionInput struct {

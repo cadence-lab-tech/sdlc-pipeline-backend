@@ -364,6 +364,10 @@ const (
 	// Предел попыток целевого статуса перехода (CLAB-217): вердикт выносит
 	// движок, снять гейт — дать ещё попытку — может только человек.
 	GateAttemptsLimit = "attempts_limit"
+	// Предел времени этапа (CLAB-221): стоит на переходе входа в статус,
+	// на самом переходе ничего не держит, а после срока закрывает новые
+	// захваты агентами; снимает его только человек.
+	GateStageTimeLimit = "stage_time_limit"
 )
 
 type Gate struct {
@@ -633,6 +637,12 @@ type StageRun struct {
 	// прогонов, заведённых до него, оба nil — «снимка не было», не none.
 	ModelLevel       *string `json:"model_level,omitempty"`
 	ModelLevelSource *string `json:"model_level_source,omitempty"`
+	// Переход, которым открыт прогон (CLAB-221): по его гейту
+	// stage_time_limit считается предел этапа. nil у начального статуса,
+	// перепроверок и прогонов, заведённых до миграции 000031, — предела нет.
+	EnteredViaTransitionID *uuid.UUID `json:"entered_via_transition_id,omitempty"`
+	// Когда воркер заметил просрочку и написал stage.overdue.
+	OverdueAt *time.Time `json:"overdue_at,omitempty"`
 }
 
 // LeaseHeld — держит ли прогон живую аренду на момент now.
@@ -923,6 +933,9 @@ const (
 	EventTaskUpdated       = "task.updated"
 	// Задача из бэклога переехала на новую версию цикла при активации.
 	EventTaskWorkflowMoved = "task.workflow_moved"
+	// Этап открыт дольше предела stage_time_limit (CLAB-221): пишет воркер,
+	// один раз на прогон.
+	EventStageOverdue = "stage.overdue"
 )
 
 // TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где
