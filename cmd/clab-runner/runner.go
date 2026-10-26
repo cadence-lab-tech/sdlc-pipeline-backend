@@ -292,6 +292,11 @@ func (r *runner) mark(task string, busy bool) {
 // гаснет на переходе, а отчёт идёт после него.
 func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	log := r.log.With("task", item.Task.Key, "role", claim.roleKey(item.RoleKey))
+	if r.cfg.Billing != "" {
+		// Тип оплаты виден в каждой строке прогона, в том числе в запуске
+		// агента и в сухом прогоне (решение 0062).
+		log = log.With("billing", r.cfg.Billing)
+	}
 
 	space, err := r.prepareWorkspace(ctx, item.Task.Key, claim)
 	if err != nil {
@@ -393,6 +398,11 @@ func (r *runner) reportUsage(ctx context.Context, log *slog.Logger, task, runID 
 	if report == nil {
 		log.Info("стоимость неизвестна: вывод агента не разобран")
 		return false
+	}
+	// Без SDLC_RUNNER_BILLING поля нет: строка ляжет без признака и
+	// посчитается деньгами (решение 0062).
+	if r.cfg.Billing != "" {
+		report["billing"] = r.cfg.Billing
 	}
 	// Отчёт переживает остановку раннера так же, как release после него.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)

@@ -25,16 +25,29 @@ type UsageInput struct {
 	DurationMS       *int64
 	ReportedBy       uuid.UUID
 	Details          json.RawMessage
+	// api, subscription или nil — не указано (решение 0062). Значение
+	// проверяет движок, CHECK в схеме — страховка.
+	Billing *string
 }
 
+// moneyPredicate — строка учёта считается деньгами: api или без признака
+// (решение 0062). Одна константа на бюджет, карточку и метрики, чтобы
+// определение денег не разошлось между запросами. IS DISTINCT FROM, а не <>:
+// сравнение NULL с 'subscription' — не истина, и строка без признака выпала бы
+// из денег.
+const moneyPredicate = `u.billing IS DISTINCT FROM 'subscription'`
+
+// subscriptionPredicate — условная стоимость на подписке.
+const subscriptionPredicate = `u.billing = 'subscription'`
+
 const usageCols = `id, run_id, model, input_tokens, output_tokens, cache_read_tokens,
-	cache_write_tokens, cost_usd, duration_ms, reported_by, reported_at, details`
+	cache_write_tokens, cost_usd, duration_ms, billing, reported_by, reported_at, details`
 
 func scanUsage(row interface{ Scan(...any) error }) (domain.StageRunUsage, error) {
 	var u domain.StageRunUsage
 	err := row.Scan(&u.ID, &u.RunID, &u.Model, &u.InputTokens, &u.OutputTokens,
 		&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS,
-		&u.ReportedBy, &u.ReportedAt, &u.Details)
+		&u.Billing, &u.ReportedBy, &u.ReportedAt, &u.Details)
 	return u, err
 }
 
@@ -48,11 +61,11 @@ func (s *Store) RecordUsage(ctx context.Context, q Querier, in UsageInput) (doma
 	u, err := scanUsage(q.QueryRow(ctx, `
 		INSERT INTO stage_run_usage (run_id, model, input_tokens, output_tokens,
 		                             cache_read_tokens, cache_write_tokens, cost_usd,
-		                             duration_ms, reported_by, details)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		                             duration_ms, reported_by, details, billing)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING `+usageCols,
 		in.RunID, in.Model, in.InputTokens, in.OutputTokens, in.CacheReadTokens,
-		in.CacheWriteTokens, in.CostUSD, in.DurationMS, in.ReportedBy, details))
+		in.CacheWriteTokens, in.CostUSD, in.DurationMS, in.ReportedBy, details, in.Billing))
 	if err != nil {
 		return u, translate(err)
 	}
@@ -81,7 +94,8 @@ func (s *Store) ListRunUsage(ctx context.Context, q Querier, runID uuid.UUID) ([
 // TaskUsage — стоимость задачи и, если она эпик, всего её поддерева.
 //
 // Отдельно считается, о скольких прогонах никто не отчитался: «неизвестно»
-// не должно выглядеть как ноль (решение 0026).
+// не должно выглядеть как ноль (решение 0026). Деньги, их часть без признака
+// и условная стоимость — раздельно (решение 0062); cost_usd — всё сообщённое.
 func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (domain.UsageSummary, error) {
 	var out domain.UsageSummary
 	err := q.QueryRow(ctx, `
@@ -98,10 +112,18 @@ func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (dom
 			coalesce(sum(u.cost_usd), 0)::float8,
 			coalesce(sum(u.input_tokens + u.output_tokens), 0)::bigint,
 			count(DISTINCT u.run_id),
-			(SELECT count(*) FROM runs) - count(DISTINCT u.run_id)
+			(SELECT count(*) FROM runs) - count(DISTINCT u.run_id),
+			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND `+moneyPredicate+`), 0)::float8,
+			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND u.billing IS NULL), 0)::float8,
+			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND `+subscriptionPredicate+`), 0)::float8,
+			coalesce(sum(u.cost_usd) FILTER (WHERE `+moneyPredicate+`), 0)::float8,
+			coalesce(sum(u.cost_usd) FILTER (WHERE u.billing IS NULL), 0)::float8,
+			coalesce(sum(u.cost_usd) FILTER (WHERE `+subscriptionPredicate+`), 0)::float8
 		FROM runs r
 		LEFT JOIN stage_run_usage u ON u.run_id = r.id`, taskID,
-	).Scan(&out.CostUSD, &out.SubtreeCostUSD, &out.Tokens, &out.ReportedRuns, &out.SilentRuns)
+	).Scan(&out.CostUSD, &out.SubtreeCostUSD, &out.Tokens, &out.ReportedRuns, &out.SilentRuns,
+		&out.APICostUSD, &out.UnspecifiedCostUSD, &out.SubscriptionCostUSD,
+		&out.SubtreeAPICostUSD, &out.SubtreeUnspecifiedCostUSD, &out.SubtreeSubscriptionCostUSD)
 	if err != nil {
 		return out, translate(err)
 	}
@@ -116,11 +138,16 @@ func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (dom
 // стоимости не обнуляет стоимость прогона (решение 0026). Модели — без
 // повторов, по времени первого отчёта, при равенстве — по имени, чтобы
 // порядок не зависел от плана запроса. Прогона без строк в ответе нет: «нет
-// учёта» дописывает тот, кто склеивает (CardStageRuns).
+// учёта» дописывает тот, кто склеивает (CardStageRuns). Деньги и условная
+// стоимость по тому же правилу: null — строк такого вида со стоимостью нет.
 func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID]domain.RunUsage, error) {
 	rows, err := q.Query(ctx, `
 		WITH own AS (
-			SELECT u.* FROM stage_run_usage u
+			SELECT u.*,
+			       CASE WHEN `+moneyPredicate+` THEN u.cost_usd END AS api_cost,
+			       CASE WHEN u.billing IS NULL THEN u.cost_usd END AS unspecified_cost,
+			       CASE WHEN `+subscriptionPredicate+` THEN u.cost_usd END AS subscription_cost
+			FROM stage_run_usage u
 			JOIN stage_runs sr ON sr.id = u.run_id
 			WHERE sr.task_id = $1
 		),
@@ -133,7 +160,9 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 		SELECT o.run_id, count(*)::int, m.models,
 		       sum(o.input_tokens)::bigint, sum(o.output_tokens)::bigint,
 		       sum(o.cache_read_tokens)::bigint, sum(o.cache_write_tokens)::bigint,
-		       sum(o.cost_usd)::float8, sum(o.duration_ms)::bigint
+		       sum(o.cost_usd)::float8, sum(o.duration_ms)::bigint,
+		       sum(o.api_cost)::float8, sum(o.unspecified_cost)::float8,
+		       sum(o.subscription_cost)::float8
 		FROM own o JOIN models m ON m.run_id = o.run_id
 		GROUP BY o.run_id, m.models`, taskID)
 	if err != nil {
@@ -148,7 +177,8 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 			u     domain.RunUsage
 		)
 		if err := rows.Scan(&runID, &u.Reports, &u.Models, &u.InputTokens, &u.OutputTokens,
-			&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS); err != nil {
+			&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS,
+			&u.APICostUSD, &u.UnspecifiedCostUSD, &u.SubscriptionCostUSD); err != nil {
 			return nil, translate(err)
 		}
 		u.Reported = u.Reports > 0

@@ -485,12 +485,13 @@ func (a *Auth) TeamBudgets(ctx context.Context, id Identity, key string) (TeamBu
 	}
 	out := TeamBudgets{Team: team, Budgets: []domain.BudgetState{}}
 	for _, b := range limits {
-		spent, err := a.store.TeamSpend(ctx, q, team.ID, b.Period)
+		spent, subscription, err := a.store.TeamSpend(ctx, q, team.ID, b.Period)
 		if err != nil {
 			return TeamBudgets{}, err
 		}
 		out.Budgets = append(out.Budgets, domain.BudgetState{
 			TeamKey: team.Key, Period: b.Period, LimitUSD: b.LimitUSD, SpentUSD: spent,
+			SubscriptionUSD: subscription,
 		})
 	}
 	return out, nil
