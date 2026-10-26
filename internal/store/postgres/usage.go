@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -39,6 +40,34 @@ const moneyPredicate = `u.billing IS DISTINCT FROM 'subscription'`
 
 // subscriptionPredicate — условная стоимость на подписке.
 const subscriptionPredicate = `u.billing = 'subscription'`
+
+// Состояние учёта прогона (CLAB-219): одно SQL-определение на карточку
+// (RunUsageStates), стоимость задачи (TaskUsage), метрики (CostMetrics) и
+// долг по политике учёта (UsageDebts); его же берут CLAB-220 и CLAB-223.
+// Признак «прогон забирали» живёт только в ленте: release и протухание
+// аренды обнуляют stage_runs.claimed_by, а событие stage.claimed остаётся.
+// Аргумент — выражение с id прогона во внешнем запросе (например, sr.id).
+
+// runReportedSQL — у прогона есть хотя бы одна строка учёта: строка без
+// стоимости и строка подписки — тоже учёт (решения 0026 и 0062).
+func runReportedSQL(run string) string {
+	return `EXISTS (SELECT 1 FROM stage_run_usage su WHERE su.run_id = ` + run + `)`
+}
+
+// runClaimedSQL — прогон забирали: событие stage.claimed с его id от любого
+// принципала. Индекс task_events_stage_claimed (000032) делает это
+// поиском по индексу, а не проходом ленты.
+func runClaimedSQL(run string) string {
+	return `EXISTS (SELECT 1 FROM task_events ce
+		WHERE ce.stage_run_id = ` + run + ` AND ce.type = '` + domain.EventStageClaimed + `')`
+}
+
+// usageStateSQL — reported, missing или not_applicable (domain.UsageState*).
+func usageStateSQL(run string) string {
+	return `CASE WHEN ` + runReportedSQL(run) + ` THEN '` + domain.UsageStateReported + `'
+		WHEN ` + runClaimedSQL(run) + ` THEN '` + domain.UsageStateMissing + `'
+		ELSE '` + domain.UsageStateNotApplicable + `' END`
+}
 
 const usageCols = `id, run_id, model, input_tokens, output_tokens, cache_read_tokens,
 	cache_write_tokens, cost_usd, duration_ms, billing, reported_by, reported_at, details`
@@ -94,8 +123,10 @@ func (s *Store) ListRunUsage(ctx context.Context, q Querier, runID uuid.UUID) ([
 // TaskUsage — стоимость задачи и, если она эпик, всего её поддерева.
 //
 // Отдельно считается, о скольких прогонах никто не отчитался: «неизвестно»
-// не должно выглядеть как ноль (решение 0026). Деньги, их часть без признака
-// и условная стоимость — раздельно (решение 0062); cost_usd — всё сообщённое.
+// не должно выглядеть как ноль (решение 0026). «Без учёта» — состояние
+// missing (CLAB-219): прогоны без роли и ни разу не взятые сюда не входят,
+// агент там не работал. Деньги, их часть без признака и условная стоимость —
+// раздельно (решение 0062); cost_usd — всё сообщённое.
 func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (domain.UsageSummary, error) {
 	var out domain.UsageSummary
 	err := q.QueryRow(ctx, `
@@ -105,14 +136,15 @@ func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (dom
 			SELECT t.id FROM tasks t JOIN subtree s ON t.parent_id = s.id
 		),
 		runs AS (
-			SELECT sr.id, sr.task_id FROM stage_runs sr JOIN subtree s ON s.id = sr.task_id
+			SELECT sr.id, sr.task_id, `+usageStateSQL("sr.id")+` AS usage_state
+			FROM stage_runs sr JOIN subtree s ON s.id = sr.task_id
 		)
 		SELECT
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1), 0)::float8,
 			coalesce(sum(u.cost_usd), 0)::float8,
 			coalesce(sum(u.input_tokens + u.output_tokens), 0)::bigint,
-			count(DISTINCT u.run_id),
-			(SELECT count(*) FROM runs) - count(DISTINCT u.run_id),
+			(SELECT count(*) FROM runs WHERE usage_state = '`+domain.UsageStateReported+`'),
+			(SELECT count(*) FROM runs WHERE usage_state = '`+domain.UsageStateMissing+`'),
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND `+moneyPredicate+`), 0)::float8,
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND u.billing IS NULL), 0)::float8,
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND `+subscriptionPredicate+`), 0)::float8,
@@ -182,9 +214,81 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 			return nil, translate(err)
 		}
 		u.Reported = u.Reports > 0
+		u.State = domain.UsageStateReported
 		out[runID] = u
 	}
 	return out, translate(rows.Err())
+}
+
+// RunUsageStates — состояние учёта каждого прогона задачи одним запросом
+// (CLAB-219): этапы и перепроверки, только свои прогоны, без поддерева.
+func (s *Store) RunUsageStates(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID]string, error) {
+	rows, err := q.Query(ctx, `
+		SELECT sr.id, `+usageStateSQL("sr.id")+`
+		FROM stage_runs sr WHERE sr.task_id = $1`, taskID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]string{}
+	for rows.Next() {
+		var (
+			id    uuid.UUID
+			state string
+		)
+		if err := rows.Scan(&id, &state); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = state
+	}
+	return out, translate(rows.Err())
+}
+
+// UsageDebt — прогон, за который принципал должен отчёт по политике учёта
+// проекта.
+type UsageDebt struct {
+	TaskKey    string    `json:"task"`
+	StageRunID uuid.UUID `json:"stage_run_id"`
+	FinishedAt time.Time `json:"finished_at"`
+}
+
+// UsageDebts — долг принципала по учёту в проекте (CLAB-219): прогоны,
+// которые он забирал, в состоянии missing, закрытые не раньше enabledAt и
+// не позже чем graceMinutes назад по часам базы. Прогон, вернувшийся в
+// pending, не закрыт и долгом не считается. Строка учёта любого, кто прогон
+// забирал, гасит долг всех: учёт стоит на прогоне. Отдаёт первые limit
+// записей по времени закрытия и полное число.
+func (s *Store) UsageDebts(ctx context.Context, q Querier, projectID, actor uuid.UUID, enabledAt time.Time, graceMinutes, limit int) ([]UsageDebt, int, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.key, sr.id, sr.finished_at, count(*) OVER ()
+		FROM stage_runs sr
+		JOIN tasks t ON t.id = sr.task_id
+		WHERE t.project_id = $1
+		  AND sr.finished_at IS NOT NULL
+		  AND sr.finished_at >= $3
+		  AND sr.finished_at <= now() - make_interval(mins => $4)
+		  AND EXISTS (SELECT 1 FROM task_events ae
+		              WHERE ae.stage_run_id = sr.id AND ae.type = '`+domain.EventStageClaimed+`'
+		                AND ae.actor_id = $2)
+		  AND `+usageStateSQL("sr.id")+` = '`+domain.UsageStateMissing+`'
+		ORDER BY sr.finished_at, sr.id
+		LIMIT $5`, projectID, actor, enabledAt, graceMinutes, limit)
+	if err != nil {
+		return nil, 0, translate(err)
+	}
+	defer rows.Close()
+
+	out := []UsageDebt{}
+	total := 0
+	for rows.Next() {
+		var d UsageDebt
+		if err := rows.Scan(&d.TaskKey, &d.StageRunID, &d.FinishedAt, &total); err != nil {
+			return nil, 0, translate(err)
+		}
+		out = append(out, d)
+	}
+	return out, total, translate(rows.Err())
 }
 
 // CardStageRuns — прогоны задачи для карточки вместе с их учётом, номером
@@ -199,6 +303,10 @@ func (s *Store) CardStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) 
 		return nil, err
 	}
 	usage, err := s.RunUsageByTask(ctx, q, taskID)
+	if err != nil {
+		return nil, err
+	}
+	states, err := s.RunUsageStates(ctx, q, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +327,9 @@ func (s *Store) CardStageRuns(ctx context.Context, q Querier, taskID uuid.UUID) 
 		u, ok := usage[r.ID]
 		if !ok {
 			u = domain.NoRunUsage()
+		}
+		if st, ok := states[r.ID]; ok {
+			u.State = st
 		}
 		card := domain.CardStageRun{StageRun: r, Usage: u, GateResults: []domain.RunGateVerdict{}}
 		if v, ok := versions[r.ID]; ok {

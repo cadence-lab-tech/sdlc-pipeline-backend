@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 // Метрики цикла: где задачи застревают, какие гейты чаще всего валятся,
@@ -57,6 +59,11 @@ type ThroughputMetric struct {
 // CostMetric — стоимость в одном разрезе: по статусу, по роли, по модели.
 // Считается по stage_run_usage: прогоны, о которых никто не отчитался, видны
 // отдельным счётчиком, а не растворяются в нулях (решение 0026).
+//
+// В разрезах status и role reported_runs и silent_runs — прогоны в состоянии
+// reported и missing (CLAB-219, usageStateSQL): runs — все прогоны разреза,
+// разница — not_applicable, где агент не работал. Строка без стоимости —
+// учёт, а не «тихий» прогон; её стоимость неизвестна и в суммы не входит.
 type CostMetric struct {
 	// status | role | model
 	Dimension string  `json:"dimension"`
@@ -74,6 +81,10 @@ type CostMetric struct {
 	APICostUSD          float64 `json:"api_cost_usd"`
 	UnspecifiedCostUSD  float64 `json:"unspecified_cost_usd"`
 	SubscriptionCostUSD float64 `json:"subscription_cost_usd"`
+	// Прогоны с известной стоимостью — делитель avg_cost_usd. Наружу не
+	// отдаётся: среднее считается как до CLAB-219, по прогонам со стоимостью,
+	// а reported_runs теперь включает и строки без неё.
+	costed int
 }
 
 // CostMetrics — стоимость за период в трёх разрезах сразу: по статусу, по
@@ -82,7 +93,8 @@ func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID,
 	rows, err := q.Query(ctx, `
 		WITH runs AS (
 		    SELECT sr.id, ws.key AS status_key, ws.name AS status_name,
-		           coalesce(ro.key, '') AS role_key, coalesce(ro.name, '') AS role_name
+		           coalesce(ro.key, '') AS role_key, coalesce(ro.name, '') AS role_name,
+		           `+usageStateSQL("sr.id")+` AS usage_state
 		    FROM stage_runs sr
 		    JOIN tasks t ON t.id = sr.task_id
 		    JOIN workflow_statuses ws ON ws.id = sr.status_id
@@ -95,22 +107,24 @@ func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID,
 		           sum(u.cost_usd) FILTER (WHERE u.billing IS NULL) AS unspecified_cost,
 		           sum(u.cost_usd) FILTER (WHERE `+subscriptionPredicate+`) AS subscription_cost
 		    FROM runs r LEFT JOIN stage_run_usage u ON u.run_id = r.id
-		    GROUP BY r.id, r.status_key, r.status_name, r.role_key, r.role_name
+		    GROUP BY r.id, r.status_key, r.status_name, r.role_key, r.role_name, r.usage_state
 		)
 		SELECT 'status', status_key, max(status_name), count(*),
-		       count(*) FILTER (WHERE cost IS NOT NULL),
-		       count(*) FILTER (WHERE cost IS NULL),
+		       count(*) FILTER (WHERE usage_state = '`+domain.UsageStateReported+`'),
+		       count(*) FILTER (WHERE usage_state = '`+domain.UsageStateMissing+`'),
 		       coalesce(sum(cost), 0)::float8, coalesce(sum(tokens), 0)::bigint,
 		       coalesce(sum(api_cost), 0)::float8, coalesce(sum(unspecified_cost), 0)::float8,
-		       coalesce(sum(subscription_cost), 0)::float8
+		       coalesce(sum(subscription_cost), 0)::float8,
+		       count(*) FILTER (WHERE cost IS NOT NULL)
 		FROM per_run GROUP BY status_key
 		UNION ALL
 		SELECT 'role', role_key, max(role_name), count(*),
-		       count(*) FILTER (WHERE cost IS NOT NULL),
-		       count(*) FILTER (WHERE cost IS NULL),
+		       count(*) FILTER (WHERE usage_state = '`+domain.UsageStateReported+`'),
+		       count(*) FILTER (WHERE usage_state = '`+domain.UsageStateMissing+`'),
 		       coalesce(sum(cost), 0)::float8, coalesce(sum(tokens), 0)::bigint,
 		       coalesce(sum(api_cost), 0)::float8, coalesce(sum(unspecified_cost), 0)::float8,
-		       coalesce(sum(subscription_cost), 0)::float8
+		       coalesce(sum(subscription_cost), 0)::float8,
+		       count(*) FILTER (WHERE cost IS NOT NULL)
 		FROM per_run WHERE role_key <> '' GROUP BY role_key
 		UNION ALL
 		SELECT 'model', u.model, '', count(DISTINCT u.run_id),
@@ -119,7 +133,8 @@ func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID,
 		       coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)), 0)::bigint,
 		       coalesce(sum(u.cost_usd) FILTER (WHERE `+moneyPredicate+`), 0)::float8,
 		       coalesce(sum(u.cost_usd) FILTER (WHERE u.billing IS NULL), 0)::float8,
-		       coalesce(sum(u.cost_usd) FILTER (WHERE `+subscriptionPredicate+`), 0)::float8
+		       coalesce(sum(u.cost_usd) FILTER (WHERE `+subscriptionPredicate+`), 0)::float8,
+		       count(DISTINCT u.run_id)
 		FROM stage_run_usage u
 		JOIN runs r ON r.id = u.run_id
 		GROUP BY u.model
@@ -134,11 +149,11 @@ func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID,
 		var m CostMetric
 		if err := rows.Scan(&m.Dimension, &m.Key, &m.Name, &m.Runs, &m.Reported,
 			&m.Silent, &m.CostUSD, &m.Tokens,
-			&m.APICostUSD, &m.UnspecifiedCostUSD, &m.SubscriptionCostUSD); err != nil {
+			&m.APICostUSD, &m.UnspecifiedCostUSD, &m.SubscriptionCostUSD, &m.costed); err != nil {
 			return nil, translate(err)
 		}
-		if m.Reported > 0 {
-			m.AvgUSD = m.CostUSD / float64(m.Reported)
+		if m.costed > 0 {
+			m.AvgUSD = m.CostUSD / float64(m.costed)
 		}
 		out = append(out, m)
 	}

@@ -686,7 +686,11 @@ type StageRunUsage struct {
 // в ответе и есть «не сообщили».
 type RunUsage struct {
 	Reported bool `json:"reported"`
-	Reports  int  `json:"reports"`
+	// Состояние учёта прогона (CLAB-219): reported, missing или
+	// not_applicable. Считается при чтении (UsageState*), в схеме не
+	// хранится; Reported оставлен для клиентов прежней версии.
+	State   string `json:"state"`
+	Reports int    `json:"reports"`
 	// Модели строк как пришли, без повторов, по времени первого отчёта.
 	Models           []string `json:"models"`
 	InputTokens      *int64   `json:"input_tokens"`
@@ -704,9 +708,68 @@ type RunUsage struct {
 	SubscriptionCostUSD *float64 `json:"subscription_cost_usd"`
 }
 
-// NoRunUsage — учёт прогона, о котором никто не отчитался.
+// NoRunUsage — учёт прогона, о котором никто не отчитался. Состояние —
+// not_applicable, пока склеивающий не скажет иначе: забирали ли прогон, знает
+// запрос состояний (RunUsageStates), а не отсутствие строк.
 func NoRunUsage() RunUsage {
-	return RunUsage{Models: []string{}}
+	return RunUsage{Models: []string{}, State: UsageStateNotApplicable}
+}
+
+// Состояния учёта прогона (CLAB-219, дополнение к решению 0026). Одно
+// определение на карточку, стоимость задачи, метрики и политику учёта
+// проекта — SQL-выражение usageStateSQL в хранилище:
+//   - reported — у прогона есть хотя бы одна строка stage_run_usage, даже без
+//     стоимости и с любым признаком оплаты;
+//   - missing — прогон забирали (в ленте есть stage.claimed с его id), а строк
+//     нет: закрыт, в работе или вернулся в pending после release и протухания;
+//   - not_applicable — прогон не забирал никто: статус без роли, ещё не
+//     взятый или закрытый без захвата этап. Об агенте он ничего не говорит.
+const (
+	UsageStateReported      = "reported"
+	UsageStateMissing       = "missing"
+	UsageStateNotApplicable = "not_applicable"
+)
+
+// Режимы политики учёта проекта (CLAB-219): off — как раньше, required —
+// захват агентом с долгом по учёту отбивается.
+const (
+	UsagePolicyOff      = "off"
+	UsagePolicyRequired = "required"
+)
+
+// DefaultUsageGraceMinutes — льготное окно политики, если администратор его
+// не задал: агенту и раннеру хватает часа, чтобы отчитаться о закрытом
+// прогоне, прежде чем он станет долгом.
+const DefaultUsageGraceMinutes = 60
+
+// MaxUsageGraceMinutes — потолок окна, семь суток: больше — уже не окно, а
+// выключенная политика.
+const MaxUsageGraceMinutes = 7 * 24 * 60
+
+// UsagePolicy — политика учёта проекта «захват без учёта запрещён»
+// (CLAB-219). Лежит в projects.settings.usage_policy; нет ключа — off, поэтому
+// после апгрейда проекты живут как раньше. Действует только на принципалов
+// вида agent: человек и раннер сотрудника на личном токене под неё не
+// попадают.
+type UsagePolicy struct {
+	Mode string `json:"mode"`
+	// Окно в минутах; nil — не задано, действует DefaultUsageGraceMinutes,
+	// 0 — без окна.
+	GraceMinutes *int `json:"grace_minutes"`
+	// Момент включения ставит сервер при переходе off → required: прогоны,
+	// закрытые раньше, долгом не считаются.
+	EnabledAt *time.Time `json:"enabled_at"`
+}
+
+// Required — политика включена.
+func (p UsagePolicy) Required() bool { return p.Mode == UsagePolicyRequired }
+
+// Grace — действующее окно в минутах.
+func (p UsagePolicy) Grace() int {
+	if p.GraceMinutes == nil {
+		return DefaultUsageGraceMinutes
+	}
+	return *p.GraceMinutes
 }
 
 // CardStageRun — прогон в карточке задачи (GET /v1/tasks/:key и

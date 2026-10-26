@@ -30,6 +30,11 @@ const (
 	CodeDriftUnresolved         Code = "drift_unresolved"
 	CodeUnknownRepository       Code = "unknown_repository"
 	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"
+	// Политика учёта проекта (CLAB-219): у агентского принципала есть
+	// закрытые прогоны без отчёта о стоимости, новый захват отбит до отчёта.
+	// Долг на принципале, а не на задаче, — раннер по этому коду перестаёт
+	// забирать задачи до следующего опроса.
+	CodeUsageReportRequired Code = "usage_report_required"
 
 	// Аутентификация и права (фаза 4): токен не предъявлен или недействителен,
 	// либо предъявлен, но прав на действие нет.

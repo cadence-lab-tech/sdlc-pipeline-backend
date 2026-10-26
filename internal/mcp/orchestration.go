@@ -398,9 +398,9 @@ const usageByRunner = "runner"
 func usageStep(byRunner bool) string {
 	if byRunner {
 		return `7. О стоимости не отчитывайся: не вызывай sdlc_report_usage и clab usage,
-   даже если ответ захвата ждёт отчёта (usage_report). Тебя запустил
-   раннер, он сообщит стоимость прогона по твоему выводу сам, и второй
-   отчёт удвоил бы её.`
+   даже если ответ захвата ждёт или требует отчёта (usage_report: expected
+   или required). Тебя запустил раннер, он сообщит стоимость прогона по
+   твоему выводу сам, и второй отчёт удвоил бы её.`
 	}
 	return `7. До перехода отчитайся о стоимости: sdlc_report_usage с полным id модели из
    сессии (claude-opus-5-5, а не алиас opus), токенами и деньгами. Переход
@@ -411,7 +411,8 @@ func usageStep(byRunner bool) string {
 // workPromptText — текст промпта work_on_task. byRunner — агента поднял
 // раннер и о стоимости отчитается сам: у прогона один источник учёта, и
 // шаг отчёта агенту заменён запретом. Ответ захвата при этом всё равно
-// приносит usage_report: expected, поэтому одного пропуска шага мало.
+// приносит usage_report: expected, а при политике учёта проекта — required
+// (CLAB-219), поэтому одного пропуска шага мало.
 func workPromptText(task, role string, byRunner bool) string {
 	head := "Возьми задачу " + task + " в работу."
 	if role == "" {

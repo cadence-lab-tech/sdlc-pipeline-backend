@@ -198,6 +198,11 @@ func (s *Server) Handler() http.Handler {
 		v1.DELETE("/projects/:projectKey/documents/:documentID", maintainer, s.deleteDocument)
 
 		v1.GET("/projects/:projectKey/metrics", viewer, s.metrics)
+		// Политика учёта (CLAB-219): читают все участники, меняет
+		// администратор проекта или системы, и только человек — это
+		// проверяет движок.
+		v1.GET("/projects/:projectKey/usage-policy", viewer, s.usagePolicy)
+		v1.PATCH("/projects/:projectKey/usage-policy", projectAdmin, s.setUsagePolicy)
 
 		// Роли. Версия роли иммутабельна: правка инструкции — новая версия,
 		// потому что пройденные этапы ссылаются на ту, по которой работали.

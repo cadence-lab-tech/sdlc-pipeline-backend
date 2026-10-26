@@ -73,6 +73,9 @@ func (s *Server) auditREST() gin.HandlerFunc {
 			}
 			params["query"] = query
 		}
+		if change, ok := c.Get(ctxAuditChange); ok {
+			params["change"] = change
+		}
 		var body map[string]any
 		if tap != nil {
 			b := tap.finish()

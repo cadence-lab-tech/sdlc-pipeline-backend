@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -321,4 +322,59 @@ func (s *Store) DeleteProject(ctx context.Context, tx pgx.Tx, projectID uuid.UUI
 		return apperr.NotFound("проект уже удалён")
 	}
 	return nil
+}
+
+// ProjectUsagePolicy — политика учёта проекта из projects.settings
+// (CLAB-219). Ключа нет — off: после апгрейда проекты живут как раньше, и
+// миграция данных не нужна. lock — взять строку проекта под FOR UPDATE:
+// правка политики читает «было» и пишет «стало» без гонки с соседней правкой.
+func (s *Store) ProjectUsagePolicy(ctx context.Context, q Querier, projectID uuid.UUID, lock bool) (domain.UsagePolicy, error) {
+	query := `SELECT settings->'usage_policy' FROM projects WHERE id = $1`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	var raw []byte
+	if err := q.QueryRow(ctx, query, projectID).Scan(&raw); err != nil {
+		return domain.UsagePolicy{}, notFound(err, "проект не найден")
+	}
+	out := domain.UsagePolicy{Mode: domain.UsagePolicyOff}
+	if len(raw) == 0 || string(raw) == "null" {
+		return out, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, apperr.Internal(err, "политика учёта проекта не читается")
+	}
+	if out.Mode != domain.UsagePolicyRequired {
+		out.Mode = domain.UsagePolicyOff
+	}
+	return out, nil
+}
+
+// SetProjectUsagePolicy пишет политику в projects.settings.usage_policy, не
+// трогая остальные ключи настроек, и отдаёт записанное. stampEnabled —
+// поставить момент включения по часам базы: с ними же сравнивает
+// stage_runs.finished_at запрос долга (UsageDebts), и часы api в сравнение не
+// попадают.
+func (s *Store) SetProjectUsagePolicy(ctx context.Context, q Querier, projectID uuid.UUID, p domain.UsagePolicy, stampEnabled bool) (domain.UsagePolicy, error) {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return p, apperr.Internal(err, "политика учёта не сериализуется")
+	}
+	var stored []byte
+	err = q.QueryRow(ctx, `
+		UPDATE projects
+		SET settings = jsonb_set(coalesce(settings, '{}'::jsonb), '{usage_policy}',
+		        CASE WHEN $3 THEN $2::jsonb || jsonb_build_object('enabled_at', now())
+		             ELSE $2::jsonb END),
+		    updated_at = now()
+		WHERE id = $1
+		RETURNING settings->'usage_policy'`, projectID, raw, stampEnabled).Scan(&stored)
+	if err != nil {
+		return p, notFound(err, "проект не найден")
+	}
+	var out domain.UsagePolicy
+	if err := json.Unmarshal(stored, &out); err != nil {
+		return p, apperr.Internal(err, "политика учёта проекта не читается")
+	}
+	return out, nil
 }
