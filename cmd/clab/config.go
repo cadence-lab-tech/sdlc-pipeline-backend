@@ -125,6 +125,10 @@ func splitGlobals(args []string) (globals, []string) {
 	rest := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
+		case a == "--":
+			// Дальше — чужая команда (clab heartbeat K -- cmd): её --json и
+			// --host не наши.
+			return g, append(rest, args[i:]...)
 		case a == "--json":
 			g.json = true
 		case a == "--host" && i+1 < len(args):
