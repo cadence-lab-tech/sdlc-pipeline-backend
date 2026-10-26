@@ -75,6 +75,19 @@ func (s *Store) LatestReviewRun(ctx context.Context, q Querier, parentRunID, gat
 	return &r, nil
 }
 
+// CountFailedReviews — сколько перепроверок по гейту на этом родительском
+// прогоне закрыто провалом (outcome = 'rejected': вердикт не pass_on,
+// неразборчивый или без поля). Идущие и прошедшие в счёт не входят, а новый
+// вход в статус открывает новый родительский прогон — и счёт с нуля.
+func (s *Store) CountFailedReviews(ctx context.Context, q Querier, parentRunID, gateID uuid.UUID) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `
+		SELECT count(*) FROM stage_runs
+		WHERE parent_run_id = $1 AND gate_id = $2 AND kind = 'review'
+		  AND finished_at IS NOT NULL AND outcome = 'rejected'`, parentRunID, gateID).Scan(&n)
+	return n, translate(err)
+}
+
 // CreateReviewRun открывает попытку перепроверки внутри этапа.
 //
 // Статус тот же, что у родителя: ревьюер проверяет результат там же, где он

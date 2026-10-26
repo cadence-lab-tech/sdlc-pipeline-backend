@@ -35,7 +35,10 @@ it, and show them what exactly changes before applying.
    target status: `{"max_attempts": 3}`, an integer of at least 1, never on a
    transition into a terminal status. It goes on the transition itself,
    usually a `reject`; roles carry no such setting. Only a human lifts it, with
-   `waived`, one attempt per decision.
+   `waived`, one attempt per decision. `agent_review` takes an optional
+   `max_attempts` too: after that many failed reviews on one stage run no new
+   review starts, the gate fails with "N of N reviews" and only a human lifts
+   it with `waived`; a new submission clears that waiver.
 3. **Dry run**: `clab import --file bundle.json --dry-run`. In the report
    roles are `unchanged | new_version`, cycles `draft_created`, and
    `workflow_validations[].valid` must be `true`. Show the report to the
