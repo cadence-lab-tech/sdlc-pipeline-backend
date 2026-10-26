@@ -91,9 +91,18 @@ func (e *Engine) evalAgentReview(ctx context.Context, q postgres.Querier, in Eva
 
 	// Исполнитель доработал результат после вердикта — вердикт вынесен о том,
 	// чего уже нет. Гейт возвращается в pending, и следующий запрос перехода
-	// заведёт новую попытку перепроверки.
-	if reviewStale(*review, in.StageArtifacts) {
+	// заведёт новую попытку перепроверки — если предел перепроверок ещё не
+	// выбран.
+	stale := reviewStale(*review, in.StageArtifacts)
+	if stale {
 		details["stale"] = true
+	}
+	limit, failed, err := e.reviewLimit(ctx, q, in.Gate, in.StageRun.ID)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+	reached := limit > 0 && failed >= limit
+	if stale && !reached {
 		out := base(in.Gate, domain.GateResultPending,
 			"результат доработан после перепроверки — нужна повторная")
 		out.Details = details
@@ -107,6 +116,25 @@ func (e *Engine) evalAgentReview(ctx context.Context, q postgres.Querier, in Eva
 	details["verdict"] = verdict
 	if findings != nil {
 		details["findings"] = findings
+	}
+
+	// Предел выбран, и последний вердикт не pass: новой перепроверки не будет
+	// ни на старом результате, ни на доработанном. Вердикт failed, а не
+	// pending — агенту закрывать нечего, следующий круг даёт человек.
+	if reached && verdict != cfg.PassOn {
+		details["failed_reviews"] = failed
+		details["max_attempts"] = limit
+		out := base(in.Gate, domain.GateResultFailed, fmt.Sprintf(
+			"перепроверок %d из %d; новую не заведёт, снять может человек — решение waived по этому гейту",
+			failed, limit))
+		out.Details = details
+		return out, nil
+	}
+	if stale {
+		out := base(in.Gate, domain.GateResultPending,
+			"результат доработан после перепроверки — нужна повторная")
+		out.Details = details
+		return out, nil
 	}
 
 	if verdict == "" {
@@ -125,6 +153,25 @@ func (e *Engine) evalAgentReview(ctx context.Context, q postgres.Querier, in Eva
 	out := base(in.Gate, domain.GateResultPassed, "")
 	out.Details = details
 	return out, nil
+}
+
+// reviewLimit — предел перепроверок гейта (config.max_attempts) и сколько
+// их провалено на этом родительском прогоне. limit 0 — предела нет: не задан
+// или задан неверно. Валидатор негодный предел не активирует, а если он всё
+// же в активном цикле, гейт ведёт себя как без него, а не падает. Разбор тот
+// же maxAttempts, что у attempts_limit; типизированного поля в
+// agentReviewConfig нет намеренно — 2.5 уронил бы json.Unmarshal и с ним
+// каждый Preview.
+func (e *Engine) reviewLimit(ctx context.Context, q postgres.Querier, gate domain.Gate, parentRunID uuid.UUID) (limit, failed int, err error) {
+	limit, err = maxAttempts(gate.Config)
+	if err != nil {
+		return 0, 0, nil
+	}
+	failed, err = e.store.CountFailedReviews(ctx, q, parentRunID, gate.ID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return limit, failed, nil
 }
 
 // reviewVerdict достаёт вердикт из артефакта, сданного в прогоне ревью.
@@ -190,6 +237,15 @@ func (e *Engine) spawnReviews(ctx context.Context, tx pgx.Tx, task domain.Task, 
 		// пор что-то сдал. Иначе агент, дёргая переход по кругу, гонял бы
 		// ревьюера по одному и тому же результату.
 		if existing != nil && !reviewStale(*existing, stageArtifacts) {
+			continue
+		}
+		// Предел перепроверок выбран — вычислитель уже не отдаёт pending, но
+		// побочный эффект сверяется со счётом сам: разойтись им нельзя.
+		limit, failed, err := e.reviewLimit(ctx, tx, g, run.ID)
+		if err != nil {
+			return err
+		}
+		if limit > 0 && failed >= limit {
 			continue
 		}
 
