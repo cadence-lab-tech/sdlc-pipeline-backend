@@ -19,6 +19,9 @@ type Metrics struct {
 	Drift      []postgres.DriftMetric    `json:"drift"`
 	// Стоимость по статусам, ролям и моделям (решение 0026).
 	Cost []postgres.CostMetric `json:"cost"`
+	// Стоимость на закрытую задачу по типам задач (CLAB-220): окно отбирает
+	// задачи по closed_at, а не прогоны по entered_at.
+	ClosedCost []postgres.ClosedTaskCostMetric `json:"closed_cost"`
 }
 
 // ProjectMetrics считает всё по накопленным таблицам. period — окно назад от
@@ -51,6 +54,9 @@ func (e *Engine) ProjectMetrics(ctx context.Context, projectKey string, period t
 		return out, err
 	}
 	if out.Cost, err = e.store.CostMetrics(ctx, q, project.ID, out.Since); err != nil {
+		return out, err
+	}
+	if out.ClosedCost, err = e.store.ClosedTaskCost(ctx, q, project.ID, out.Since); err != nil {
 		return out, err
 	}
 	return out, nil

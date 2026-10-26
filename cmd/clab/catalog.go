@@ -676,9 +676,11 @@ func cmdWorkflow(ctx context.Context, c *Client, args []string) error {
 
 func cmdMetrics(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, period string
+	var closedCost bool
 	_, err := flags("metrics", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&period, "period", "", "окно назад: 30d, 12h")
+		fs.BoolVar(&closedCost, "closed-cost", false, "таблица стоимости закрытых задач по типам вместо JSON")
 	})
 	if err != nil {
 		return err
@@ -695,7 +697,16 @@ func cmdMetrics(ctx context.Context, c *Client, args []string) error {
 	if err := c.get(ctx, "/projects/"+key+"/metrics", q, &out); err != nil {
 		return err
 	}
-	return print(out)
+	// Без --closed-cost вывод прежний — JSON, на нём держатся скрипты; таблица
+	// только по флагу, а с --json отдаётся тело ответа и при флаге.
+	if !closedCost {
+		return print(out)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	return emit(out, render(renderClosedCost, raw))
 }
 
 func splitCSV(s string) []string {

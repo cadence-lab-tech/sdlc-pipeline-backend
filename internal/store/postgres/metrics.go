@@ -160,6 +160,103 @@ func (s *Store) CostMetrics(ctx context.Context, q Querier, projectID uuid.UUID,
 	return out, translate(rows.Err())
 }
 
+// ClosedTaskCostMetric — цена закрытой задачи в разрезе типа задачи
+// (CLAB-220): сколько стоит результат, а не период. Окно отбирает задачи по
+// closed_at, стоимость — всех прогонов задачи за всё время её жизни, для
+// эпика — всего поддерева, как TaskUsage. Поэтому задача и её эпик, закрытые
+// в одном окне, оба несут её прогоны, а строки «итого» нет: сумма по строкам
+// не равна расходу проекта.
+//
+// Прогоны без учёта (usageStateSQL, CLAB-219) видны долей и счётом неполных
+// задач: стоимость такой задачи — нижняя граница, а не «дёшево». Деньги
+// (api и без признака) и условная стоимость (subscription) — раздельно,
+// решение 0062; среднее и медиана — по всем закрытым задачам типа, включая
+// задачи с нулём.
+type ClosedTaskCostMetric struct {
+	TaskType        string `json:"task_type"`
+	ClosedTasks     int    `json:"closed_tasks"`
+	IncompleteTasks int    `json:"incomplete_tasks"`
+	// Прогоны закрытых задач с поддеревом: runs — все, reported_runs и
+	// silent_runs — в состояниях reported и missing, разница — not_applicable.
+	Runs     int `json:"runs"`
+	Reported int `json:"reported_runs"`
+	Silent   int `json:"silent_runs"`
+	// silent_runs / (reported_runs + silent_runs), 0..1; знаменатель 0 — 0.
+	SilentShare float64 `json:"silent_share"`
+
+	APICostUSD          float64 `json:"api_cost_usd"`
+	AvgAPICostUSD       float64 `json:"avg_api_cost_usd"`
+	MedianAPICostUSD    float64 `json:"median_api_cost_usd"`
+	UnspecifiedCostUSD  float64 `json:"unspecified_cost_usd"`
+	SubscriptionCostUSD float64 `json:"subscription_cost_usd"`
+	AvgSubscriptionUSD  float64 `json:"avg_subscription_cost_usd"`
+	MedianSubscription  float64 `json:"median_subscription_cost_usd"`
+}
+
+// ClosedTaskCost — разрез «стоимость на закрытую задачу» по типам. Закрытая
+// задача — та же, что в Throughput: closed_at не раньше since, статус
+// категории done. Вся семантика живёт в этом запросе: сначала сумма на
+// прогон, потом на задачу, потом на тип, иначе прогон с несколькими строками
+// учёта задвоил бы счётчики состояний.
+func (s *Store) ClosedTaskCost(ctx context.Context, q Querier, projectID uuid.UUID, since time.Time) ([]ClosedTaskCostMetric, error) {
+	rows, err := q.Query(ctx, `
+		WITH RECURSIVE closed AS (
+		    SELECT t.id AS root_id, coalesce(t.properties->>'type', 'task') AS task_type
+		    FROM tasks t JOIN workflow_statuses ws ON ws.id = t.status_id
+		    WHERE t.project_id = $1 AND t.closed_at >= $2 AND ws.category = 'done'
+		), subtree AS (
+		    SELECT root_id, root_id AS id FROM closed
+		    UNION ALL
+		    SELECT s.root_id, t.id FROM tasks t JOIN subtree s ON t.parent_id = s.id
+		), runs AS (
+		    SELECT s.root_id, sr.id, `+usageStateSQL("sr.id")+` AS usage_state
+		    FROM subtree s JOIN stage_runs sr ON sr.task_id = s.id
+		), per_run AS (
+		    SELECT r.root_id, r.id, r.usage_state,
+		           sum(u.cost_usd) FILTER (WHERE `+moneyPredicate+`) AS api_cost,
+		           sum(u.cost_usd) FILTER (WHERE u.billing IS NULL) AS unspecified_cost,
+		           sum(u.cost_usd) FILTER (WHERE `+subscriptionPredicate+`) AS subscription_cost
+		    FROM runs r LEFT JOIN stage_run_usage u ON u.run_id = r.id
+		    GROUP BY r.root_id, r.id, r.usage_state
+		), per_task AS (
+		    SELECT c.root_id, c.task_type,
+		           count(r.id) AS runs,
+		           count(*) FILTER (WHERE r.usage_state = '`+domain.UsageStateReported+`') AS reported,
+		           count(*) FILTER (WHERE r.usage_state = '`+domain.UsageStateMissing+`') AS silent,
+		           coalesce(sum(r.api_cost), 0)::float8 AS api_cost,
+		           coalesce(sum(r.unspecified_cost), 0)::float8 AS unspecified_cost,
+		           coalesce(sum(r.subscription_cost), 0)::float8 AS subscription_cost
+		    FROM closed c LEFT JOIN per_run r ON r.root_id = c.root_id
+		    GROUP BY c.root_id, c.task_type
+		)
+		SELECT task_type, count(*), count(*) FILTER (WHERE silent > 0),
+		       sum(runs)::int, sum(reported)::int, sum(silent)::int,
+		       coalesce(sum(silent)::float8 / nullif(sum(reported) + sum(silent), 0), 0)::float8,
+		       sum(api_cost)::float8, avg(api_cost)::float8,
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY api_cost)::float8,
+		       sum(unspecified_cost)::float8,
+		       sum(subscription_cost)::float8, avg(subscription_cost)::float8,
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY subscription_cost)::float8
+		FROM per_task GROUP BY task_type ORDER BY task_type`, projectID, since)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []ClosedTaskCostMetric{}
+	for rows.Next() {
+		var m ClosedTaskCostMetric
+		if err := rows.Scan(&m.TaskType, &m.ClosedTasks, &m.IncompleteTasks,
+			&m.Runs, &m.Reported, &m.Silent, &m.SilentShare,
+			&m.APICostUSD, &m.AvgAPICostUSD, &m.MedianAPICostUSD, &m.UnspecifiedCostUSD,
+			&m.SubscriptionCostUSD, &m.AvgSubscriptionUSD, &m.MedianSubscription); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, m)
+	}
+	return out, translate(rows.Err())
+}
+
 // StatusMetrics — по статусам активного и прежних циклов, сгруппировано по
 // ключу статуса: задача, начатая на прошлой версии, доходит по ней, а метрика
 // про «аналитику» одна.
