@@ -56,7 +56,7 @@ func commands() []command {
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
 		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
 		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md]", cmdClaim},
-		{"heartbeat", "продлить аренду", "clab heartbeat SDLC-42", cmdHeartbeat},
+		{"heartbeat", "продлить аренду: один раз, по интервалу или пока работает долгая команда", "clab heartbeat SDLC-42 | clab heartbeat SDLC-42 --every 5m [--for 2h] | clab heartbeat SDLC-42 [--every 5m] -- <команда> [аргументы] (код выхода — код команды; без --every интервал из ответа сервера)", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
@@ -482,23 +482,6 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	return renderClaim(out, instructionsFile)
-}
-
-func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {
-	task, rest := popTask(args)
-	fs, err := flags("heartbeat", rest, func(*flag.FlagSet) {})
-	if err != nil {
-		return err
-	}
-	if err := requireTask(fs, task); err != nil {
-		return err
-	}
-
-	var out any
-	if err := c.post(ctx, "/tasks/"+task+"/heartbeat", map[string]any{}, &out); err != nil {
-		return err
-	}
-	return print(out)
 }
 
 func cmdRelease(ctx context.Context, c *Client, args []string) error {
