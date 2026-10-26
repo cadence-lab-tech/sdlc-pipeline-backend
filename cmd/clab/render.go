@@ -1283,3 +1283,53 @@ func renderTeamCreated(raw json.RawMessage) error {
 		team.Key, team.Name, yesNo(team.CanCreateProjects))
 	return nil
 }
+
+// closedCostRow — строка разреза closed_cost ответа метрик (CLAB-220).
+type closedCostRow struct {
+	TaskType            string  `json:"task_type"`
+	ClosedTasks         int     `json:"closed_tasks"`
+	IncompleteTasks     int     `json:"incomplete_tasks"`
+	Reported            int     `json:"reported_runs"`
+	Silent              int     `json:"silent_runs"`
+	SilentShare         float64 `json:"silent_share"`
+	APICostUSD          float64 `json:"api_cost_usd"`
+	AvgAPICostUSD       float64 `json:"avg_api_cost_usd"`
+	MedianAPICostUSD    float64 `json:"median_api_cost_usd"`
+	SubscriptionCostUSD float64 `json:"subscription_cost_usd"`
+	AvgSubscriptionUSD  float64 `json:"avg_subscription_cost_usd"`
+	MedianSubscription  float64 `json:"median_subscription_cost_usd"`
+}
+
+// renderClosedCost — период и таблица «стоимость на закрытую задачу» по
+// типам. Остальные разделы ответа метрик в человеческом виде не рисуются:
+// они по-прежнему в JSON.
+func renderClosedCost(raw json.RawMessage) error {
+	var out struct {
+		Since      time.Time       `json:"since"`
+		Until      time.Time       `json:"until"`
+		ClosedCost []closedCostRow `json:"closed_cost"`
+	}
+	if err := decode(raw, &out); err != nil {
+		return err
+	}
+	fmt.Printf("Период: %s — %s\n", out.Since.Local().Format("2006-01-02 15:04"), out.Until.Local().Format("2006-01-02 15:04"))
+	t := newTable("ТИП", "ЗАКРЫТО", "НЕПОЛНЫХ", "ДЕНЬГИ Σ", "СРЕДНЕЕ", "МЕДИАНА",
+		"УСЛОВНО Σ", "СРЕДНЕЕ", "МЕДИАНА", "БЕЗ УЧЁТА")
+	incomplete := false
+	for _, r := range out.ClosedCost {
+		if r.IncompleteTasks > 0 {
+			incomplete = true
+		}
+		t.add(r.TaskType, strconv.Itoa(r.ClosedTasks), strconv.Itoa(r.IncompleteTasks),
+			usd(r.APICostUSD), usd(r.AvgAPICostUSD), usd(r.MedianAPICostUSD),
+			usd(r.SubscriptionCostUSD), usd(r.AvgSubscriptionUSD), usd(r.MedianSubscription),
+			fmt.Sprintf("%d из %d (%.0f%%)", r.Silent, r.Reported+r.Silent, r.SilentShare*100))
+	}
+	t.print()
+	if incomplete {
+		fmt.Println("У неполных задач стоимость — нижняя граница: часть прогонов агент забирал и не отчитался.")
+	}
+	return nil
+}
+
+func usd(v float64) string { return fmt.Sprintf("$%.2f", v) }
