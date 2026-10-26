@@ -165,6 +165,9 @@ type ClaimResult struct {
 	// Напоминание отчитаться о стоимости прогона (решение 0026): сервер её не
 	// измеряет, а без отчёта прогон стоит «неизвестно».
 	UsageReport string `json:"usage_report,omitempty"`
+	// Предел времени этапа (CLAB-221): сколько осталось или что просрочен.
+	// null — у этапа предела нет; поля нет вовсе — сервер прежней версии.
+	StageLimit *StageLimit `json:"stage_limit"`
 	// Граница правил и данных (CLAB-209, решение 0049): какие поля ответа —
 	// правила этапа, какие — данные. Поле добавочное: остальные поля ответа
 	// не переносятся, иначе clab и раннер прошлой версии перестали бы его
@@ -196,7 +199,7 @@ var (
 	// Служебные поля — не текст людей и агентов, а состояние движка; в
 	// ответ они не выносятся, перечень нужен тесту и MCP_CONTRACT.md.
 	BoundaryService = []string{
-		"stage_run_id", "kind", "lease", "usage_report", "boundary", "execution",
+		"stage_run_id", "kind", "lease", "usage_report", "boundary", "execution", "stage_limit",
 		"task.key", "task.status", "task.status_name", "task.attempt", "task.priority",
 		"task.type", "task.parent", "task.model_level", "task.stage_settings",
 		"context.baselines",
@@ -277,6 +280,11 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		// принципала, не дождавшись воркера.
 		newLease := !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now()))
 		if newLease {
+			// Просроченный этап закрыт для новых аренд исполнителей, как и
+			// исчерпанный бюджет: начатое не обрывается, новое не выдаётся.
+			if err := e.stageTimeAllows(ctx, tx, task, run, actor, opts.OnlyRun != nil); err != nil {
+				return err
+			}
 			if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
 				return err
 			}
@@ -558,6 +566,9 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 		roleLevel = role.ModelLevel
 	}
 	out.Execution = runExecution(task, run, roleLevel)
+	if out.StageLimit, err = e.limitOfStage(ctx, q, run, time.Now()); err != nil {
+		return out, err
+	}
 
 	if out.Context, err = e.claimContext(ctx, q, task, run, out.Role); err != nil {
 		return out, err

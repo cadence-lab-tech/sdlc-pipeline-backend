@@ -30,6 +30,10 @@ const (
 	CodeDriftUnresolved         Code = "drift_unresolved"
 	CodeUnknownRepository       Code = "unknown_repository"
 	CodeScopeExpansionForbidden Code = "scope_expansion_forbidden"
+	// Этап открыт дольше предела stage_time_limit (CLAB-221): новый захват
+	// агентом отбит, снять предел может человек. Раннер отличает его от
+	// прочих отказов и задачу пропускает.
+	CodeStageTimeExceeded Code = "stage_time_exceeded"
 
 	// Аутентификация и права (фаза 4): токен не предъявлен или недействителен,
 	// либо предъявлен, но прав на действие нет.
