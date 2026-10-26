@@ -197,7 +197,7 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			}
 			// Снятие гейта, который решает только человек, — тоже его
 			// решение: перезапись вердиктом движка стёрла бы, кто дал попытку.
-			if o.Status == domain.GateResultWaived && humanOnly(o.Type) {
+			if _, onlyHuman := humanOnly(gate); onlyHuman && o.Status == domain.GateResultWaived {
 				continue
 			}
 			if err := e.store.RecordGateResult(ctx, tx, run.ID, gate.ID, transition.ID,
@@ -358,8 +358,9 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 //
 // bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
 // Исполнитель этапа решает только passed по чек-листу своего этапа, а гейты
-// из humanOnlyGates (human_approval, attempts_limit, stage_time_limit) не
-// закрывает, даже если держатель аренды — человек.
+// из humanOnlyGates (human_approval, attempts_limit, agent_review с пределом
+// перепроверок, stage_time_limit) не закрывает, даже если держатель аренды —
+// человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
 	var out GateOutcome
 
@@ -389,7 +390,7 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 			return err
 		}
 
-		rule, onlyHuman := humanOnlyGates[gate.Type]
+		rule, onlyHuman := humanOnly(*gate)
 
 		// Токен задачи апрув не ставит, даже если аренду держит человек
 		// (/clab-run): проверка по виду токена, а не только принципала.
@@ -456,19 +457,40 @@ type humanGate struct {
 	waiveOnly bool
 }
 
-// humanOnlyGates — типы гейтов, решение по которым выносит только человек:
-// принципал вида user и не токеном задачи. Предел этапа (решение 0061)
-// добавляет сюда свой тип строкой, а не второй копией проверки.
-var humanOnlyGates = map[string]humanGate{
-	domain.GateHumanApproval: {},
-	domain.GateAttemptsLimit: {waiveOnly: true},
+// humanOnlyGates — гейты, решение по которым выносит только человек:
+// принципал вида user и не токеном задачи. Правило — от гейта, а не от типа:
+// agent_review решает только человек, лишь когда в его config задан предел
+// перепроверок (CLAB-218). Предел этапа (решение 0061) добавляет сюда свой
+// тип строкой, а не второй копией проверки.
+var humanOnlyGates = map[string]func(domain.Gate) (humanGate, bool){
+	domain.GateHumanApproval: always(humanGate{}),
+	domain.GateAttemptsLimit: always(humanGate{waiveOnly: true}),
+	domain.GateAgentReview:   reviewLimitHuman,
 	// Предел этапа (CLAB-221): waived снимает его до конца текущего прогона.
-	domain.GateStageTimeLimit: {waiveOnly: true},
+	domain.GateStageTimeLimit: always(humanGate{waiveOnly: true}),
 }
 
-func humanOnly(gateType string) bool {
-	_, ok := humanOnlyGates[gateType]
-	return ok
+func always(rule humanGate) func(domain.Gate) (humanGate, bool) {
+	return func(domain.Gate) (humanGate, bool) { return rule, true }
+}
+
+// reviewLimitHuman: перепроверку с пределом снимает только человек и только
+// waived — вердикт выносит ревьюер. Без предела или с негодным пределом
+// (валидатор такой цикл не активирует) гейт решают как раньше.
+func reviewLimitHuman(g domain.Gate) (humanGate, bool) {
+	if _, err := maxAttempts(g.Config); err != nil {
+		return humanGate{}, false
+	}
+	return humanGate{waiveOnly: true}, true
+}
+
+// humanOnly — решает ли гейт только человек и с какими вердиктами.
+func humanOnly(g domain.Gate) (humanGate, bool) {
+	rule, ok := humanOnlyGates[g.Type]
+	if !ok {
+		return humanGate{}, false
+	}
+	return rule(g)
 }
 
 func validGateDecision(status string) bool {

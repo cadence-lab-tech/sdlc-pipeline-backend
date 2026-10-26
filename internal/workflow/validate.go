@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -231,7 +232,22 @@ type gateConfigCheck func(t domain.Transition, g domain.Gate, statusByID map[uui
 // добавляет сюда свою функцию, а не ветку в чужой (CLAB-218, CLAB-221).
 var gateConfigChecks = map[string]gateConfigCheck{
 	domain.GateAttemptsLimit:  checkAttemptsLimit,
+	domain.GateAgentReview:    checkReviewLimit,
 	domain.GateStageTimeLimit: checkStageTimeLimit,
+}
+
+// checkReviewLimit: предел перепроверок необязателен, но если задан — целое
+// не меньше единицы, тем же разбором, что у attempts_limit.
+func checkReviewLimit(t domain.Transition, g domain.Gate, _ map[uuid.UUID]domain.Status) []Problem {
+	_, err := maxAttempts(g.Config)
+	if err == nil || errors.Is(err, errNoMaxAttempts) {
+		return nil
+	}
+	return []Problem{{
+		Code: "review_limit_invalid", Transition: t.Key, Gate: g.Key,
+		Message: fmt.Sprintf(
+			"у гейта перепроверки %q перехода %q неверный config.max_attempts (целое не меньше 1): %s",
+			g.Key, t.Key, err.Error())}}
 }
 
 // checkAttemptsLimit: предел — целое не меньше единицы, и переход ведёт в

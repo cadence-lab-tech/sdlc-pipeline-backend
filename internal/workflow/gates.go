@@ -693,7 +693,8 @@ func (e *Engine) evalDependenciesClosed(ctx context.Context, q postgres.Querier,
 // errNoMaxAttempts — в config гейта предела нет: гейт ничего не держит.
 var errNoMaxAttempts = errors.New("не задан")
 
-// maxAttempts читает предел из config гейта attempts_limit. Число строго
+// maxAttempts читает предел из config гейта attempts_limit, а с CLAB-218 —
+// и предел перепроверок agent_review. Число строго
 // целое и не меньше единицы: 2.5, "3", null и 0 — не предел, а ошибка в
 // цикле, и валидатор держит из-за неё активацию. Разбор один на валидатор и
 // вычислитель, чтобы они не разошлись в том, что считать пределом.

@@ -36,7 +36,10 @@ it, and show them what exactly changes before applying.
    target status: `{"max_attempts": 3}`, an integer of at least 1, never on a
    transition into a terminal status. It goes on the transition itself,
    usually a `reject`; roles carry no such setting. Only a human lifts it, with
-   `waived`, one attempt per decision.
+   `waived`, one attempt per decision. `agent_review` takes an optional
+   `max_attempts` too: after that many failed reviews on one stage run no new
+   review starts, the gate fails with "N of N reviews" and only a human lifts
+   it with `waived`; a new submission clears that waiver.
    `stage_time_limit` caps how long the stage opened by this transition may
    stay open: `{"max_duration": "4h"}`, a Go duration (`90m`, `4h`, `24h`;
    a day is `24h`, there is no `d`), above zero and at most a year, one per

@@ -80,7 +80,8 @@ func runHook(t *testing.T, script, command string) (int, string) {
 const hookPrefix = "env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=/d "
 
 // Вызовы clab, clab пакета и скриптов пакета без каталога токена задачи
-// (CLAB-249, AC-1): хук отклоняет их кодом 2 и называет префикс.
+// (CLAB-249, AC-1), clab под любым именем clab* и go run cmd/clab
+// (CLAB-289): хук отклоняет их кодом 2 и называет префикс.
 var hookCaught = []string{
 	"bin/clab-linux-amd64 version",
 	"./bin/clab-darwin-arm64 server status",
@@ -110,6 +111,33 @@ var hookCaught = []string{
 	"command clab version",
 	"time ./backup.sh",
 	"nohup bin/clab-linux-amd64 server upgrade v0.14.0 &",
+	// clab под любым собранным именем clab* (CLAB-289, AC-1).
+	"clab-v0.17.0 version",
+	"./clab-v0.17.0 version",
+	"bin/clab-v99 whoami",
+	"/tmp/x/clab-dev whoami",
+	"clab_v0.17.0 version",
+	"clab.exe whoami",
+	"cd w && ./clab-v0.17.0 version",
+	"FOO=1 ./clab-v0.17.0 version",
+	"env ./clab-v0.17.0 version",
+	"sudo -E ./clab-v0.17.0 version",
+	"x=$(./clab-v0.17.0 whoami)",
+	"ls\n./clab-v0.17.0 version",
+	// clab-runner тоже clab* — одно правило, без исключения (CLAB-289, AC-5, Q1).
+	"bin/clab-runner",
+	"./clab-runner",
+	"SDLC_API_URL=http://localhost:18080/v1 SDLC_PROJECT=X bin/clab-runner",
+	// go run того же cmd/clab (CLAB-289, AC-6, Q2).
+	"go run ./cmd/clab version",
+	"go run ./cmd/clab/ whoami",
+	"go run github.com/cadence-lab-tech/sdlc-pipeline-backend/cmd/clab@v0.17.0 version",
+	"go run -race ./cmd/clab version",
+	"cd w && go run ./cmd/clab-runner",
+	"env FOO=1 go run ./cmd/clab whoami",
+	// Флаг в кавычках перед путём пакета: в JSON кавычка приходит как \".
+	`go run -ldflags "-X main.version=v0.17.0" ./cmd/clab version`,
+	`go run -tags 'a b' ./cmd/clab whoami`,
 }
 
 // Имя скрипта или бинаря как аргумент чужой команды, путь и ветка — не
@@ -134,6 +162,17 @@ var hookPassed = []string{
 	"docker logs clab-registry",
 	"ci/package.sh --clab dist",
 	"sh ci/check-config.sh",
+	// Файлы и каталоги собранного clab как аргумент (CLAB-289, AC-3).
+	"ls /tmp/clab-v99/",
+	"chmod +x bin/clab-v0.17.0",
+	"cp bin/clab-v0.17.0 /tmp/x",
+	"file clab-v0.17.0",
+	"git push origin clab/CLAB-289-hook",
+	"go build -o bin/clab-v0.17.0 ./cmd/clab",
+	"go vet ./cmd/clab",
+	"go test ./cmd/clab-runner/...",
+	"go run ./cmd/other version",
+	"ls bin/clab-runner",
 }
 
 func TestHookCatchesPackageClab(t *testing.T) {
@@ -158,6 +197,24 @@ func TestHookCatchesPackageClab(t *testing.T) {
 	for _, c := range hookPassed {
 		if code, msg := runHook(t, script, c); code != 0 {
 			t.Errorf("%q: код %d, %q — ложное срабатывание", c, code, msg)
+		}
+	}
+}
+
+// Префикс из промпта, за которым идут переменные стека задачи, пропускает
+// и раннер, и clab ветки, и go run (CLAB-289).
+func TestHookPrefixThenStackEnv(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("нет sh — хук не запустить")
+	}
+	script := hookCommand(t)
+	for _, c := range []string{
+		hookPrefix + "SDLC_API_URL=http://localhost:18080/v1 SDLC_TOKEN=t SDLC_PROJECT=CLAB SDLC_RUNNER_ROLES=developer bin/clab-runner",
+		hookPrefix + "SDLC_API_URL=http://localhost:18080/v1 ./clab-v0.17.0 whoami",
+		"cd w && " + hookPrefix + "SDLC_PROJECT=CLAB go run ./cmd/clab whoami",
+	} {
+		if code, msg := runHook(t, script, c); code != 0 {
+			t.Errorf("%q: код %d, %q — ждали 0", c, code, msg)
 		}
 	}
 }
