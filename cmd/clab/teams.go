@@ -446,8 +446,14 @@ func cmdProject(ctx context.Context, c *Client, args []string) error {
 	case "delete":
 		return projectDelete(ctx, c, rest)
 
+	case "settings":
+		return projectSettings(ctx, c, rest)
+
+	case "set":
+		return projectSet(ctx, c, rest)
+
 	default:
-		return fmt.Errorf("неизвестная подкоманда %q: list, create, delete, teams, github", sub)
+		return fmt.Errorf("неизвестная подкоманда %q: list, create, delete, teams, github, settings, set", sub)
 	}
 }
 

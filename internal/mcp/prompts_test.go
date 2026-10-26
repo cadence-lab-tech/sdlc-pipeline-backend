@@ -145,6 +145,9 @@ func TestWorkPromptRunnerUsage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"не вызывай sdlc_report_usage и clab usage", "раннер", "usage_report",
+		// CLAB-219: при политике учёта захват требует отчёта, но под
+		// раннером агент всё равно молчит — учёт пишет раннер.
+		"ждёт или требует отчёта", "required",
 		trust.Rule, "рекомендован уровень", "Модель не меняй", "sdlc_request_transition",
 	} {
 		if !strings.Contains(runner, want) {

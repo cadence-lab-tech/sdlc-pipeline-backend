@@ -37,6 +37,9 @@ type runner struct {
 	// pauseUntil раннер не забирает ни одной задачи.
 	paused     bool
 	pauseUntil time.Time
+	// Долг по учёту принципала раннера (CLAB-219): какие прогоны и когда
+	// о них написано в журнал — запись не повторяется на каждом опросе.
+	debt debtLog
 }
 
 func newRunner(cfg Config, log *slog.Logger) *runner {
@@ -136,6 +139,13 @@ func (r *runner) dispatch(ctx context.Context, slots chan struct{}, wg *sync.Wai
 		if err != nil {
 			<-slots
 			var apiErr *apiError
+			if errors.As(err, &apiErr) && apiErr.Code == codeUsageReportRequired {
+				// Долг на принципале, а не на задаче: остальные захваты этого
+				// опроса отбились бы тем же. Аренды нет — release не нужен,
+				// и сбоем прогона отказ не считается.
+				r.debt.note(r.log, apiErr, r.now())
+				return took
+			}
 			if errors.As(err, &apiErr) && (apiErr.Code == "lease_held_by_other" ||
 				apiErr.Code == "task_not_claimable" || apiErr.Code == "forbidden") {
 				continue // кто-то оказался быстрее или задача не наша
@@ -144,6 +154,7 @@ func (r *runner) dispatch(ctx context.Context, slots chan struct{}, wg *sync.Wai
 			continue
 		}
 
+		r.debt.clear()
 		r.mark(item.Task.Key, true)
 		took++
 		wg.Add(1)

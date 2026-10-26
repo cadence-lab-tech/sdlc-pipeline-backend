@@ -22,7 +22,8 @@ import (
 )
 
 // UsageReportExpected едет в ответе на захват: по нему агент понимает, что
-// в конце этапа его ждут с отчётом о стоимости.
+// в конце этапа его ждут с отчётом о стоимости. При включённой политике учёта
+// проекта агентскому принципалу едет UsageReportRequired (usagepolicy.go).
 const UsageReportExpected = "expected"
 
 // Lease — аренда: до какого момента задача закреплена за агентом и как часто
@@ -279,11 +280,23 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 		// гаснут: без этого они ожили бы вместе с новой арендой того же
 		// принципала, не дождавшись воркера.
 		newLease := !(run.ClaimedBy != nil && *run.ClaimedBy == actor && run.LeaseHeld(time.Now()))
+		// Политика учёта проекта (CLAB-219) держит только агентских
+		// принципалов и только новую аренду: подтверждение своей живой
+		// аренды, в том числе токеном задачи, не обрывается.
+		policy, agentPolicy, err := e.usagePolicyFor(ctx, tx, task.ProjectID, actor)
+		if err != nil {
+			return err
+		}
 		if newLease {
 			// Просроченный этап закрыт для новых аренд исполнителей, как и
 			// исчерпанный бюджет: начатое не обрывается, новое не выдаётся.
 			if err := e.stageTimeAllows(ctx, tx, task, run, actor, opts.OnlyRun != nil); err != nil {
 				return err
+			}
+			if agentPolicy {
+				if err := e.usageAllows(ctx, tx, task, actor, policy); err != nil {
+					return err
+				}
 			}
 			if _, err := e.store.RevokeRunTokens(ctx, tx, run.ID); err != nil {
 				return err
@@ -333,6 +346,9 @@ func (e *Engine) ClaimWith(ctx context.Context, taskKey string, actor uuid.UUID,
 			HeartbeatIntervalSeconds: int(e.heartbeat.Seconds()),
 		}
 		out.UsageReport = UsageReportExpected
+		if agentPolicy {
+			out.UsageReport = UsageReportRequired
+		}
 		return nil
 	})
 

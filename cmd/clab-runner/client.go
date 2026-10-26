@@ -33,6 +33,8 @@ func newClient(cfg Config) *client {
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Подробности отказа как пришли: долги по учёту у usage_report_required.
+	Details json.RawMessage `json:"details,omitempty"`
 	// Статус ответа: код домена есть не всегда, а 401 и 404 раннер различает
 	// и без него.
 	Status int `json:"-"`

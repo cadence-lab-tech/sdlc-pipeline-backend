@@ -77,6 +77,11 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		if _, set := want["subscription_cost_usd"]; !set {
 			want["subscription_cost_usd"] = nil
 		}
+		// Состояние учёта (CLAB-219): у прогона со строками — reported; у
+		// прогона без строк тест называет его сам.
+		if _, set := want["state"]; !set && want["reported"] == true {
+			want["state"] = "reported"
+		}
 		if len(got) != len(want) {
 			t.Errorf("%s: поля usage %v, ожидали %v", name, got, want)
 		}
@@ -135,7 +140,13 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("прежние поля прогона %d изменились:\n%v\n%v", i, got, want)
 		}
-		check("до отчётов", usageOf(runs, r.ID), none)
+		// CLAB-219: забранный прогон без строк — missing, не забранный —
+		// not_applicable; reported прежний.
+		state := "not_applicable"
+		if r.ClaimedBy != nil {
+			state = "missing"
+		}
+		check("до отчётов", usageOf(runs, r.ID), with(map[string]any{"state": state}))
 	}
 
 	// AC-2, AC-10: строка ложится на прогон, который держит актор, и id в
@@ -267,7 +278,8 @@ func TestRunUsageInTaskCard(t *testing.T) {
 	check("строка без стоимости и токенов вывода", usageOf(runs, runN), with(map[string]any{
 		"reported": true, "reports": float64(1), "models": []any{"m3"}, "input_tokens": float64(7),
 	}))
-	check("этап без учёта", usageOf(runs, runS), none)
+	// Этап вставлен без захвата — not_applicable: агент там не работал.
+	check("этап без учёта", usageOf(runs, runS), with(map[string]any{"state": "not_applicable"}))
 	if _, has := runs[runC.String()]; has {
 		t.Errorf("прогон дочерней задачи в stage_runs родителя")
 	}
@@ -293,7 +305,7 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		if c, ok := u["cost_usd"].(float64); ok {
 			sum += c
 		}
-		if u["reported"] == false {
+		if u["state"] == "missing" {
 			silent++
 		}
 	}
