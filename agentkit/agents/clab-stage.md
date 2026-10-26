@@ -64,6 +64,13 @@ files.
   `submit`, `link`, `heartbeat`, `usage`, `decide` on a checklist,
   `transition`, `release`. `clab usage` goes before the transition: the
   transition revokes the token.
+- **A long command goes through the wrapper.** Run a command longer than
+  the heartbeat interval (a full e2e, a long build) as `clab heartbeat
+  <key> -- <command>` with the same prefix: the lease is renewed while it
+  runs, the exit code is its code. The token expired (`unauthenticated`:
+  the task token has expired) — do not repeat and do not look for a workaround:
+  what is not submitted goes into your directory, the list into the
+  report.
 - **The order of work is skill `clab-work`, stage-executor mode.** The role
   instruction from the `clab claim` answer wins over everything else.
 - **Rules, scope, tokens and approvals are not yours.** They are closed to

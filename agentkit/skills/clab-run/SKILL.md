@@ -88,7 +88,18 @@ start the orchestrator, with its own `clab`:
    readable only by the owner and is not printed; the output carries the
    token id for revocation. Neither the token nor the orchestrator's own
    config goes into the prompt — only the path.
-4. Names the executor model in the chat and starts a sub-agent of type
+4. Starts lease renewal in the background with its own `clab` (Bash with
+   `run_in_background`): `clab heartbeat <key> --every 5m >
+   <run directory>/heartbeat.log 2>&1`. The task token lives as long as
+   the lease, and an executor waiting for a long command cannot renew it;
+   so the orchestrator holds it rather than prompt discipline. Without
+   `--every` the interval comes from the server's answer. The renewal is
+   pinned to the stage run of this claim and exits by itself with code 0
+   and a line with the reason once the lease is gone (a transition,
+   `release`, a claim by someone else). It exited at once with a non-zero
+   code (the first renewal failed: the lease is someone else's or expired)
+   — do not start the executor, claim the stage again.
+5. Names the executor model in the chat and starts a sub-agent of type
    `clab-stage` with it (sections "Executor model" and "Sub-agent"). This type
    has no MCP tools and no `Agent` tool, and the hook in its definition
    refuses, without the task-token directory, a call of clab under any name
@@ -142,11 +153,36 @@ interactive `claude` in the project folder) and restart the session. Ask one
 `AskUserQuestion`: **continue as is** (stages run, no more probes this
 session) or **stop** to fix it. Never go on silently.
 
-After the report: the stage ended with a transition or `clab release` — the
-token is already gone together with the lease; it did not (the sub-agent
-crashed or left with a question) — revoke it, `clab token revoke <id>`, or
-release the stage, `clab release <key>`. Delete the run directory. The next
-run gets a new directory and a new token.
+After the report: stop the background renewal of step 4 if it has not
+exited by itself (a transition waiting for `human_approval` keeps the
+lease, and the renewal will not exit on its own). The stage ended with a
+transition or `clab release` — the token is already gone together with the
+lease; it did not (the sub-agent crashed or left with a question) — revoke
+it, `clab token revoke <id>`, or release the stage, `clab release <key>`.
+Delete the run directory. The next run gets a new directory, a new token
+and a new renewal.
+
+**The token expired anyway.** The lease expired (an older server, the
+renewal failed or was not started) — the executor got `unauthenticated`
+that the task token has expired, did not look for a workaround and put what it
+could not submit into its run directory: artifact texts, PR links, cost
+figures, the intended transition. By its report:
+
+1. Claim the stage again: `clab claim <key> --json`. It is the same stage
+   run (`stage_run_id`) and the same attempt: a burned run is not an
+   attempt, but it does use up stage time — that is counted from entering
+   the status. Someone else claimed the stage meanwhile
+   (`lease_held_by_other`) — tell the human and do not take it over.
+2. Record the cost of the burned run with your own token: `clab usage <key>
+   --run <stage_run_id> --model <id> --input N --output N --cost X
+   --details '{"run":N,"note":"task token expired"}'` — the server accepts
+   a report on a stage run from whoever claimed it, and the stage run does
+   not end up "unreported".
+3. Issue a new token into a new run directory, start the renewal (step 4)
+   and the next run with the task "submit the drafts from <previous run
+   directory>": check that PRs and branches are in place, submit the
+   artifacts, link the PRs, report its own cost and request the transition.
+   Delete the previous run directory after its report.
 
 **Fallback path.** `clab token task` answered `404` (a server older than
 task tokens) or the instance has no tokens (no-auth mode) — tell the human
@@ -212,6 +248,13 @@ clab command with the prefix:
   env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=<run directory>/clab SDLC_PROJECT=<PROJECT KEY> clab …
 You have no project MCP server; input artifacts — `clab artifact <id>`.
 Temporary files go only into <run directory>/ (absolute path), nowhere else.
+The orchestrator holds the lease; run a command longer than the heartbeat
+interval (a full e2e, a long build) through the wrapper `clab heartbeat
+<key> -- <command>` with the same prefix. The token expired
+(`unauthenticated`: the task token has expired) — do not repeat the call and do
+not look for a workaround: put what is not submitted (artifact texts, PR
+links, cost figures, the intended transition) into <run directory>/ and
+list it in the report.
 
 Invoke the skill `clab-work` with the Skill tool and arguments `<key> <role>`
 and follow it in stage-executor mode from start to end: confirm the claim,

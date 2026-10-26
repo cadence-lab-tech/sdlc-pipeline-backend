@@ -98,9 +98,18 @@ The steps are the same in both modes.
      "…"` is the human's decision. An executor does not call `clab scope`:
      it writes the repository and the reason into the artifact and the
      report.
-4. **Keep the lease.** During long work — `clab heartbeat <key>` at the
-   interval from the claim answer; to drop the stage unfinished —
-   `clab usage`, then `clab release <key> --note "…"`.
+4. **Keep the lease.** The lease lives while it is renewed, and the task
+   token lives while the lease does. During long work — `clab heartbeat
+   <key>` at the interval from the claim answer, or in the background
+   `clab heartbeat <key> --every 5m`. A single command longer than the
+   heartbeat interval (a full e2e, a long build) leaves no way to renew
+   the lease while you wait for it — run it through the wrapper: `clab
+   heartbeat <key> -- <command> [arguments]`. The wrapper renews the lease
+   while the command runs, hands it stdin and output and exits with its
+   code; an executor writes it with the same prefix as any `clab`. Under
+   `/clab-run` the orchestrator holds the lease too, the wrapper is a
+   safety net. To drop the stage unfinished — `clab usage`, then `clab
+   release <key> --note "…"`.
 5. **Submit artifacts** of exactly the `kind`s in the role contract:
    `clab submit <key> --kind <kind> --title "…" --file <file.md>`.
    An artifact is short markdown to the point: links to files and lines,
@@ -133,3 +142,14 @@ where, what is needed from the previous stage), report the cost and request
 a return transition of the cycle: `clab transition <key> --to <return
 transition> --reason "…"`. Dropping the stage unfinished — also after
 `clab usage`: `clab release <key> --note "…"`.
+
+**The task token expired** (`unauthenticated` on any call): the
+lease expired, and work can no longer be submitted with this token. Do not
+repeat the call and do not look for a workaround — neither the personal
+config nor another token. An executor puts what is not submitted into its
+run directory: artifact texts as files, PR and branch links, cost figures
+(model, tokens, dollars), the intended transition with its summary — and
+lists them in the report with the words "token expired". The orchestrator
+claims the stage again — the same stage run and the same attempt — and
+starts the next run to submit them. An AI of the human in the same case
+claims the stage itself (`clab claim <key>`) and submits.
