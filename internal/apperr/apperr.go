@@ -50,6 +50,11 @@ const (
 	// починит, и не internal — текст и есть польза: в нём сказано, что
 	// проверить администратору инстанса.
 	CodeProviderMisconfigured Code = "provider_misconfigured"
+
+	// Тело запроса или содержимое больше предела (CLAB-295): клиенту есть что
+	// поправить — предел стоит в сообщении и в details.limit_bytes. Не
+	// invalid_input: по нему клиент отличает «слишком большое» от «кривого».
+	CodePayloadTooLarge Code = "payload_too_large"
 )
 
 type Error struct {
@@ -101,6 +106,13 @@ func Unauthenticated(format string, args ...any) *Error {
 
 func Forbidden(format string, args ...any) *Error {
 	return New(CodeForbidden, format, args...)
+}
+
+// PayloadTooLarge — больше предела limit байт; what — что именно: тело
+// запроса, содержимое.
+func PayloadTooLarge(what string, limit int64) *Error {
+	return New(CodePayloadTooLarge, "%s больше предела %d байт", what, limit).
+		WithDetails(map[string]any{"limit_bytes": limit})
 }
 
 func Internal(cause error, format string, args ...any) *Error {

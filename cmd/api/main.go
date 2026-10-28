@@ -193,6 +193,7 @@ func run() error {
 	handler := httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).
 		WithVersion(version).WithMetrics(apiMetrics).
 		WithTracing(traces.Provider()).Handler()
+	logRequestLimits(log, cfg)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -257,6 +258,17 @@ func useBlobStore(cfg config.Config, store *postgres.Store, log *slog.Logger) er
 	log.Info("внешнее хранилище содержимого", "store", blobs,
 		"inline_max_bytes", cfg.BlobInlineMaxBytes, "max_bytes", cfg.BlobMaxBytes)
 	return nil
+}
+
+// logRequestLimits пишет сроки и предел тела запроса (CLAB-295): их задаёт
+// администратор под свои проекты, и оборванная загрузка разбирается по этой
+// строке журнала. Ноль срока — «без срока».
+func logRequestLimits(log *slog.Logger, cfg config.Config) {
+	log.Info("сроки и предел тела запроса",
+		"request_timeout", cfg.RequestTimeout,
+		"upload_timeout", cfg.UploadTimeout,
+		"download_timeout", cfg.DownloadTimeout,
+		"max_body_bytes", httpapi.BodyLimit(cfg.BlobMaxBytes))
 }
 
 // healthcheck ходит в собственную пробу готовности по локальному адресу.

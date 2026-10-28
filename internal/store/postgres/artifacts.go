@@ -1,10 +1,13 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"os"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,11 +20,17 @@ import (
 // BlobStore — внешнее хранилище крупного содержимого. Объявлен здесь, а не
 // взят из blobstore, чтобы store не зависел от реализации; из blobstore взят
 // только потолок inline — одно число на конфигурацию и хранилище.
+//
+// Содержимое идёт через него потоком (CLAB-295): запись — из файла спула с
+// уже посчитанным sha, чтение — io.ReadCloser. Контракт методов — у
+// blobstore.Store.
 type BlobStore interface {
-	Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error)
-	Get(ctx context.Context, uri string) ([]byte, error)
+	PutFile(ctx context.Context, sha, path string, size int64, mediaType string) (string, error)
+	Open(ctx context.Context, uri string) (io.ReadCloser, error)
 	// Delete зовёт сборщик мусора — после того, как удалил строку blobs.
 	Delete(ctx context.Context, uri string) error
+	// TempDir — где спулить содержимое; пусто — os.TempDir().
+	TempDir() string
 }
 
 // UseBlobStore задаёт пределы содержимого и, если bs не nil, включает вынос:
@@ -61,101 +70,263 @@ func (s *Store) BlobLimit() int {
 	return blobstore.InlineMaxBytes
 }
 
+// BlobInfo — записанное содержимое: адрес и размер.
+type BlobInfo struct {
+	SHA  string
+	Size int64
+}
+
 // PutBlob кладёт содержимое в контент-адресуемое хранилище и возвращает sha256.
-//
-// Дедупликация бесплатна: одинаковое содержимое даёт одинаковый sha, и второй
-// INSERT ничего не делает. Крупное уходит во внешнее хранилище до записи
-// строки — иначе строка с адресом появилась бы раньше содержимого.
-//
-// Перед записью берётся advisory-замок по sha, тот же, что берёт сборщик
-// мусора (CollectBlobs). Он держится до конца этой транзакции — то есть и
-// после того, как ссылающаяся строка вставлена, — и потому сборщик не удалит
-// блоб, на который ссылка вот-вот появится.
-//
-// Обратную гонку — объект, унесённый из-под только что вставленной строки, —
-// этот замок сам по себе не закрывает: между коммитом удаляющей транзакции
-// сборщика и удалением объекта из хранилища он свободен. Её закрывает
-// сборщик со своей стороны, держа тот же ключ сессионным замком на оба шага
-// (withBlobLock в blobs.go). Здесь важно одно: замок берётся до похода в
-// хранилище, а не после, — иначе Put успевал бы отработать вне замка.
-//
-// Запись, заставшая ключ занятым проходом сборщика, ждёт его — не дольше
-// одного удаления объекта из хранилища. Обратной задержки нет: сборщик
-// занятый замок не ждёт, а блоб пропускает.
+// Это обёртка над PutBlobFrom для содержимого, уже лежащего в памяти: путь
+// записи у них один, а отказы по пределу — прежние, 400 с прежним текстом:
+// его ждут писатели связки, документов и индексатора.
 func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaType string) (string, error) {
 	if len(content) == 0 {
 		return "", apperr.InvalidInput("содержимое артефакта пустое")
 	}
-	if mediaType == "" {
-		mediaType = "text/markdown"
-	}
-
 	// Общий предел — до выбора пути: inline-содержимое ему подчиняется так же,
 	// как вынесенное.
 	if s.blobMax > 0 && len(content) > s.blobMax {
 		return "", apperr.InvalidInput("содержимое %d байт больше предела %d (SDLC_BLOB_MAX_BYTES)",
 			len(content), s.blobMax)
 	}
-
-	sum := sha256.Sum256(content)
-	sha := hex.EncodeToString(sum[:])
-
-	if err := s.lockBlob(ctx, q, sha); err != nil {
-		return "", err
-	}
-
 	if len(content) <= s.inlineLimit() {
-		if _, err := q.Exec(ctx, `
-			INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
-			VALUES ($1, $2, $3, 'inline', $4)
-			ON CONFLICT (sha256) DO NOTHING`,
-			sha, len(content), mediaType, content); err != nil {
-			return "", translate(err)
-		}
-		return sha, nil
+		info, err := s.putInline(ctx, q, content, mediaType)
+		return info.SHA, err
 	}
-
 	if s.blobs == nil {
 		return "", apperr.InvalidInput(
 			"содержимое %d байт больше предела %d, а внешнее хранилище не настроено (SDLC_BLOB_DIR или SDLC_BLOB_S3_BUCKET)",
 			len(content), blobstore.InlineMaxBytes)
 	}
-	uri, err := s.blobs.Put(ctx, sha, content, mediaType)
+	info, err := s.putExternal(ctx, q, content, bytes.NewReader(nil), mediaType)
+	return info.SHA, err
+}
+
+// PutBlobFrom кладёт содержимое из потока и возвращает его sha256 и размер.
+//
+// sha256 и размер считаются по ходу чтения. Первые байты, до порога inline,
+// читаются в память: кончился поток раньше — содержимое ложится в строку
+// blobs, как у PutBlob. Нет — весь поток спулится во временный файл
+// (каталог — TempDir хранилища) и уходит во внешнее хранилище оттуда. Сверх
+// порога inline память на содержимое не тратится, сколько бы его ни было.
+//
+// Общий предел (BlobLimit) считается по потоку, без доверия к заявленной
+// длине: превышение — payload_too_large, и ни строки, ни объекта, ни спула
+// после него не остаётся. Ошибка читателя (клиент ушёл, предел тела
+// запроса) приходит обёрнутой, с причиной в цепочке.
+//
+// Порядок записи тот же, что у PutBlob: замок по sha — после того, как sha
+// известен, и до похода во внешнее хранилище; объект — до строки.
+func (s *Store) PutBlobFrom(ctx context.Context, q Querier, r io.Reader, mediaType string) (BlobInfo, error) {
+	inline := s.inlineLimit()
+	var head bytes.Buffer
+	if _, err := head.ReadFrom(io.LimitReader(r, int64(inline)+1)); err != nil {
+		return BlobInfo{}, readFailed(err)
+	}
+	if head.Len() <= inline {
+		return s.putInline(ctx, q, head.Bytes(), mediaType)
+	}
+	if s.blobs == nil {
+		// Без хранилища крупнее порога inline не принимается вовсе: дальше
+		// читать незачем.
+		return BlobInfo{}, blobTooLarge(int64(s.BlobLimit()))
+	}
+	return s.putExternal(ctx, q, head.Bytes(), r, mediaType)
+}
+
+// putInline пишет содержимое в строку blobs.
+//
+// Перед записью берётся advisory-замок по sha, тот же, что берёт сборщик
+// мусора (CollectBlobs). Он держится до конца этой транзакции — то есть и
+// после того, как ссылающаяся строка вставлена, — и потому сборщик не удалит
+// блоб, на который ссылка вот-вот появится.
+func (s *Store) putInline(ctx context.Context, q Querier, content []byte, mediaType string) (BlobInfo, error) {
+	if len(content) == 0 {
+		return BlobInfo{}, apperr.InvalidInput("содержимое артефакта пустое")
+	}
+	if limit := s.BlobLimit(); limit > 0 && len(content) > limit {
+		return BlobInfo{}, blobTooLarge(int64(limit))
+	}
+	if mediaType == "" {
+		mediaType = "text/markdown"
+	}
+	sum := sha256.Sum256(content)
+	sha := hex.EncodeToString(sum[:])
+	if err := s.lockBlob(ctx, q, sha); err != nil {
+		return BlobInfo{}, err
+	}
+	if _, err := q.Exec(ctx, `
+		INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
+		VALUES ($1, $2, $3, 'inline', $4)
+		ON CONFLICT (sha256) DO NOTHING`,
+		sha, len(content), mediaType, content); err != nil {
+		return BlobInfo{}, translate(err)
+	}
+	return BlobInfo{SHA: sha, Size: int64(len(content))}, nil
+}
+
+// putExternal спулит head и остаток потока во временный файл, считая sha256
+// и размер, и выносит его во внешнее хранилище.
+//
+// Замок по sha берётся до похода в хранилище, а не после, — иначе PutFile
+// успевал бы отработать вне замка. Обратную гонку — объект, унесённый
+// из-под только что вставленной строки, — этот замок сам по себе не
+// закрывает: между коммитом удаляющей транзакции сборщика и удалением
+// объекта из хранилища он свободен. Её закрывает сборщик со своей стороны,
+// держа тот же ключ сессионным замком на оба шага (withBlobLock в blobs.go).
+//
+// Запись, заставшая ключ занятым проходом сборщика, ждёт его — не дольше
+// одного удаления объекта из хранилища. Обратной задержки нет: сборщик
+// занятый замок не ждёт, а блоб пропускает. Спул к этому моменту уже
+// записан: замок не держится на время приёма содержимого от клиента.
+func (s *Store) putExternal(ctx context.Context, q Querier, head []byte, rest io.Reader, mediaType string) (BlobInfo, error) {
+	limit := int64(s.BlobLimit())
+	if limit > 0 && int64(len(head)) > limit {
+		return BlobInfo{}, blobTooLarge(limit)
+	}
+	if mediaType == "" {
+		mediaType = "text/markdown"
+	}
+
+	spool, err := os.CreateTemp(s.blobs.TempDir(), ".spool-*")
 	if err != nil {
-		return "", apperr.Internal(err, "запись во внешнее хранилище")
+		return BlobInfo{}, apperr.Internal(err, "временный файл содержимого")
+	}
+	// Спул убирается всегда: после отказа, после ошибки и после записи.
+	// Забранный хранилищем переименованием уже не на месте — это не ошибка.
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spool.Name())
+	}()
+
+	h := sha256.New()
+	w := io.MultiWriter(spool, h)
+	if _, err := w.Write(head); err != nil {
+		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+	}
+	src := &readTap{r: rest}
+	var body io.Reader = src
+	if limit > 0 {
+		// Байт сверх предела дочитывается, чтобы отличить «ровно предел»
+		// от «больше».
+		body = io.LimitReader(src, limit-int64(len(head))+1)
+	}
+	n, err := io.Copy(w, body)
+	if err != nil {
+		if src.err != nil {
+			return BlobInfo{}, readFailed(src.err)
+		}
+		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+	}
+	size := int64(len(head)) + n
+	if limit > 0 && size > limit {
+		return BlobInfo{}, blobTooLarge(limit)
+	}
+	if err := spool.Close(); err != nil {
+		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+	}
+	sha := hex.EncodeToString(h.Sum(nil))
+
+	if err := s.lockBlob(ctx, q, sha); err != nil {
+		return BlobInfo{}, err
+	}
+	uri, err := s.blobs.PutFile(ctx, sha, spool.Name(), size, mediaType)
+	if err != nil {
+		return BlobInfo{}, apperr.Internal(err, "запись во внешнее хранилище")
 	}
 	if _, err := q.Exec(ctx, `
 		INSERT INTO blobs (sha256, size_bytes, media_type, storage, external_uri)
 		VALUES ($1, $2, $3, 'external', $4)
 		ON CONFLICT (sha256) DO NOTHING`,
-		sha, len(content), mediaType, uri); err != nil {
-		return "", translate(err)
+		sha, size, mediaType, uri); err != nil {
+		return BlobInfo{}, translate(err)
 	}
-	return sha, nil
+	return BlobInfo{SHA: sha, Size: size}, nil
 }
 
-func (s *Store) BlobContent(ctx context.Context, q Querier, sha string) ([]byte, string, error) {
+// readTap запоминает ошибку читателя: io.Copy возвращает и ошибки чтения, и
+// ошибки записи в спул, а это разные исходы — клиент ушёл или кончился диск.
+type readTap struct {
+	r   io.Reader
+	err error
+}
+
+func (t *readTap) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err != nil && err != io.EOF {
+		t.err = err
+	}
+	return n, err
+}
+
+// blobTooLarge — содержимое больше общего предела (или потолка inline без
+// внешнего хранилища).
+func blobTooLarge(limit int64) *apperr.Error {
+	return apperr.New(apperr.CodePayloadTooLarge,
+		"содержимое больше предела %d байт (SDLC_BLOB_MAX_BYTES; без SDLC_BLOB_DIR и SDLC_BLOB_S3_BUCKET — не больше %d)",
+		limit, blobstore.InlineMaxBytes).
+		WithDetails(map[string]any{"limit_bytes": limit})
+}
+
+// readFailed — поток содержимого оборвался. Причина остаётся в цепочке:
+// транспорт узнаёт по ней свой предел тела запроса и отвечает 413.
+func readFailed(err error) *apperr.Error {
+	return apperr.Wrap(apperr.CodeInvalidInput, err, "содержимое не дочитано: %v", err)
+}
+
+// Blob — содержимое, открытое на чтение: поток, размер и тип из строки blobs.
+// Закрывает его тот, кто открыл.
+type Blob struct {
+	io.ReadCloser
+	Size      int64
+	MediaType string
+}
+
+// OpenBlob открывает содержимое потоком. Строка blobs читается одним
+// запросом, и соединение с базой не держится, пока поток отдают клиенту.
+// Пропавший объект внешнего хранилища — ошибка здесь, а не посреди потока.
+func (s *Store) OpenBlob(ctx context.Context, q Querier, sha string) (Blob, error) {
 	var content []byte
+	var size int64
 	var mediaType, storage string
 	var externalURI *string
 	err := q.QueryRow(ctx, `
-		SELECT content, media_type, storage, external_uri FROM blobs WHERE sha256 = $1`, sha,
-	).Scan(&content, &mediaType, &storage, &externalURI)
+		SELECT content, size_bytes, media_type, storage, external_uri FROM blobs WHERE sha256 = $1`, sha,
+	).Scan(&content, &size, &mediaType, &storage, &externalURI)
 	if err != nil {
-		return nil, "", notFound(err, "содержимое %s не найдено", sha)
+		return Blob{}, notFound(err, "содержимое %s не найдено", sha)
 	}
 	if storage == "inline" {
-		return content, mediaType, nil
+		return Blob{ReadCloser: io.NopCloser(bytes.NewReader(content)), Size: size, MediaType: mediaType}, nil
 	}
 	if s.blobs == nil || externalURI == nil {
-		return nil, "", apperr.Internal(nil,
+		return Blob{}, apperr.Internal(nil,
 			"содержимое %s вынесено во внешнее хранилище, а оно не настроено", sha)
 	}
-	content, err = s.blobs.Get(ctx, *externalURI)
+	r, err := s.blobs.Open(ctx, *externalURI)
 	if err != nil {
+		return Blob{}, apperr.Internal(err, "чтение %s из внешнего хранилища", sha)
+	}
+	return Blob{ReadCloser: r, Size: size, MediaType: mediaType}, nil
+}
+
+// BlobContent читает содержимое целиком — для текстовых читателей (разбор,
+// сдача, MCP, индексатор): им нужен текст, а не поток.
+func (s *Store) BlobContent(ctx context.Context, q Querier, sha string) ([]byte, string, error) {
+	b, err := s.OpenBlob(ctx, q, sha)
+	if err != nil {
+		return nil, "", err
+	}
+	defer b.Close()
+	var buf bytes.Buffer
+	if b.Size > 0 {
+		buf.Grow(int(b.Size))
+	}
+	if _, err := buf.ReadFrom(b); err != nil {
 		return nil, "", apperr.Internal(err, "чтение %s из внешнего хранилища", sha)
 	}
-	return content, mediaType, nil
+	return buf.Bytes(), b.MediaType, nil
 }
 
 const artifactSelect = `

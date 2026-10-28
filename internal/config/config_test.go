@@ -321,6 +321,8 @@ func TestNegativeZeroMeaningfulDurations(t *testing.T) {
 		{"SDLC_EMBEDDING_CACHE_TTL", map[string]string{"SDLC_EMBEDDING_CACHE_MAX_ROWS": "500"}},
 		{"SDLC_EMBEDDING_CACHE_TOUCH_AFTER", nil},
 		{"SDLC_REQUEST_TIMEOUT", nil},
+		{"SDLC_UPLOAD_TIMEOUT", nil},
+		{"SDLC_DOWNLOAD_TIMEOUT", nil},
 		{"SDLC_DB_CONNECT_TIMEOUT", nil},
 	}
 	for _, tc := range cases {
@@ -387,6 +389,8 @@ func TestNumericDefaults(t *testing.T) {
 		{"IndexPollInterval", c.IndexPollInterval, 15 * time.Second},
 		{"ShutdownTimeout", c.ShutdownTimeout, 15 * time.Second},
 		{"RequestTimeout", c.RequestTimeout, 30 * time.Second},
+		{"UploadTimeout", c.UploadTimeout, 10 * time.Minute},
+		{"DownloadTimeout", c.DownloadTimeout, 10 * time.Minute},
 		{"ConnectTimeout", c.ConnectTimeout, 30 * time.Second},
 		{"BlobGCMinAge", c.BlobGCMinAge, 24 * time.Hour},
 		{"EmbeddingCacheTTL", c.EmbeddingCacheTTL, 720 * time.Hour},
@@ -424,6 +428,8 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		"SDLC_BLOB_GC_MIN_AGE":             "11s",
 		"SDLC_EMBEDDING_CACHE_TTL":         "12s",
 		"SDLC_EMBEDDING_CACHE_TOUCH_AFTER": "13s",
+		"SDLC_UPLOAD_TIMEOUT":              "14s",
+		"SDLC_DOWNLOAD_TIMEOUT":            "15s",
 	}
 	for k, v := range env {
 		t.Setenv(k, v)
@@ -466,6 +472,8 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		{"SDLC_BLOB_GC_MIN_AGE", c.BlobGCMinAge, 11 * time.Second},
 		{"SDLC_EMBEDDING_CACHE_TTL", c.EmbeddingCacheTTL, 12 * time.Second},
 		{"SDLC_EMBEDDING_CACHE_TOUCH_AFTER", c.EmbeddingCacheTouchAfter, 13 * time.Second},
+		{"SDLC_UPLOAD_TIMEOUT", c.UploadTimeout, 14 * time.Second},
+		{"SDLC_DOWNLOAD_TIMEOUT", c.DownloadTimeout, 15 * time.Second},
 	}
 	for _, f := range durations {
 		if f.got != f.want {
@@ -890,6 +898,26 @@ func TestAuditRetentionDays(t *testing.T) {
 		_, err := Load()
 		if err == nil || !strings.Contains(err.Error(), "SDLC_AUDIT_RETENTION_DAYS") {
 			t.Fatalf("%q: ошибка без имени переменной: %v", bad, err)
+		}
+	}
+}
+
+// Сроки маршрутов с содержимым (CLAB-295, AC-5.1): не длительность —
+// ошибка старта с именем переменной и значением, как у SDLC_REQUEST_TIMEOUT.
+func TestRouteTimeoutsRejectGarbage(t *testing.T) {
+	for _, name := range []string{"SDLC_UPLOAD_TIMEOUT", "SDLC_DOWNLOAD_TIMEOUT"} {
+		for _, bad := range []string{"abc", "10"} {
+			t.Run(name+"="+bad, func(t *testing.T) {
+				t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+				t.Setenv(name, bad)
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("%s=%s принят", name, bad)
+				}
+				if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), bad) {
+					t.Fatalf("ошибка не называет переменную и значение: %v", err)
+				}
+			})
 		}
 	}
 }

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -697,12 +698,26 @@ func (s *Server) getArtifactContent(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	content, mediaType, err := s.store.BlobContent(ctx, q, artifact.BlobSHA)
+	// Поток открывается до заголовков: пропавший объект хранилища — 500, а
+	// не усечённый 200.
+	blob, err := s.store.OpenBlob(ctx, q, artifact.BlobSHA)
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	c.Data(http.StatusOK, mediaType, content)
+	defer blob.Close()
+	c.Header("Content-Length", strconv.FormatInt(blob.Size, 10))
+	c.Header("Content-Type", blob.MediaType)
+	c.Status(http.StatusOK)
+	// Обрыв посреди потока (клиент ушёл, срок отдачи вышел, хранилище
+	// встало) ответ уже не исправит: заголовки ушли. Заявленная длина
+	// больше отданного, и сервер закрывает соединение — клиент видит
+	// усечение, а не целый ответ.
+	if n, err := io.Copy(c.Writer, blob); err != nil || n != blob.Size {
+		s.log.Warn("отдача содержимого оборвана",
+			"artifact_id", id, "sent", n, "size", blob.Size, "error", err,
+			"request_id", c.GetString(ctxRequestID))
+	}
 }
 
 func (s *Server) approveArtifact(c *gin.Context) {

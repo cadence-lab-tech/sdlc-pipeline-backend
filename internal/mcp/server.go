@@ -149,10 +149,14 @@ func (s *Server) allowedRoles(ctx context.Context) ([]string, error) {
 
 // Handler отдаёт HTTP-обработчик MCP. Проект и актор кладёт в контекст
 // вызывающий транспорт: сервер один на процесс, а привязка — на запрос.
-func (s *Server) Handler() http.Handler {
+//
+// maxBody — предел тела запроса, общий с REST (CLAB-295): у SDK свой предел
+// по умолчанию, 4 МиБ, и без этого сдача артефакта через MCP упиралась бы в
+// него раньше, чем в SDLC_BLOB_MAX_BYTES. Ноль — предел SDK по умолчанию.
+func (s *Server) Handler(maxBody int64) http.Handler {
 	return sdk.NewStreamableHTTPHandler(
 		func(*http.Request) *sdk.Server { return s.mcp },
-		&sdk.StreamableHTTPOptions{Stateless: true, Logger: s.log},
+		&sdk.StreamableHTTPOptions{Stateless: true, Logger: s.log, MaxRequestBodyBytes: maxBody},
 	)
 }
 
