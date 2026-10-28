@@ -34,6 +34,17 @@ type Instance struct {
 	Tenancy         string        `json:"tenancy"`
 	ProjectCreation string        `json:"project_creation"`
 	Login           InstanceLogin `json:"login"`
+	// Пределы, которые клиент сверяет до отправки (решение 0064). Нет поля —
+	// сервер прежней версии.
+	Limits *InstanceLimits `json:"limits,omitempty"`
+}
+
+// InstanceLimits — действующие пределы инстанса.
+type InstanceLimits struct {
+	// Сколько байт файла сервер примет: SDLC_BLOB_MAX_BYTES, а без внешнего
+	// хранилища — не больше потолка inline (Store.BlobLimit). Один предел на
+	// REST и MCP: отдельного для MCP нет.
+	MaxFileBytes int64 `json:"max_file_bytes"`
 }
 
 // InstanceLogin — настроенные способы входа. Ненастроенного способа нет ни

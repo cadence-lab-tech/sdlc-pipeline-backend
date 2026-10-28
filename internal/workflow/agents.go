@@ -71,6 +71,57 @@ type ArtifactRef struct {
 	Version int       `json:"version"`
 }
 
+// AttachmentRef — вложение задачи в ответе захвата и карточке: метаданные
+// и путь к байтам, без содержимого (решение 0064, п. 5). Имя и заголовок
+// пишет тот, кто приложил, в том числе viewer, — это данные, а не правила.
+type AttachmentRef struct {
+	ID           uuid.UUID  `json:"id"`
+	Title        string     `json:"title"`
+	FileName     string     `json:"file_name"`
+	MediaType    string     `json:"media_type"`
+	SizeBytes    int64      `json:"size_bytes"`
+	SHA256       string     `json:"sha256"`
+	Version      int        `json:"version"`
+	Status       string     `json:"status"`
+	SupersedesID *uuid.UUID `json:"supersedes_id,omitempty"`
+	AddedBy      string     `json:"added_by"`
+	AddedAt      time.Time  `json:"added_at"`
+	// Путь к байтам на этом сервере: GET с тем же токеном.
+	ContentPath string `json:"content_path"`
+}
+
+// ContentPath — путь к содержимому артефакта в REST.
+func ContentPath(id uuid.UUID) string { return "/v1/artifacts/" + id.String() + "/content" }
+
+func attachmentRef(a postgres.Attachment) AttachmentRef {
+	ref := AttachmentRef{
+		ID: a.ID, Title: a.Title, SizeBytes: a.SizeBytes, SHA256: a.BlobSHA,
+		Version: a.Version, Status: a.Status, SupersedesID: a.SupersedesID,
+		AddedBy: a.ProducedByHandle, AddedAt: a.CreatedAt, ContentPath: ContentPath(a.ID),
+	}
+	if a.FileName != nil {
+		ref.FileName = *a.FileName
+	}
+	if a.MediaType != nil {
+		ref.MediaType = *a.MediaType
+	}
+	return ref
+}
+
+// Attachments — вложения задачи списком метаданных: актуальные версии, а с
+// includeSuperseded — и перекрытые (история в карточке).
+func (e *Engine) Attachments(ctx context.Context, q postgres.Querier, taskID uuid.UUID, includeSuperseded bool) ([]AttachmentRef, error) {
+	list, err := e.store.ListAttachments(ctx, q, taskID, includeSuperseded)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AttachmentRef, 0, len(list))
+	for _, a := range list {
+		out = append(out, attachmentRef(a))
+	}
+	return out, nil
+}
+
 // Rejection — из-за чего этап начался заново.
 type Rejection struct {
 	FromStage               string     `json:"from_stage"`
@@ -92,11 +143,14 @@ type ClaimContext struct {
 	Repositories     []RepositoryView         `json:"repositories"`
 	ProjectDocuments []domain.ProjectDocument `json:"project_documents"`
 	PriorArtifacts   []ArtifactRef            `json:"prior_artifacts"`
-	Rejection        *Rejection               `json:"rejection,omitempty"`
-	Baselines        []postgres.TaskBaseline  `json:"baselines"`
-	Drift            []postgres.DriftSignal   `json:"drift"`
-	RepoRefs         []postgres.TaskRepoRef   `json:"repo_refs"`
-	Review           *Review                  `json:"review,omitempty"`
+	// Вложения задачи (решение 0064): не вход этапа, а файлы рядом с ним —
+	// поэтому отдельно от prior_artifacts, метаданными без содержимого.
+	Attachments []AttachmentRef         `json:"attachments"`
+	Rejection   *Rejection              `json:"rejection,omitempty"`
+	Baselines   []postgres.TaskBaseline `json:"baselines"`
+	Drift       []postgres.DriftSignal  `json:"drift"`
+	RepoRefs    []postgres.TaskRepoRef  `json:"repo_refs"`
+	Review      *Review                 `json:"review,omitempty"`
 }
 
 // GateSpec — требование гейта до его прогона: агент должен знать условия
@@ -195,7 +249,7 @@ var (
 	BoundaryData = []string{
 		"task.title", "task.description", "task.labels", "task.properties", "task.external_ref",
 		"context.prior_artifacts", "context.rejection", "context.review",
-		"context.drift", "context.repo_refs",
+		"context.drift", "context.repo_refs", "context.attachments",
 	}
 	// Служебные поля — не текст людей и агентов, а состояние движка; в
 	// ответ они не выносятся, перечень нужен тесту и MCP_CONTRACT.md.
@@ -705,6 +759,12 @@ func (e *Engine) claimContext(ctx context.Context, q postgres.Querier, task doma
 			continue
 		}
 		out.PriorArtifacts = append(out.PriorArtifacts, artifactRef(a, stageOf))
+	}
+
+	// Вложений в artifacts нет (ListArtifacts их не отдаёт), поэтому в
+	// prior_artifacts их нет ни при пустом input_kinds, ни при непустом.
+	if out.Attachments, err = e.Attachments(ctx, q, task.ID, false); err != nil {
+		return out, err
 	}
 
 	if run.RejectedFromRunID != nil {

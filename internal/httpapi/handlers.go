@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -281,6 +283,13 @@ func (s *Server) getTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Вложения — соседним полем (решение 0064): в artifacts их нет, а
+	// карточка показывает их отдельно, метаданными без содержимого.
+	attachments, err := s.engine.Attachments(ctx, q, task.ID, false)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	transitions, err := s.engine.Preview(ctx, task)
 	if err != nil {
 		fail(c, s.log, err)
@@ -315,6 +324,7 @@ func (s *Server) getTask(c *gin.Context) {
 		"task":        task,
 		"stage_runs":  runs,
 		"artifacts":   artifacts,
+		"attachments": attachments,
 		"transitions": transitions,
 		"stage_limit": limit,
 		"children":    children,
@@ -661,7 +671,14 @@ type submitArtifactRequest struct {
 
 // submitArtifact принимает и форму из UI, и расширенную форму агента со
 // ссылками и зоной в коде: ручка одна, потому что сдача результата одна.
+//
+// Multipart — файл по контракту (решение 0064): отдельный разбор, JSON-сдача
+// строкой не меняется.
 func (s *Server) submitArtifact(c *gin.Context) {
+	if isMultipart(c) {
+		s.submitFile(c)
+		return
+	}
 	var req agentArtifactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
@@ -706,14 +723,29 @@ func (s *Server) getArtifactContent(c *gin.Context) {
 		return
 	}
 	defer blob.Close()
+	// Начало содержимого — для сверки сигнатуры картинок и PDF с заявленным
+	// типом: не сошлось — отдаётся вложением, а не inline. Читается до
+	// заголовков: ошибка хранилища здесь — ещё 500, а не усечённый 200.
+	var body io.Reader = blob
+	var head []byte
+	if mt := artifactType(artifact, blob.MediaType); needsSniff(mt) {
+		head = make([]byte, sniffBytes)
+		n, err := io.ReadFull(blob, head)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			fail(c, s.log, apperr.Internal(err, "чтение содержимого %s", id))
+			return
+		}
+		head = head[:n]
+		body = io.MultiReader(bytes.NewReader(head), blob)
+	}
+	contentHeaders(c.Writer.Header(), artifact, blob.MediaType, head)
 	c.Header("Content-Length", strconv.FormatInt(blob.Size, 10))
-	c.Header("Content-Type", blob.MediaType)
 	c.Status(http.StatusOK)
 	// Обрыв посреди потока (клиент ушёл, срок отдачи вышел, хранилище
 	// встало) ответ уже не исправит: заголовки ушли. Заявленная длина
 	// больше отданного, и сервер закрывает соединение — клиент видит
 	// усечение, а не целый ответ.
-	if n, err := io.Copy(c.Writer, blob); err != nil || n != blob.Size {
+	if n, err := io.Copy(c.Writer, body); err != nil || n != blob.Size {
 		s.log.Warn("отдача содержимого оборвана",
 			"artifact_id", id, "sent", n, "size", blob.Size, "error", err,
 			"request_id", c.GetString(ctxRequestID))

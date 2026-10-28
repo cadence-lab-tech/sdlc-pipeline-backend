@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/metrics"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
 // HeaderVersion — версия сборки сервера в каждом ответе. По ней CLI сверяет
@@ -52,6 +53,16 @@ func serverVersion(v string) gin.HandlerFunc {
 
 // instance отдаёт сведения об инстансе. Ручка открытая в любом режиме
 // аутентификации: её спрашивают до входа.
+//
+// Предел файла — действующий, а не из конфигурации (R-4 CLAB-296): без
+// внешнего хранилища сервер примет не больше потолка inline, сколько бы ни
+// стояло в SDLC_BLOB_MAX_BYTES, и клиент сверяет размер именно с ним.
 func (s *Server) instance(c *gin.Context) {
-	c.JSON(http.StatusOK, s.auth.Instance(c.Request.Context(), s.buildVersion()))
+	out := s.auth.Instance(c.Request.Context(), s.buildVersion())
+	// Без хранилища (сервер, собранный тестом только ради сведений о входе)
+	// предела не знает — поля нет, как у сервера прежней версии.
+	if s.store != nil {
+		out.Limits = &workflow.InstanceLimits{MaxFileBytes: int64(s.store.BlobLimit())}
+	}
+	c.JSON(http.StatusOK, out)
 }

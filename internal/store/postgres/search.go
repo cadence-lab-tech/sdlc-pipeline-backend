@@ -35,7 +35,11 @@ type SearchHit struct {
 	Stage      string     `json:"stage,omitempty"`
 	Kind       string     `json:"kind,omitempty"`
 	Title      string     `json:"title,omitempty"`
-	Text       string     `json:"text"`
+	// Вложение (решение 0064): имя файла и признак — по ним выдача отличает
+	// приложенный файл от разбора этапа.
+	FileName   string `json:"file_name,omitempty"`
+	Attachment bool   `json:"attachment,omitempty"`
+	Text       string `json:"text"`
 
 	chunkID uuid.UUID
 }
@@ -253,7 +257,8 @@ func artifactSearchSQL(filter string) (string, string, func(interface{ Scan(...a
 	// Перекрытые версии из выдачи исключены: агенту нужен актуальный разбор,
 	// а не тот, который уже переписали.
 	columns := `
-		SELECT ac.id, a.id, t.key, coalesce(ws.key, ''), a.kind, a.title, ac.text
+		SELECT ac.id, a.id, t.key, coalesce(ws.key, ''), a.kind, a.title,
+		       coalesce(a.file_name, ''), a.is_attachment, ac.text
 		FROM artifact_chunks ac
 		JOIN artifacts a ON a.id = ac.artifact_id
 		JOIN tasks t     ON t.id = ac.task_id
@@ -275,7 +280,8 @@ func artifactSearchSQL(filter string) (string, string, func(interface{ Scan(...a
 	scan := func(row interface{ Scan(...any) error }) (SearchHit, error) {
 		h := SearchHit{Scope: ScopeArtifacts}
 		var artifactID uuid.UUID
-		err := row.Scan(&h.chunkID, &artifactID, &h.TaskKey, &h.Stage, &h.Kind, &h.Title, &h.Text)
+		err := row.Scan(&h.chunkID, &artifactID, &h.TaskKey, &h.Stage, &h.Kind, &h.Title,
+			&h.FileName, &h.Attachment, &h.Text)
 		h.ArtifactID = &artifactID
 		return h, err
 	}

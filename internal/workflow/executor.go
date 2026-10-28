@@ -71,6 +71,7 @@ func init() {
 		RESTAction("GET", "/v1/tasks/:taskKey/state"),
 		RESTAction("GET", "/v1/tasks/:taskKey/timeline"),
 		RESTAction("GET", "/v1/tasks/:taskKey/artifacts"),
+		RESTAction("GET", "/v1/tasks/:taskKey/attachments"),
 		RESTAction("GET", "/v1/tasks/:taskKey/drift"),
 		RESTAction("GET", "/v1/tasks/:taskKey/repo-refs"),
 		RESTAction("GET", "/v1/tasks/:taskKey/transitions"),
@@ -80,6 +81,8 @@ func init() {
 		RESTAction("POST", "/v1/tasks/:taskKey/heartbeat"),
 		RESTAction("POST", "/v1/tasks/:taskKey/release"),
 		RESTAction("POST", "/v1/tasks/:taskKey/artifacts"),
+		// Вложение — в круге записи своей задачи (решение 0064, п. 3).
+		RESTAction("POST", "/v1/tasks/:taskKey/attachments"),
 		RESTAction("POST", "/v1/tasks/:taskKey/repo-refs"),
 		RESTAction("POST", "/v1/tasks/:taskKey/usage"),
 		RESTAction("POST", "/v1/tasks/:taskKey/runs/:runID/usage"),

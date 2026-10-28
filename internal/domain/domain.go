@@ -897,7 +897,20 @@ type Artifact struct {
 	ApprovedBy   *uuid.UUID      `json:"approved_by,omitempty"`
 	Meta         json.RawMessage `json:"meta"`
 	CreatedAt    time.Time       `json:"created_at"`
+	// Вложение к задаче (решение 0064): вне контракта роли и без прогона.
+	// Отметка, а не kind: гейты, автозамена по kind и вход этапа его не
+	// видят, какой бы kind ни объявила роль.
+	IsAttachment bool `json:"is_attachment"`
+	// Имя и тип загруженного файла — у вложений и файлов по контракту. У
+	// артефактов, сданных строкой, их нет: тип отдачи берётся с блоба.
+	FileName  *string `json:"file_name,omitempty"`
+	MediaType *string `json:"media_type,omitempty"`
 }
+
+// AttachmentKind — технический kind вложения: колонка NOT NULL, а смысла у
+// вложения в контракте роли нет. Вложения отличает отметка IsAttachment, не
+// это значение: роль может объявить такой же kind, и он останется её.
+const AttachmentKind = "attachment"
 
 type TaskEvent struct {
 	ID          uuid.UUID       `json:"id"`
@@ -936,6 +949,8 @@ const (
 	// Этап открыт дольше предела stage_time_limit (CLAB-221): пишет воркер,
 	// один раз на прогон.
 	EventStageOverdue = "stage.overdue"
+	// К задаче приложен файл (решение 0064): без прогона, цикл не движется.
+	EventAttachmentAdded = "attachment.added"
 )
 
 // TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где
