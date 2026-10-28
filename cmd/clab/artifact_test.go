@@ -449,3 +449,18 @@ func (p deadlineProbe) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	return p.next.RoundTrip(r)
 }
+
+// id и -o можно писать в любом порядке.
+func TestArtifactFlagsBeforeID(t *testing.T) {
+	withJSON(t, false)
+	c := newContentClient(t, &contentServer{contentType: "image/png", body: []byte("x"), disposition: `attachment; filename="a.png"`})
+	dir := t.TempDir()
+	if _, _, err := capture(t, func() error {
+		return cmdArtifact(context.Background(), c, []string{"-o", dir + "/", artID})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if names := dirEntries(t, dir); len(names) != 1 || names[0] != "a.png" {
+		t.Fatalf("в каталоге %v", names)
+	}
+}

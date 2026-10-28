@@ -41,16 +41,19 @@ import (
 // Запись идёт во временный файл рядом с целью и переименованием по
 // завершении: оборванная загрузка не оставляет на диске частичного файла.
 func cmdArtifact(ctx context.Context, c *Client, args []string) error {
-	id, rest := popTask(args)
 	var output string
-	if _, err := flags("artifact", rest, func(fs *flag.FlagSet) {
+	// id и -o можно писать в любом порядке: «artifact <id> -o <каталог>/» и
+	// «artifact -o <каталог>/ <id>».
+	_, pos, err := flagsInterspersed("artifact", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&output, "o", "", "куда писать: файл, каталог/ (имя берётся с сервера) или - (stdout)")
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	if id == "" {
+	if len(pos) != 1 {
 		return fmt.Errorf("clab artifact <id> — id из prior_artifacts и вложений ответа clab claim или clab show")
 	}
+	id := pos[0]
 	dest, err := planDownload(output)
 	if err != nil {
 		return err

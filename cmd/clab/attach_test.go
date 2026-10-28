@@ -414,8 +414,14 @@ func TestIsBinaryFile(t *testing.T) {
 	if _, err := isBinaryFile(filepath.Join(dir, "нет.txt")); err == nil {
 		t.Error("несуществующий файл не отвергнут")
 	}
-	if _, err := isBinaryFile(dir); err == nil {
-		t.Error("каталог не отвергнут")
+	// Не обычный файл не читается заранее: поток считается текстом, как до вложений.
+	if got, err := isBinaryFile(dir); err != nil || got {
+		t.Errorf("каталог: %v %v", got, err)
+	}
+	if _, _, err := capture(t, func() error {
+		return cmdSubmit(context.Background(), &Client{}, []string{"CLAB-1", "--kind", "k", "--file", dir})
+	}); err == nil {
+		t.Error("сдача каталога не отвергнута")
 	}
 }
 

@@ -97,9 +97,17 @@ func readHead(r io.Reader) (head []byte, truncated bool, err error) {
 
 // isBinaryFile — бинарный ли файл: по расширению, а иначе по первым 8 КиБ.
 // Не найденный файл — ошибка здесь же, до любой сети.
+//
+// Не обычный файл (канал, /dev/stdin, подстановка процесса) читать заранее
+// нельзя: начало потока пропало бы для сдачи. Он считается текстом, как до
+// вложений, а читается сдачей целиком.
 func isBinaryFile(path string) (bool, error) {
-	if _, err := regularFile(path); err != nil {
+	st, err := os.Stat(path)
+	if err != nil {
 		return false, err
+	}
+	if !st.Mode().IsRegular() {
+		return false, nil
 	}
 	if binaryExtensions[strings.ToLower(filepath.Ext(path))] {
 		return true, nil
