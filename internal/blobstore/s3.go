@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,18 @@ import (
 type S3 struct {
 	cfg    S3Config
 	client *http.Client
+	// stream — тот же клиент без общего срока на обмен: им идут запись и
+	// чтение содержимого, у которых срок зависит от размера и не угадывается.
+	// Зависший обмен обрывает idle — сколько поток может стоять без байта.
+	stream *http.Client
+	idle   time.Duration
 }
+
+// streamIdle — сколько поток содержимого может стоять без единого байта,
+// прежде чем обмен с хранилищем оборвётся. Общего срока у потока нет: его
+// длительность задаёт размер содержимого, а у отдачи клиенту — свой срок
+// маршрута (SDLC_DOWNLOAD_TIMEOUT).
+const streamIdle = 2 * time.Minute
 
 // S3Config — адрес бакета и ключи доступа. Ключи приходят из окружения и в
 // базе не оседают: в проекте хранятся только имена и ссылки.
@@ -74,7 +86,9 @@ func NewS3(cfg S3Config) (*S3, error) {
 		// больше обычного; отмена всё равно приходит через контекст.
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	return &S3{cfg: cfg, client: client}, nil
+	stream := *client
+	stream.Timeout = 0
+	return &S3{cfg: cfg, client: client, stream: &stream, idle: streamIdle}, nil
 }
 
 // key раскладывает по первым двум символам sha — так же, как файловое
@@ -91,7 +105,32 @@ func (s *S3) String() string {
 	return s3Scheme + s.cfg.Bucket + "/" + s.cfg.Prefix + " (" + s.cfg.Endpoint + ")"
 }
 
+// TempDir — спул идёт во временный каталог процесса (TMPDIR): общего тома с
+// хранилищем нет, и переименовывать некуда.
+func (s *S3) TempDir() string { return "" }
+
+// PutFile заливает файл одним PUT. Подпись берёт sha256 содержимого, уже
+// посчитанный при спуле: SigV4 подписывает именно его, и второй проход по
+// файлу ради хэша не нужен.
+func (s *S3) PutFile(ctx context.Context, sha, path string, size int64, mediaType string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	return s.put(ctx, sha, file, size, sha, mediaType)
+}
+
+// Put — запись содержимого, уже лежащего в памяти.
 func (s *S3) Put(ctx context.Context, sha string, content []byte, mediaType string) (string, error) {
+	sum := sha256.Sum256(content)
+	return s.put(ctx, sha, bytes.NewReader(content), int64(len(content)), hex.EncodeToString(sum[:]), mediaType)
+}
+
+// put кладёт size байт из body. Тело читается через ReaderAt, поэтому
+// транспорт может повторить запрос с начала (GetBody) — память на это не
+// тратится.
+func (s *S3) put(ctx context.Context, sha string, body io.ReaderAt, size int64, payload, mediaType string) (string, error) {
 	if len(sha) < 3 {
 		return "", errors.New("blobstore: некорректный sha")
 	}
@@ -107,12 +146,18 @@ func (s *S3) Put(ctx context.Context, sha string, content []byte, mediaType stri
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	req, err := s.request(ctx, http.MethodPut, s.key(sha), content)
+	ctx, watch := newStall(ctx, s.idle)
+	defer watch.stop()
+	open := func() io.Reader { return stallReader{r: io.NewSectionReader(body, 0, size), s: watch} }
+	req, err := s.newRequest(ctx, http.MethodPut, s.key(sha), nil, open())
 	if err != nil {
 		return "", err
 	}
+	req.ContentLength = size
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(open()), nil }
 	req.Header.Set("Content-Type", mediaType)
-	resp, err := s.do(req)
+	s.sign(req, payload, time.Now().UTC())
+	resp, err := s.doWith(s.stream, req)
 	if err != nil {
 		return "", err
 	}
@@ -123,27 +168,42 @@ func (s *S3) Put(ctx context.Context, sha string, content []byte, mediaType stri
 	return uri, nil
 }
 
-func (s *S3) Get(ctx context.Context, uri string) ([]byte, error) {
+// Open отдаёт тело ответа хранилища как есть: содержимое идёт клиенту
+// потоком. Ответ 404 разбирается здесь, до первого Read.
+func (s *S3) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	key, err := s.keyOf(uri)
 	if err != nil {
 		return nil, err
 	}
+	ctx, watch := newStall(ctx, s.idle)
 	req, err := s.request(ctx, http.MethodGet, key, nil)
 	if err != nil {
+		watch.stop()
 		return nil, err
 	}
-	resp, err := s.do(req)
+	resp, err := s.doWith(s.stream, req)
 	if err != nil {
+		watch.stop()
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		watch.touch()
+		return &stallBody{body: resp.Body, s: watch}, nil
+	case http.StatusNotFound:
+		resp.Body.Close()
+		watch.stop()
 		return nil, ErrNotFound
-	}
-	if resp.StatusCode != http.StatusOK {
+	default:
+		defer watch.stop()
+		defer resp.Body.Close()
 		return nil, s3Error("чтение", resp)
 	}
-	return io.ReadAll(resp.Body)
+}
+
+// Get читает содержимое целиком.
+func (s *S3) Get(ctx context.Context, uri string) ([]byte, error) {
+	return readAll(s.Open(ctx, uri))
 }
 
 // Delete уносит объект. И 204, и 404 — успех: сборщик мусора приходит сюда
@@ -209,7 +269,11 @@ func (s *S3) head(ctx context.Context, key string) (bool, error) {
 }
 
 func (s *S3) do(req *http.Request) (*http.Response, error) {
-	resp, err := s.client.Do(req)
+	return s.doWith(s.client, req)
+}
+
+func (s *S3) doWith(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: %s %s: %w", req.Method, req.URL.Path, err)
 	}
@@ -231,6 +295,19 @@ func (s *S3) request(ctx context.Context, method, key string, body []byte) (*htt
 // кодирование RFC 3986 — и она же уходит по сети, так что подписано ровно
 // то, что отправлено.
 func (s *S3) requestQuery(ctx context.Context, method, key string, query url.Values, body []byte) (*http.Request, error) {
+	req, err := s.newRequest(ctx, method, key, query, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = int64(len(body))
+	sum := sha256.Sum256(body)
+	s.sign(req, hex.EncodeToString(sum[:]), time.Now().UTC())
+	return req, nil
+}
+
+// newRequest собирает неподписанный запрос: подпись зависит от хэша тела,
+// а его вызывающий знает по-разному — из байтов или из спула.
+func (s *S3) newRequest(ctx context.Context, method, key string, query url.Values, body io.Reader) (*http.Request, error) {
 	endpoint, err := url.Parse(s.cfg.Endpoint)
 	if err != nil {
 		return nil, err
@@ -243,21 +320,13 @@ func (s *S3) requestQuery(ctx context.Context, method, key string, query url.Val
 	}
 	endpoint.Path = strings.TrimSuffix(endpoint.Path, "/") + path
 	endpoint.RawQuery = canonicalQuery(query)
-
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.ContentLength = int64(len(body))
-	s.sign(req, body, time.Now().UTC())
-	return req, nil
+	return http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 }
 
-// sign — SigV4 с полезной нагрузкой в памяти: содержимое и так целиком в
-// байтах, потоковую подпись городить не для чего.
-func (s *S3) sign(req *http.Request, body []byte, now time.Time) {
-	sum := sha256.Sum256(body)
-	payload := hex.EncodeToString(sum[:])
+// sign — SigV4 с известным хэшем полезной нагрузки (payload — hex sha256
+// тела). Потоковая подпись по кускам не нужна: тело либо в памяти, либо в
+// спуле, и хэш его посчитан до запроса.
+func (s *S3) sign(req *http.Request, payload string, now time.Time) {
 	stamp := now.Format("20060102T150405Z")
 	day := stamp[:8]
 

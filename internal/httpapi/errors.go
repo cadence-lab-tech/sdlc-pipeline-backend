@@ -35,6 +35,8 @@ func statusFor(code apperr.Code) int {
 		return http.StatusUnauthorized
 	case apperr.CodeForbidden:
 		return http.StatusForbidden
+	case apperr.CodePayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case apperr.CodeProviderMisconfigured:
 		// Отказ пришёл от провайдера за сервисом, а не от запроса: тот же
 		// смысл, что у шлюза, получившего негодный ответ от вышестоящего.
@@ -54,6 +56,11 @@ func statusFor(code apperr.Code) int {
 // fail отвечает ошибкой. Внутренние ошибки логируются целиком, а наружу уходит
 // нейтральный текст: формулировки драйвера базы клиенту знать незачем.
 func fail(c *gin.Context, log *slog.Logger, err error) {
+	// Предел тела узнаётся по ошибке чтения, в чью бы обёртку она ни попала:
+	// ответ на неё один — 413, а не 400 или 500 обёртки.
+	if tooLarge, ok := asTooLarge(err); ok {
+		err = tooLarge
+	}
 	e := apperr.As(err)
 
 	var body errorBody
@@ -78,6 +85,10 @@ func fail(c *gin.Context, log *slog.Logger, err error) {
 }
 
 func badRequest(c *gin.Context, log *slog.Logger, err error) {
+	if tooLarge, ok := asTooLarge(err); ok {
+		fail(c, log, tooLarge)
+		return
+	}
 	fail(c, log, apperr.Wrap(apperr.CodeInvalidInput, err, "некорректный запрос: %v", errText(err)))
 }
 

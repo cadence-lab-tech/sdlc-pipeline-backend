@@ -23,6 +23,14 @@ type Config struct {
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
 	RequestTimeout  time.Duration
+	// Сроки маршрутов с содержимым (CLAB-295): приём тела на сдаче артефакта
+	// и отдача GET /v1/artifacts/:id/content. Крупное содержимое на
+	// медленном канале в RequestTimeout не укладывается, а размер файлов у
+	// проектов разный — от markdown до 3D-моделей, — поэтому сроки задаёт
+	// администратор. Ноль — без срока; короче RequestTimeout срок маршрута
+	// не делает (httpapi.routeDeadline).
+	UploadTimeout   time.Duration
+	DownloadTimeout time.Duration
 
 	// База
 	DatabaseURL    string
@@ -215,6 +223,8 @@ func Load() (Config, error) {
 		HTTPAddr:              env("SDLC_HTTP_ADDR", ":8080"),
 		ShutdownTimeout:       15 * time.Second,
 		RequestTimeout:        30 * time.Second,
+		UploadTimeout:         10 * time.Minute,
+		DownloadTimeout:       10 * time.Minute,
 		DatabaseURL:           sec.databaseURL(),
 		MaxConns:              10,
 		ConnectTimeout:        30 * time.Second,
@@ -502,6 +512,12 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.RequestTimeout, err = envNonNegativeDuration("SDLC_REQUEST_TIMEOUT", c.RequestTimeout, "без таймаута"); err != nil {
+		return c, err
+	}
+	if c.UploadTimeout, err = envNonNegativeDuration("SDLC_UPLOAD_TIMEOUT", c.UploadTimeout, "без срока"); err != nil {
+		return c, err
+	}
+	if c.DownloadTimeout, err = envNonNegativeDuration("SDLC_DOWNLOAD_TIMEOUT", c.DownloadTimeout, "без срока"); err != nil {
 		return c, err
 	}
 	if c.ConnectTimeout, err = envNonNegativeDuration("SDLC_DB_CONNECT_TIMEOUT", c.ConnectTimeout, "не ждать базу, одна попытка"); err != nil {

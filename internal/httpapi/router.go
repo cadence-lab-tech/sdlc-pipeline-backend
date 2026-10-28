@@ -64,6 +64,8 @@ func (s *Server) Handler() http.Handler {
 	r := gin.New()
 	r.Use(requestID(), requestLog(s.log), requestMetrics(s.ops), requestTracing(s.tracer), recovery(s.log))
 	r.Use(serverVersion(s.buildVersion()))
+	// Предел тела — до групп и до журнала действий (CLAB-295).
+	r.Use(s.limitRequestBody())
 
 	// Пробы вне группы с резолвом актора: kubelet не присылает заголовков и не
 	// должен заводить принципала на каждый опрос.
@@ -102,7 +104,11 @@ func (s *Server) Handler() http.Handler {
 	// появляется актор, и тоже должен попасть в журнал. Белый список токена
 	// задачи — сразу после аутентификации, до guard и ручек: отказ по нему не
 	// зависит ни от уровня, ни от is_admin, и журнал его видит.
-	v1 := r.Group("/v1", s.auditREST(), s.authenticate(domain.PrincipalUser), s.executorOnly())
+	//
+	// Отказ 413 по заявленной длине тела — сразу после журнала: он тоже
+	// отклонённый запрос и пишется туда как обычный, а до аутентификации —
+	// потому что ни база, ни права для него не нужны.
+	v1 := r.Group("/v1", s.auditREST(), s.rejectTooLarge(), s.authenticate(domain.PrincipalUser), s.executorOnly())
 	{
 		// Кто я, токены. Права на выдачу проверяет сам сервис: токен себе
 		// может любой, другому — администратор проекта или системы.
@@ -260,7 +266,11 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/drift-signals/:signalID/resolve", agent, s.resolveDrift)
 
 		v1.GET("/tasks/:taskKey/artifacts", viewer, s.listArtifacts)
-		v1.POST("/tasks/:taskKey/artifacts", agent, s.submitArtifact)
+		// Сроки маршрутов с содержимым — свои (SDLC_UPLOAD_TIMEOUT,
+		// SDLC_DOWNLOAD_TIMEOUT): крупное содержимое на медленном канале в
+		// SDLC_REQUEST_TIMEOUT не укладывается. Ставятся после
+		// аутентификации: продлённое соединение получает только вошедший.
+		v1.POST("/tasks/:taskKey/artifacts", s.uploadDeadline(), agent, s.submitArtifact)
 
 		v1.GET("/tasks/:taskKey/transitions", viewer, s.listTransitions)
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey", agent, s.executeTransition)
@@ -300,7 +310,7 @@ func (s *Server) Handler() http.Handler {
 		v1.GET("/projects/:projectKey/audit", maintainer, s.projectAudit)
 		v1.GET("/audit", s.requireAdmin(), s.instanceAudit)
 
-		v1.GET("/artifacts/:artifactID/content", viewer, s.getArtifactContent)
+		v1.GET("/artifacts/:artifactID/content", s.downloadDeadline(), viewer, s.getArtifactContent)
 		v1.POST("/artifacts/:artifactID/approve", maintainer, s.approveArtifact)
 	}
 
@@ -309,9 +319,12 @@ func (s *Server) Handler() http.Handler {
 	// пути, поэтому агент физически не может обратиться к чужому проекту.
 	// Уровень прав каждый тул проверяет сам: у них он разный.
 	if s.mcp != nil {
-		handler := s.mcp.Handler()
+		// Предел тела у MCP тот же, что у /v1: отдельного нет (CLAB-295).
+		// Заявленную длину отбивает rejectTooLarge до SDK; тело без длины
+		// SDK читает через тот же предел и сам отвечает 413.
+		handler := s.mcp.Handler(s.bodyLimit())
 		// Вызовы тулов пишет обёртка тулов; здесь — только отказ 401 до тула.
-		group := r.Group("/mcp/projects/:projectKey", s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent))
+		group := r.Group("/mcp/projects/:projectKey", s.rejectTooLarge(), s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent))
 		group.Any("", s.serveMCP(handler))
 		group.Any("/*rest", s.serveMCP(handler))
 	}
