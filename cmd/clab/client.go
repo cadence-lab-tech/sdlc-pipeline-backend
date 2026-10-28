@@ -124,6 +124,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return err
 	}
+	return c.finish(resp, out)
+}
+
+// finish читает ответ до конца, сверяет версию сервера и раскладывает его:
+// ошибка домена — конвертом {"error":…}, успех — в out. Тело закрывается
+// здесь. Общий хвост do и файловой загрузки.
+func (c *Client) finish(resp *http.Response, out any) error {
 	defer resp.Body.Close()
 	c.checkServerVersion(resp)
 
@@ -133,20 +140,26 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 
 	if resp.StatusCode >= 300 {
-		var envelope struct {
-			Error APIError `json:"error"`
-		}
-		if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error.Code == "" {
-			return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
-		}
-		envelope.Error.Status = resp.StatusCode
-		return &envelope.Error
+		return responseError(resp.StatusCode, raw)
 	}
 
 	if out == nil {
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// responseError — ошибка по неуспешному ответу: конверт сервера, а если его
+// нет, то тело как сообщение.
+func responseError(status int, raw []byte) *APIError {
+	var envelope struct {
+		Error APIError `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error.Code == "" {
+		return &APIError{Status: status, Message: strings.TrimSpace(string(raw))}
+	}
+	envelope.Error.Status = status
+	return &envelope.Error
 }
 
 func (c *Client) authorize(req *http.Request) {

@@ -23,7 +23,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -49,7 +48,8 @@ func commands() []command {
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4] [--external PROJ-12 | --external jira:PROJ-12]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
-		{"artifact", "содержимое артефакта: входы этапа без MCP", "clab artifact <id> [--json] — id из prior_artifacts ответа clab claim или clab show", cmdArtifact},
+		{"artifact", "содержимое артефакта или вложения: входы этапа и файлы задачи без MCP", "clab artifact <id> [-o <файл> | -o <каталог>/ | -o -] [--json] — id из prior_artifacts и вложений ответа clab claim или clab show; текст без -o печатается, бинарное без -o отказывает; -o <файл> не перезаписывает существующий, -o <каталог>/ берёт имя файла с сервера, -o - пишет байты в stdout; --json без -o — {id, media_type, content} (только текст), с -o — сведения о записанном файле", cmdArtifact},
+		{"attach", "приложить файл к задаче вложением: байты потоком, мимо MCP", "clab attach SDLC-42 shot.png [--title ...] [--supersedes <id вложения>] [--json] — размер сверяется с пределом сервера до отправки; исполнитель этапа долгую загрузку ведёт как clab heartbeat SDLC-42 -- clab attach SDLC-42 big.bin", cmdAttach},
 		{"create", "завести задачу или эпик", "clab create --title \"Раннер\" [--type epic] [--parent SDLC-4] [--repos backend] [--blocks SDLC-2] [--assignee agent:bot] [--external-ref jira:PROJ-12=https://jira.example.com/browse/PROJ-12] [--model-level medium] [--model-level-for testing=low ...]", cmdCreate},
 		{"edit", "поправить постановку задачи", "clab edit SDLC-42 [--title ...] [--description ... | --description - | --description-file d.md] [--priority high] [--labels bug,phase8] [--external-ref jira:PROJ-12=https://… | --external-ref \"\"] [--model-level low|medium|high | --model-level \"\"] [--model-level-for development=high ... | --model-level-for development=] (пустое значение снимает уровень)", cmdEdit},
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
@@ -58,11 +58,11 @@ func commands() []command {
 		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md]", cmdClaim},
 		{"heartbeat", "продлить аренду: один раз, по интервалу или пока работает долгая команда", "clab heartbeat SDLC-42 | clab heartbeat SDLC-42 --every 5m [--for 2h] | clab heartbeat SDLC-42 [--every 5m] -- <команда> [аргументы] (код выхода — код команды; без --every интервал из ответа сервера)", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
-		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md", cmdSubmit},
+		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
 		{"scope", "расширить или сузить область задачи", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] --reason ...", cmdScope},
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
-		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file]", cmdTransition},
+		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file] — --artifact только для текста, бинарный файл сдаётся до перехода: clab submit --file", cmdTransition},
 		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
 		{"search", "поиск по коду, артефактам и документам проекта", "clab search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
 		{"index", "состояние индекса репозиториев", "clab index [--project SDLC]", cmdIndex},
@@ -138,6 +138,10 @@ func usage() {
 	for _, cmd := range commands() {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", cmd.name, cmd.summary)
 	}
+	fmt.Fprintln(os.Stderr, "\nФайлы идут через clab, а не через MCP:")
+	fmt.Fprintln(os.Stderr, "  clab attach SDLC-42 shot.png                         приложить файл к задаче")
+	fmt.Fprintln(os.Stderr, "  clab submit SDLC-42 --kind <kind> --file shot.png    сдать файл по контракту этапа")
+	fmt.Fprintln(os.Stderr, "  clab artifact <id> -o <каталог>/                     скачать вложение (id — в clab show и clab claim)")
 	fmt.Fprintln(os.Stderr, "\nclab <команда> --help — аргументы команды")
 	fmt.Fprintln(os.Stderr, "\nОбщие флаги: --host <адрес> — хост из конфига, --json — ответ сервера как есть.")
 	fmt.Fprintln(os.Stderr, "Начало работы: clab auth login --host https://sdlc.example.com; конфиг — ~/.config/clab.")
@@ -186,6 +190,14 @@ func popTask(args []string) (string, []string) {
 // flags собирает набор флагов команды и печатает её строку использования,
 // если попросили --help.
 func flags(cmd string, args []string, setup func(*flag.FlagSet)) (*flag.FlagSet, error) {
+	fs := newFlagSet(cmd, setup)
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	return fs, nil
+}
+
+func newFlagSet(cmd string, setup func(*flag.FlagSet)) *flag.FlagSet {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	for _, c := range commands() {
 		if c.name == cmd {
@@ -196,10 +208,31 @@ func flags(cmd string, args []string, setup func(*flag.FlagSet)) (*flag.FlagSet,
 		}
 	}
 	setup(fs)
-	if err := fs.Parse(args); err != nil {
-		return nil, err
+	return fs
+}
+
+// flagsInterspersed разбирает флаги и после позиционных аргументов:
+// "clab attach SDLC-42 shot.png --title X" оставил бы --title в хвосте, потому
+// что пакет flag прекращает разбор на первом не-флаге. Позиционные
+// возвращаются по порядку; после "--" всё позиционное.
+func flagsInterspersed(cmd string, args []string, setup func(*flag.FlagSet)) (*flag.FlagSet, []string, error) {
+	fs := newFlagSet(cmd, setup)
+	var positional []string
+	rest := args
+	for {
+		if err := fs.Parse(rest); err != nil {
+			return nil, nil, err
+		}
+		after := fs.Args()
+		if n := len(rest) - len(after); n > 0 && rest[n-1] == "--" {
+			return fs, append(positional, after...), nil
+		}
+		if len(after) == 0 {
+			return fs, positional, nil
+		}
+		positional = append(positional, after[0])
+		rest = after[1:]
 	}
-	return fs, nil
 }
 
 func requireTask(fs *flag.FlagSet, task string) error {
@@ -524,13 +557,32 @@ func cmdSubmit(ctx context.Context, c *Client, args []string) error {
 	if kind == "" {
 		return fmt.Errorf("не указан --kind")
 	}
+	if title == "" {
+		title = kind
+	}
+
+	// Бинарный файл идёт multipart, а не строкой в JSON: json.Marshal молча
+	// испортил бы байты, не являющиеся UTF-8 (CLAB-298).
+	if content == "" && file != "" && file != "-" {
+		binary, err := isBinaryFile(file)
+		if err != nil {
+			return err
+		}
+		if binary {
+			if format != "" && format != "binary" {
+				return fmt.Errorf("%s — бинарный файл: он сдаётся с format: binary, --format %s не подходит", file, format)
+			}
+			out, err := submitBinary(ctx, c, task, kind, title, file)
+			if err != nil {
+				return err
+			}
+			return emit(out, render(renderArtifact, out))
+		}
+	}
 
 	body, err := readContent(file, content)
 	if err != nil {
 		return err
-	}
-	if title == "" {
-		title = kind
 	}
 	if format == "" {
 		format = guessFormat(file)
@@ -673,12 +725,26 @@ func cmdTransition(ctx context.Context, c *Client, args []string) error {
 	}
 
 	// Артефакты, которых требует гейт перехода, сдаются до самого перехода:
-	// движок прогоняет гейты по тому, что уже лежит в задаче.
+	// движок прогоняет гейты по тому, что уже лежит в задаче. Бинарный файл
+	// здесь не сдаётся: проверка идёт до первой отправки, чтобы часть
+	// артефактов не ушла, а переход не состоялся.
 	for _, a := range artifacts {
 		kind, path, ok := strings.Cut(a, "=")
 		if !ok {
 			return fmt.Errorf("артефакт задаётся как kind=файл, а не %q", a)
 		}
+		if path != "-" {
+			binary, err := isBinaryFile(path)
+			if err != nil {
+				return err
+			}
+			if binary {
+				return fmt.Errorf("%s — бинарный файл: через --artifact он не сдаётся. Сдайте его до перехода: clab submit %s --kind %s --file %s", path, task, kind, path)
+			}
+		}
+	}
+	for _, a := range artifacts {
+		kind, path, _ := strings.Cut(a, "=")
 		body, err := readContent(path, "")
 		if err != nil {
 			return err
@@ -829,7 +895,7 @@ func readContent(file, inline string) ([]byte, error) {
 	case "":
 		return nil, fmt.Errorf("нужен --file или --content")
 	case "-":
-		return io.ReadAll(os.Stdin)
+		return readStdinText(os.Stdin)
 	default:
 		return os.ReadFile(file)
 	}
