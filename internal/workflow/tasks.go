@@ -30,6 +30,10 @@ type SubmitArtifactInput struct {
 	// Прогон, к которому крепится результат. Пусто — движок определит его
 	// сам: прогон перепроверки, если агент держит его, иначе текущий этап.
 	StageRunID *uuid.UUID
+	// Файл по контракту (решение 0064): принят до транзакции, Content не
+	// читается. FileName и MediaType — уже санитизированные транспортом.
+	File     *postgres.SpooledBlob
+	FileName string
 }
 
 // SubmitArtifact прикрепляет результат работы к попытке этапа.
@@ -56,7 +60,11 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 		if err != nil {
 			return err
 		}
-		if err := checkArtifactSchema(in.Kind, schema, in.Content); err != nil {
+		if in.File != nil {
+			if err := fileForbiddenBySchema(in.Kind, schema); err != nil {
+				return err
+			}
+		} else if err := checkArtifactSchema(in.Kind, schema, in.Content); err != nil {
 			return err
 		}
 		// Повторная сдача того же kind — это новая версия, а не второй
@@ -78,6 +86,8 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 			Format:       in.Format,
 			Content:      in.Content,
 			MediaType:    in.MediaType,
+			Blob:         in.File,
+			FileName:     in.FileName,
 			SupersedesID: in.SupersedesID,
 			Status:       domain.ArtifactSubmitted,
 			Meta:         in.Meta,
@@ -116,6 +126,108 @@ func (e *Engine) SubmitArtifact(ctx context.Context, taskKey string, actor uuid.
 		return e.resetReview(ctx, tx, run)
 	})
 
+	return out, err
+}
+
+// CheckFileSubmission — проверки сдачи файла по контракту, которые не
+// требуют самого файла: прогон, контракт роли, схема kind. Транспорт зовёт её
+// до чтения тела (R-1 CLAB-296): неверный kind или завершённый этап не должны
+// стоить загрузки файла на десятки МиБ. Без транзакции и блокировки задачи —
+// SubmitArtifact повторит те же проверки под ними.
+func (e *Engine) CheckFileSubmission(ctx context.Context, taskKey string, actor uuid.UUID, kind string, stageRunID *uuid.UUID) error {
+	q := e.store.DB()
+	task, err := e.store.GetTaskByKey(ctx, q, taskKey)
+	if err != nil {
+		return err
+	}
+	run, err := e.workRun(ctx, q, task, actor, stageRunID)
+	if err != nil {
+		return err
+	}
+	if run.FinishedAt != nil {
+		return apperr.Conflict("этап уже завершён, артефакт прикреплять некуда")
+	}
+	schema, err := e.checkContract(ctx, q, run, kind)
+	if err != nil {
+		return err
+	}
+	return fileForbiddenBySchema(kind, schema)
+}
+
+// fileForbiddenBySchema — файл не сдаётся под kind со схемой: проверить файл
+// JSON-схемой нечем, а гейт schema_validation ждёт по нему документ.
+func fileForbiddenBySchema(kind string, schema json.RawMessage) error {
+	if t := bytes.TrimSpace(schema); len(t) == 0 || string(t) == "null" {
+		return nil
+	}
+	return apperr.InvalidInput(
+		"у %q в контракте роли JSON-схема — файл под таким kind не сдаётся, только документ строкой", kind).
+		WithDetails(map[string]any{"kind": kind})
+}
+
+// AttachInput — вложение к задаче. Имя и тип — уже санитизированные
+// транспортом; файл принят до транзакции.
+type AttachInput struct {
+	Title        string
+	FileName     string
+	MediaType    string
+	SupersedesID *uuid.UUID
+	File         *postgres.SpooledBlob
+}
+
+// AttachFile прикладывает файл к задаче (решение 0064, п. 2).
+//
+// Вложение живёт вне цикла: ни прогона, ни контракта роли, ни проверки
+// статуса — задача любого типа и в любом статусе, включая закрытые. Поэтому
+// здесь нет ни checkContract, ни resetReview, ни автозамены по kind, а
+// stage_runs не трогаются: гейты и перепроверка вложения не видят. Новая
+// версия — только явным supersedes_id; несколько вложений живут рядом.
+//
+// Задача читается без FOR UPDATE: вложение не меняет её состояния, а
+// параллельные замены одной версии сериализует замок строки заменяемого в
+// CreateArtifact. Транзакция короткая — файл к ней уже принят.
+func (e *Engine) AttachFile(ctx context.Context, taskKey string, actor uuid.UUID, in AttachInput) (domain.Artifact, error) {
+	if in.File == nil {
+		return domain.Artifact{}, apperr.InvalidInput("файл не передан")
+	}
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		title = in.FileName
+	}
+	var out domain.Artifact
+	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
+		task, err := e.store.GetTaskByKey(ctx, tx, taskKey)
+		if err != nil {
+			return err
+		}
+		out, err = e.store.CreateArtifact(ctx, tx, postgres.CreateArtifactInput{
+			Task:         task,
+			Kind:         domain.AttachmentKind,
+			Title:        title,
+			Format:       "binary",
+			MediaType:    in.MediaType,
+			Blob:         in.File,
+			FileName:     in.FileName,
+			IsAttachment: true,
+			SupersedesID: in.SupersedesID,
+			Status:       domain.ArtifactSubmitted,
+			ProducedBy:   actor,
+		})
+		if err != nil {
+			return err
+		}
+		payload := map[string]any{
+			"artifact_id": out.ID.String(),
+			"file_name":   in.FileName,
+			"media_type":  in.MediaType,
+			"size_bytes":  out.SizeBytes,
+			"version":     out.Version,
+		}
+		if out.SupersedesID != nil {
+			payload["supersedes_id"] = out.SupersedesID.String()
+		}
+		return e.store.AppendEvent(ctx, tx, task.ID, nil, domain.EventAttachmentAdded, actor, payload)
+	})
 	return out, err
 }
 

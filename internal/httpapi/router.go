@@ -270,7 +270,15 @@ func (s *Server) Handler() http.Handler {
 		// SDLC_DOWNLOAD_TIMEOUT): крупное содержимое на медленном канале в
 		// SDLC_REQUEST_TIMEOUT не укладывается. Ставятся после
 		// аутентификации: продлённое соединение получает только вошедший.
-		v1.POST("/tasks/:taskKey/artifacts", s.uploadDeadline(), agent, s.submitArtifact)
+		//
+		// Файл (multipart) — ещё и под пределом файла с запасом на поля
+		// формы (limitUpload): тот же предел, что в GET /v1/instance.
+		v1.POST("/tasks/:taskKey/artifacts", s.uploadDeadline(), s.limitUpload(), agent, s.submitArtifact)
+		// Вложения (решение 0064): прикрепить и выпустить новую версию может
+		// любой участник с уровня viewer — в любом статусе задачи, вне
+		// контракта роли; токен задачи — в круге записи (attachFile).
+		v1.GET("/tasks/:taskKey/attachments", viewer, s.listAttachments)
+		v1.POST("/tasks/:taskKey/attachments", s.uploadDeadline(), s.limitUpload(), viewer, s.attachFile)
 
 		v1.GET("/tasks/:taskKey/transitions", viewer, s.listTransitions)
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey", agent, s.executeTransition)

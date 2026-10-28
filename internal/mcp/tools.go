@@ -419,6 +419,15 @@ func (s *Server) getArtifact(ctx context.Context, in artifactInput) (*sdk.CallTo
 	if err := s.auth.RequireReadable(ctx, identity(ctx), a.TaskID); err != nil {
 		return fail(err)
 	}
+	// Байты файла в контекст модели не идут (решение 0064, п. 5): ни
+	// вложения, ни файла по контракту. Временный отказ до CLAB-297, который
+	// заменит его ответом метаданными и командами.
+	if a.IsAttachment || a.Format == "binary" {
+		return fail(apperr.InvalidInput(
+			"артефакт %s — файл, его содержимое через MCP не отдаётся: GET %s тем же токеном",
+			a.ID, workflow.ContentPath(a.ID)).
+			WithDetails(map[string]any{"artifact_id": a.ID, "content_path": workflow.ContentPath(a.ID)}))
+	}
 	content, mediaType, err := s.store.BlobContent(ctx, q, a.BlobSHA)
 	if err != nil {
 		return fail(err)

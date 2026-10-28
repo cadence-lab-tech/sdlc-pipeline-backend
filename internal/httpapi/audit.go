@@ -44,7 +44,9 @@ func (s *Server) auditREST() gin.HandlerFunc {
 
 		var tap *bodyTap
 		if isMutating(c.Request.Method) && c.Request.Body != nil && c.Request.Body != http.NoBody {
-			tap = &bodyTap{r: c.Request.Body, h: sha256.New()}
+			// Форма с файлом — не JSON: разбирать нечего, и держать в памяти
+			// первые 4 МиБ каждой загрузки незачем — только размер и sha256.
+			tap = &bodyTap{r: c.Request.Body, h: sha256.New(), opaque: isMultipart(c)}
 			c.Request.Body = tap
 		}
 
@@ -226,6 +228,8 @@ type bodyTap struct {
 	buf  bytes.Buffer
 	over bool
 	eof  bool
+	// opaque — тело не разбирается (файл): в памяти ничего не держится.
+	opaque bool
 }
 
 func (t *bodyTap) Read(p []byte) (int, error) {
@@ -233,7 +237,7 @@ func (t *bodyTap) Read(p []byte) (int, error) {
 	if n > 0 {
 		t.h.Write(p[:n])
 		t.n += int64(n)
-		if room := auditBodyCap - t.buf.Len(); room > 0 {
+		if room := auditBodyCap - t.buf.Len(); room > 0 && !t.opaque {
 			t.buf.Write(p[:min(n, room)])
 		}
 		if t.n > auditBodyCap {
@@ -262,6 +266,9 @@ func (t *bodyTap) finish() any {
 		return map[string]any{"_partial": true, "size_read": t.n}
 	}
 	sum := hex.EncodeToString(t.h.Sum(nil))
+	if t.opaque {
+		return map[string]any{"size": t.n, "sha256": sum}
+	}
 	if t.over {
 		return map[string]any{"_truncated": true, "size": t.n, "sha256": sum}
 	}
