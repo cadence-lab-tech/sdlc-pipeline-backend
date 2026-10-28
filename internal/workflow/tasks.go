@@ -183,9 +183,12 @@ type AttachInput struct {
 // stage_runs не трогаются: гейты и перепроверка вложения не видят. Новая
 // версия — только явным supersedes_id; несколько вложений живут рядом.
 //
-// Задача читается без FOR UPDATE: вложение не меняет её состояния, а
-// параллельные замены одной версии сериализует замок строки заменяемого в
-// CreateArtifact. Транзакция короткая — файл к ней уже принят.
+// Задача берётся FOR KEY SHARE, а не FOR UPDATE: вложение не меняет её
+// состояния, вложения друг друга не ждут, а параллельные замены одной
+// версии сериализует замок строки заменяемого в CreateArtifact. Но взять её
+// надо до замка по sha блоба — в том же порядке, что сдача этапа, иначе те
+// же байты вложением и сдачей одновременно блокируют друг друга.
+// Транзакция короткая — файл к ней уже принят.
 func (e *Engine) AttachFile(ctx context.Context, taskKey string, actor uuid.UUID, in AttachInput) (domain.Artifact, error) {
 	if in.File == nil {
 		return domain.Artifact{}, apperr.InvalidInput("файл не передан")
@@ -198,6 +201,9 @@ func (e *Engine) AttachFile(ctx context.Context, taskKey string, actor uuid.UUID
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.GetTaskByKey(ctx, tx, taskKey)
 		if err != nil {
+			return err
+		}
+		if err := e.store.KeyShareTask(ctx, tx, task.ID); err != nil {
 			return err
 		}
 		out, err = e.store.CreateArtifact(ctx, tx, postgres.CreateArtifactInput{

@@ -140,6 +140,20 @@ func (s *Store) LockTaskByKey(ctx context.Context, tx pgx.Tx, taskKey string) (d
 	return t, nil
 }
 
+// KeyShareTask берёт строку задачи FOR KEY SHARE — тот же замок, что
+// внешний ключ ссылающейся строки, только раньше. Запись, которая потом
+// возьмёт замок по sha блоба (вложение), обязана сначала взять задачу:
+// сдача этапа берёт их в том же порядке (FOR UPDATE задачи, затем sha), и
+// обратный порядок при одинаковых байтах — взаимная блокировка. Вложения
+// друг друга этим замком не ждут, переход ждёт конца короткой транзакции.
+func (s *Store) KeyShareTask(ctx context.Context, tx pgx.Tx, taskID uuid.UUID) error {
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id = $1 FOR KEY SHARE`, taskID).Scan(&id); err != nil {
+		return notFound(err, "задача не найдена")
+	}
+	return nil
+}
+
 func (s *Store) TaskRepositories(ctx context.Context, q Querier, taskID uuid.UUID) ([]domain.TaskRepository, error) {
 	rows, err := q.Query(ctx, `
 		SELECT tr.repository_id, r.owner, r.name, r.role_hint, tr.is_primary

@@ -1072,3 +1072,37 @@ func (w testLogWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(p)))
 	return len(p), nil
 }
+
+// Те же байты одновременно вложением и сдачей этапа: сдача держит задачу
+// FOR UPDATE и ждёт замка по sha, вложение не должно держать замок по sha и
+// ждать строку задачи — иначе взаимная блокировка и 500 (CI, CLAB-296).
+func TestSameBytesAttachAndSubmitNoDeadlock(t *testing.T) {
+	f := newAttachFixture(t)
+	want(t, f.jsonAs(f.root, http.MethodPost, "/v1/tasks/SDLC-1/transitions/start", nil), http.StatusOK, "start")
+	for i := range 40 {
+		content := "# одинаковые байты " + strconv.Itoa(i) + "\n" + strings.Repeat("ж", 1000)
+		var wg sync.WaitGroup
+		codes := make([]int, 3)
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			codes[0] = f.upload("/v1/tasks/SDLC-1/attachments", filePart("same.md", "text/markdown", []byte(content))).Code
+		}()
+		go func() {
+			defer wg.Done()
+			codes[1] = f.jsonAs(f.root, http.MethodPost, "/v1/tasks/SDLC-1/artifacts",
+				map[string]any{"kind": "analysis.brief", "title": "строкой", "content": content}).Code
+		}()
+		go func() {
+			defer wg.Done()
+			codes[2] = f.upload("/v1/tasks/SDLC-1/artifacts", field("kind", "analysis.acceptance_criteria"),
+				field("title", "файлом"), filePart("same.md", "text/markdown", []byte(content))).Code
+		}()
+		wg.Wait()
+		for _, c := range codes {
+			if c != http.StatusCreated {
+				t.Fatalf("итерация %d: %v", i, codes)
+			}
+		}
+	}
+}
