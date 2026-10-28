@@ -445,6 +445,13 @@ func workPromptText(task, role string, byRunner bool) string {
    sdlc_create_task (parent — ключ этого эпика) и задай порядок sdlc_link_tasks.
 6. Сдай результат sdlc_submit_artifact ровно тех видов, что перечислены в
    контракте роли. Код изменений живёт в PR: привяжи его sdlc_link_repo_ref.
+   Файлы идут мимо MCP: вложения задачи перечислены в context.attachments
+   ответа захвата; скачай нужное командой clab artifact <id> -o <каталог>/
+   (или GET /v1/artifacts/<id>/content тем же токеном) и открой своим
+   инструментом чтения файлов — картинку модель увидит. Свой файл приложи
+   командой clab attach <ключ> <файл> или сдай по контракту командой
+   clab submit <ключ> --kind <kind> --file <файл>; sdlc_submit_artifact с
+   format: binary откажет.
 ` + usageStep(byRunner) + `
 8. sdlc_check_gates покажет, что мешает переходу. Закрой мешающее и позови
    sdlc_request_transition.

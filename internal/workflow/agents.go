@@ -93,6 +93,12 @@ type AttachmentRef struct {
 // ContentPath — путь к содержимому артефакта в REST.
 func ContentPath(id uuid.UUID) string { return "/v1/artifacts/" + id.String() + "/content" }
 
+// AttachmentsHint — строка о байтах вложений в ответах захвата и задачи
+// (решение 0064, п. 5). Формы команд те же, что в sdlc_get_artifact.
+const AttachmentsHint = "Содержимое файлов через MCP не идёт: скачайте командой clab artifact <id> -o <каталог>/ " +
+	"(файл с исходным именем; -o <путь> — под своим) или GET <content_path> тем же токеном; " +
+	"картинку и текст откройте своим инструментом чтения файлов после скачивания."
+
 func attachmentRef(a postgres.Attachment) AttachmentRef {
 	ref := AttachmentRef{
 		ID: a.ID, Title: a.Title, SizeBytes: a.SizeBytes, SHA256: a.BlobSHA,
@@ -145,12 +151,15 @@ type ClaimContext struct {
 	PriorArtifacts   []ArtifactRef            `json:"prior_artifacts"`
 	// Вложения задачи (решение 0064): не вход этапа, а файлы рядом с ним —
 	// поэтому отдельно от prior_artifacts, метаданными без содержимого.
-	Attachments []AttachmentRef         `json:"attachments"`
-	Rejection   *Rejection              `json:"rejection,omitempty"`
-	Baselines   []postgres.TaskBaseline `json:"baselines"`
-	Drift       []postgres.DriftSignal  `json:"drift"`
-	RepoRefs    []postgres.TaskRepoRef  `json:"repo_refs"`
-	Review      *Review                 `json:"review,omitempty"`
+	Attachments []AttachmentRef `json:"attachments"`
+	// Одна строка о том, как взять байты вложений; есть, только когда
+	// вложения есть (решение 0064, п. 5; CLAB-297).
+	AttachmentsHint string                  `json:"attachments_hint,omitempty"`
+	Rejection       *Rejection              `json:"rejection,omitempty"`
+	Baselines       []postgres.TaskBaseline `json:"baselines"`
+	Drift           []postgres.DriftSignal  `json:"drift"`
+	RepoRefs        []postgres.TaskRepoRef  `json:"repo_refs"`
+	Review          *Review                 `json:"review,omitempty"`
 }
 
 // GateSpec — требование гейта до его прогона: агент должен знать условия
@@ -250,6 +259,7 @@ var (
 		"task.title", "task.description", "task.labels", "task.properties", "task.external_ref",
 		"context.prior_artifacts", "context.rejection", "context.review",
 		"context.drift", "context.repo_refs", "context.attachments",
+		"context.attachments_hint",
 	}
 	// Служебные поля — не текст людей и агентов, а состояние движка; в
 	// ответ они не выносятся, перечень нужен тесту и MCP_CONTRACT.md.
@@ -765,6 +775,9 @@ func (e *Engine) claimContext(ctx context.Context, q postgres.Querier, task doma
 	// prior_artifacts их нет ни при пустом input_kinds, ни при непустом.
 	if out.Attachments, err = e.Attachments(ctx, q, task.ID, false); err != nil {
 		return out, err
+	}
+	if len(out.Attachments) > 0 {
+		out.AttachmentsHint = AttachmentsHint
 	}
 
 	if run.RejectedFromRunID != nil {
