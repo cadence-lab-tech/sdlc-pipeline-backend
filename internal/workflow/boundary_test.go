@@ -53,6 +53,7 @@ func fullClaimResult() ClaimResult {
 			Attachments: []AttachmentRef{{ID: uuid.New(), Title: "скриншот", FileName: "shot.png",
 				MediaType: "image/png", SizeBytes: 10, SHA256: "abc", Version: 1, Status: "submitted",
 				AddedBy: "user:viewer", AddedAt: time.Now(), ContentPath: "/v1/artifacts/x/content"}},
+			AttachmentsHint: AttachmentsHint,
 		},
 		GatesAhead:  []TransitionSpec{{Transition: "dev_done", Gates: []GateSpec{}}},
 		Lease:       &Lease{StageRunID: id, ExpiresAt: time.Now(), HeartbeatIntervalSeconds: 300},
