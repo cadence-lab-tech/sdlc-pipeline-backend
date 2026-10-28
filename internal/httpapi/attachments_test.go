@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -900,6 +901,9 @@ func TestSlowUploadDoesNotHoldTask(t *testing.T) {
 	// Переход берёт задачу под FOR UPDATE и отбивается гейтами; перепроверку
 	// он заводить не должен — её прогон увёл бы этап в gating.
 	f.exec(`DELETE FROM gates WHERE type = 'agent_review'`)
+	// Внутренняя ошибка ручки — в вывод теста: 500 без причины здесь не
+	// разобрать.
+	f.srv.log = slog.New(slog.NewTextHandler(testLogWriter{t}, &slog.HandlerOptions{Level: slog.LevelError}))
 	ts := f.liveServer()
 
 	type slow struct {
@@ -1059,4 +1063,12 @@ func TestAttachmentsMigration(t *testing.T) {
 	if got.Code != http.StatusOK || got.Body.String() != "# этап" || got.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("артефакт этапа после up: %d %v", got.Code, got.Header())
 	}
+}
+
+// testLogWriter — журнал сервера в вывод теста.
+type testLogWriter struct{ t *testing.T }
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSpace(string(p)))
+	return len(p), nil
 }
