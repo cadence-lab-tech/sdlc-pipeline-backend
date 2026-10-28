@@ -121,9 +121,12 @@ type stateView struct {
 			RoleHint *string `json:"role_hint"`
 			Primary  bool    `json:"primary"`
 		} `json:"repositories"`
-		PriorArtifacts []artifactRef     `json:"prior_artifacts"`
-		Drift          []json.RawMessage `json:"drift"`
-		Rejection      *struct {
+		PriorArtifacts []artifactRef `json:"prior_artifacts"`
+		// Вложения задачи (решение 0064): метаданные, без содержимого. Сервер
+		// прежней версии поля не отдаёт — тогда список пуст.
+		Attachments []attachmentRef   `json:"attachments"`
+		Drift       []json.RawMessage `json:"drift"`
+		Rejection   *struct {
 			FromStage               string  `json:"from_stage"`
 			Reason                  string  `json:"reason"`
 			ProblemReportArtifactID *string `json:"problem_report_artifact_id"`
@@ -162,6 +165,7 @@ func renderState(raw json.RawMessage) error {
 		return err
 	}
 	printSummary(s, true)
+	printAttachments(s.Context.Attachments)
 	return nil
 }
 
@@ -285,6 +289,7 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 		fmt.Println("Входные артефакты:")
 		printArtifactRefs(s.Context.PriorArtifacts, true)
 	}
+	printAttachments(s.Context.Attachments)
 	if r := s.Context.Rejection; r != nil {
 		fmt.Printf("Возврат с этапа %s:\n", dash(r.FromStage))
 		fmt.Println(indent(dash(strings.TrimSpace(r.Reason)), "  "))
@@ -373,6 +378,42 @@ func printContract(raw json.RawMessage) {
 		t.add("  "+it.Kind, yesNo(it.Required), dash(it.Format), dash(it.Title))
 	}
 	t.print()
+}
+
+// attachmentRef — вложение задачи в ответе захвата и карточке. Имя, заголовок
+// и автора пишет тот, кто приложил файл, в том числе viewer: это данные.
+type attachmentRef struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	FileName  string    `json:"file_name"`
+	MediaType string    `json:"media_type"`
+	Size      int64     `json:"size_bytes"`
+	SHA256    string    `json:"sha256"`
+	Version   int       `json:"version"`
+	AddedBy   string    `json:"added_by"`
+	AddedAt   time.Time `json:"added_at"`
+}
+
+// printAttachments — секция «Вложения»: по строке на вложение и под ней
+// команда скачивания. Содержимое файлов через MCP не передаётся, и это
+// сказано здесь же, где агент ищет, как их взять.
+func printAttachments(list []attachmentRef) {
+	if len(list) == 0 {
+		fmt.Println("Вложения: нет")
+		return
+	}
+	fmt.Println("Вложения:")
+	t := newTable("  ID", "ИМЯ", "ТИП", "РАЗМЕР", "ВЕРСИЯ", "КТО", "КОГДА", "SHA256")
+	for _, a := range list {
+		name := printable(a.FileName)
+		if name == "" {
+			name = printable(a.Title)
+		}
+		t.add("  "+a.ID, dash(name), dash(printable(a.MediaType)), humanSize(a.Size), "v"+strconv.Itoa(a.Version),
+			dash(printable(a.AddedBy)), when(&a.AddedAt), dash(printable(a.SHA256)))
+	}
+	t.print()
+	fmt.Println("  скачать: clab artifact <id> -o <каталог>/ (содержимое файлов через MCP не передаётся)")
 }
 
 func printArtifactRefs(refs []artifactRef, withStage bool) {

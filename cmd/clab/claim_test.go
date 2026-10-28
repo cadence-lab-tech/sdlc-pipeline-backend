@@ -283,9 +283,11 @@ const showGolden = `CLAB-146  clab claim не печатает инструкц�
 Возврат:      Критерий 3 не выполнен: при пустом списке входов вывод молчит. Подробности причины возврата, которые нельзя обрезать. П…
 Переходы:
   dev_done → testing   гейты: artifacts
+Вложения: нет
 `
 
-// Критерий 10: clab show печатает ровно то же, что до изменения.
+// Критерий 10: clab show печатает ровно то же, что до изменения. Единственная
+// добавка — строка «Вложения: нет» в конце (CLAB-298, AC-23.2–AC-23.3).
 func TestShowUnchanged(t *testing.T) {
 	withJSON(t, false)
 	c, rec := newInviteClient(t, http.StatusOK, claimReply(t, nil))
