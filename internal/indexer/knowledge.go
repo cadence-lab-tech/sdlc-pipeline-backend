@@ -1,10 +1,12 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -16,23 +18,18 @@ import (
 // чтобы закрыть этап, и падение провайдера эмбеддингов не должно превращаться
 // в невозможность сдать работу.
 func (ix *Indexer) IndexKnowledge(ctx context.Context, limit int) (artifacts, documents int, err error) {
-	pendingArtifacts, err := ix.store.PendingArtifacts(ctx, ix.store.DB(), limit)
+	pendingArtifacts, err := ix.store.PendingArtifacts(ctx, ix.store.DB(), limit, ix.opts.MaxFileBytes)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, t := range pendingArtifacts {
-		chunks, err := ix.textChunks(ctx, t)
+		indexed, err := ix.indexArtifact(ctx, t)
 		if err != nil {
 			return artifacts, documents, err
 		}
-		if t.TaskID == nil {
-			continue
+		if indexed {
+			artifacts++
 		}
-		if err := ix.store.ReplaceArtifactChunks(ctx, ix.store.DB(),
-			t.ID, t.ProjectID, *t.TaskID, chunks); err != nil {
-			return artifacts, documents, err
-		}
-		artifacts++
 	}
 
 	pendingDocs, err := ix.store.PendingDocuments(ctx, ix.store.DB(), limit)
@@ -53,6 +50,44 @@ func (ix *Indexer) IndexKnowledge(ctx context.Context, limit int) (artifacts, do
 	return artifacts, documents, nil
 }
 
+// indexArtifact раскладывает один артефакт и отмечает его пройденным.
+//
+// Артефакт, который в куски не ложится, не должен ни останавливать проход
+// для всего инстанса, ни выбираться вечно (R-6 CLAB-296): вложение viewer'а
+// с байтом NUL или невалидным UTF-8 база в text не примет, а текст из одних
+// пробелов кусков не даст. Такой артефакт отмечается пройденным без кусков,
+// как и тот, чьи куски не записались. Ошибка до записи — чтение содержимого,
+// контекст — прерывает проход, как раньше: это беда хранилища или воркера,
+// а не артефакта, и следующий проход его подберёт.
+func (ix *Indexer) indexArtifact(ctx context.Context, t postgres.PendingChunkTarget) (bool, error) {
+	q := ix.store.DB()
+	content, _, err := ix.store.BlobContent(ctx, q, t.BlobSHA)
+	if err != nil {
+		return false, err
+	}
+	if t.TaskID == nil {
+		return false, nil
+	}
+	if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+		ix.log.Warn("артефакт не текст в UTF-8 — не индексируется",
+			"artifact_id", t.ID, "kind", t.Kind, "title", t.Title)
+		return false, ix.store.MarkArtifactIndexed(ctx, q, t.ID)
+	}
+	chunks, err := ix.chunksOf(ctx, t, content)
+	if err != nil {
+		return false, err
+	}
+	if err := ix.store.ReplaceArtifactChunks(ctx, q, t.ID, t.ProjectID, *t.TaskID, chunks); err != nil {
+		if ctx.Err() != nil {
+			return false, err
+		}
+		ix.log.Warn("куски артефакта не записаны — артефакт отложен без кусков",
+			"artifact_id", t.ID, "kind", t.Kind, "title", t.Title, "error", err)
+		return false, ix.store.MarkArtifactIndexed(ctx, q, t.ID)
+	}
+	return true, ix.store.MarkArtifactIndexed(ctx, q, t.ID)
+}
+
 // textChunks режет содержимое и считает векторы через тот же кэш, что и код:
 // один и тот же разбор, приложенный к двум задачам, эмбеддится один раз.
 func (ix *Indexer) textChunks(ctx context.Context, t postgres.PendingChunkTarget) ([]postgres.TextChunkInput, error) {
@@ -60,7 +95,10 @@ func (ix *Indexer) textChunks(ctx context.Context, t postgres.PendingChunkTarget
 	if err != nil {
 		return nil, err
 	}
+	return ix.chunksOf(ctx, t, content)
+}
 
+func (ix *Indexer) chunksOf(ctx context.Context, t postgres.PendingChunkTarget, content []byte) ([]postgres.TextChunkInput, error) {
 	// Имя с расширением .md — чтобы куски резались по заголовкам разбора, а
 	// не по счётчику символов: артефакты пишутся структурированным текстом.
 	chunks := Chunks("artifact.md", content, ix.opts.ChunkChars)

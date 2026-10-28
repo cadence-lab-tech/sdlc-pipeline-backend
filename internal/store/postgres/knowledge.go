@@ -23,16 +23,35 @@ type PendingChunkTarget struct {
 	Title     string
 }
 
-func (s *Store) PendingArtifacts(ctx context.Context, q Querier, limit int) ([]PendingChunkTarget, error) {
+// IndexedAttachmentTypes — типы вложений, которые индексатор режет на
+// куски (решение 0064, п. 7): текст, который читается как текст. Остальные
+// вложения — картинки, PDF, архивы — в выборку не попадают вовсе.
+var IndexedAttachmentTypes = []string{"text/markdown", "text/plain", "text/csv", "application/json"}
+
+// PendingArtifacts — артефакты, которые индексатор ещё не проходил.
+//
+// Всё, что не режется, отсеивается здесь, в SQL, а не пропуском в
+// индексаторе: пропущенный без отметки выбирался бы каждый проход, и
+// шестьдесят картинок подряд держали бы очередь при пределе в пятьдесят.
+// Не выбираются файлы по контракту (format binary), вложения вне
+// IndexedAttachmentTypes и вложения крупнее maxTextBytes (по размеру блоба;
+// ноль — без предела), а также всё, что индексатор уже прошёл (indexed_at),
+// в том числе с нулём кусков.
+func (s *Store) PendingArtifacts(ctx context.Context, q Querier, limit, maxTextBytes int) ([]PendingChunkTarget, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := q.Query(ctx, `
 		SELECT a.id, a.project_id, a.task_id, a.blob_sha, a.kind, a.title
 		FROM artifacts a
-		WHERE NOT EXISTS (SELECT 1 FROM artifact_chunks c WHERE c.artifact_id = a.id)
+		JOIN blobs b ON b.sha256 = a.blob_sha
+		WHERE a.indexed_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM artifact_chunks c WHERE c.artifact_id = a.id)
+		  AND CASE WHEN a.is_attachment
+		           THEN a.media_type = ANY($2::text[]) AND ($3 <= 0 OR b.size_bytes <= $3)
+		           ELSE a.format <> 'binary' END
 		ORDER BY a.created_at
-		LIMIT $1`, limit)
+		LIMIT $1`, limit, IndexedAttachmentTypes, maxTextBytes)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -47,6 +66,13 @@ func (s *Store) PendingArtifacts(ctx context.Context, q Querier, limit int) ([]P
 		out = append(out, t)
 	}
 	return out, translate(rows.Err())
+}
+
+// MarkArtifactIndexed отмечает, что индексатор прошёл артефакт: с кусками,
+// без них или отказавшись от него. Повторно его PendingArtifacts не выберет.
+func (s *Store) MarkArtifactIndexed(ctx context.Context, q Querier, id uuid.UUID) error {
+	_, err := q.Exec(ctx, `UPDATE artifacts SET indexed_at = now() WHERE id = $1`, id)
+	return translate(err)
 }
 
 // PendingDocuments — проектные документы с содержимым внутри системы.

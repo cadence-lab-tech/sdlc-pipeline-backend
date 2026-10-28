@@ -105,69 +105,96 @@ func (s *Store) PutBlob(ctx context.Context, q Querier, content []byte, mediaTyp
 
 // PutBlobFrom кладёт содержимое из потока и возвращает его sha256 и размер.
 //
-// sha256 и размер считаются по ходу чтения. Первые байты, до порога inline,
-// читаются в память: кончился поток раньше — содержимое ложится в строку
-// blobs, как у PutBlob. Нет — весь поток спулится во временный файл
-// (каталог — TempDir хранилища) и уходит во внешнее хранилище оттуда. Сверх
-// порога inline память на содержимое не тратится, сколько бы его ни было.
+// Это приём (SpoolBlob) и фиксация (CommitBlob) одним вызовом — для
+// писателей, у которых поток уже под рукой и транзакция их не держит.
+// Транспорт, принимающий файл от клиента, зовёт их порознь: приём — до
+// транзакции, фиксацию — в ней (CLAB-296).
 //
 // Общий предел (BlobLimit) считается по потоку, без доверия к заявленной
 // длине: превышение — payload_too_large, и ни строки, ни объекта, ни спула
 // после него не остаётся. Ошибка читателя (клиент ушёл, предел тела
 // запроса) приходит обёрнутой, с причиной в цепочке.
-//
-// Порядок записи тот же, что у PutBlob: замок по sha — после того, как sha
-// известен, и до похода во внешнее хранилище; объект — до строки.
 func (s *Store) PutBlobFrom(ctx context.Context, q Querier, r io.Reader, mediaType string) (BlobInfo, error) {
+	b, err := s.SpoolBlob(r)
+	if err != nil {
+		return BlobInfo{}, err
+	}
+	defer b.Close()
+	return s.CommitBlob(ctx, q, b, mediaType)
+}
+
+// SpooledBlob — содержимое, принятое из потока, но ещё не записанное:
+// sha256 и размер посчитаны, байты лежат в памяти (не больше порога inline)
+// или в файле спула. Закрывает его тот, кто принял, — после фиксации или
+// вместо неё: Close убирает спул.
+type SpooledBlob struct {
+	SHA  string
+	Size int64
+	// Ровно одно из двух: содержимое inline или путь спула.
+	inline []byte
+	path   string
+}
+
+// Close убирает спул. Забранный хранилищем переименованием уже не на месте
+// — это не ошибка. Повторный вызов безвреден.
+func (b *SpooledBlob) Close() error {
+	if b == nil || b.path == "" {
+		return nil
+	}
+	err := os.Remove(b.path)
+	b.path = ""
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// SpoolBlob принимает содержимое из потока, не трогая базу.
+//
+// Первые байты, до порога inline, читаются в память: кончился поток раньше
+// — содержимое ляжет в строку blobs. Нет — весь поток спулится во временный
+// файл (каталог — TempDir хранилища) с подсчётом sha256 на лету; сверх
+// порога inline память на содержимое не тратится.
+//
+// Здесь нет ни соединения, ни транзакции, ни замка: медленный клиент,
+// который шлёт файл десять минут, не держит ни строку задачи, ни соединение
+// пула (R-1 CLAB-296). Пустое содержимое — отказ: блоб из нуля байт не
+// заводится.
+func (s *Store) SpoolBlob(r io.Reader) (*SpooledBlob, error) {
 	inline := s.inlineLimit()
 	var head bytes.Buffer
 	if _, err := head.ReadFrom(io.LimitReader(r, int64(inline)+1)); err != nil {
-		return BlobInfo{}, readFailed(err)
+		return nil, readFailed(err)
+	}
+	if head.Len() == 0 {
+		return nil, apperr.InvalidInput("содержимое артефакта пустое")
 	}
 	if head.Len() <= inline {
-		return s.putInline(ctx, q, head.Bytes(), mediaType)
+		if limit := s.BlobLimit(); limit > 0 && head.Len() > limit {
+			return nil, blobTooLarge(int64(limit))
+		}
+		return inlineBlob(head.Bytes()), nil
 	}
 	if s.blobs == nil {
 		// Без хранилища крупнее порога inline не принимается вовсе: дальше
 		// читать незачем.
-		return BlobInfo{}, blobTooLarge(int64(s.BlobLimit()))
+		return nil, blobTooLarge(int64(s.BlobLimit()))
 	}
-	return s.putExternal(ctx, q, head.Bytes(), r, mediaType)
+	return s.spoolExternal(head.Bytes(), r)
 }
 
-// putInline пишет содержимое в строку blobs.
+func inlineBlob(content []byte) *SpooledBlob {
+	sum := sha256.Sum256(content)
+	return &SpooledBlob{SHA: hex.EncodeToString(sum[:]), Size: int64(len(content)), inline: content}
+}
+
+// CommitBlob записывает принятое содержимое в транзакции q: строку blobs, а
+// вынесенное — сперва объектом во внешнее хранилище.
 //
 // Перед записью берётся advisory-замок по sha, тот же, что берёт сборщик
 // мусора (CollectBlobs). Он держится до конца этой транзакции — то есть и
 // после того, как ссылающаяся строка вставлена, — и потому сборщик не удалит
 // блоб, на который ссылка вот-вот появится.
-func (s *Store) putInline(ctx context.Context, q Querier, content []byte, mediaType string) (BlobInfo, error) {
-	if len(content) == 0 {
-		return BlobInfo{}, apperr.InvalidInput("содержимое артефакта пустое")
-	}
-	if limit := s.BlobLimit(); limit > 0 && len(content) > limit {
-		return BlobInfo{}, blobTooLarge(int64(limit))
-	}
-	if mediaType == "" {
-		mediaType = "text/markdown"
-	}
-	sum := sha256.Sum256(content)
-	sha := hex.EncodeToString(sum[:])
-	if err := s.lockBlob(ctx, q, sha); err != nil {
-		return BlobInfo{}, err
-	}
-	if _, err := q.Exec(ctx, `
-		INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
-		VALUES ($1, $2, $3, 'inline', $4)
-		ON CONFLICT (sha256) DO NOTHING`,
-		sha, len(content), mediaType, content); err != nil {
-		return BlobInfo{}, translate(err)
-	}
-	return BlobInfo{SHA: sha, Size: int64(len(content))}, nil
-}
-
-// putExternal спулит head и остаток потока во временный файл, считая sha256
-// и размер, и выносит его во внешнее хранилище.
 //
 // Замок по sha берётся до похода в хранилище, а не после, — иначе PutFile
 // успевал бы отработать вне замка. Обратную гонку — объект, унесённый
@@ -180,30 +207,85 @@ func (s *Store) putInline(ctx context.Context, q Querier, content []byte, mediaT
 // одного удаления объекта из хранилища. Обратной задержки нет: сборщик
 // занятый замок не ждёт, а блоб пропускает. Спул к этому моменту уже
 // записан: замок не держится на время приёма содержимого от клиента.
-func (s *Store) putExternal(ctx context.Context, q Querier, head []byte, rest io.Reader, mediaType string) (BlobInfo, error) {
-	limit := int64(s.BlobLimit())
-	if limit > 0 && int64(len(head)) > limit {
-		return BlobInfo{}, blobTooLarge(limit)
+func (s *Store) CommitBlob(ctx context.Context, q Querier, b *SpooledBlob, mediaType string) (BlobInfo, error) {
+	if b == nil || (b.inline == nil && b.path == "") {
+		return BlobInfo{}, apperr.Internal(nil, "содержимое не принято или уже записано")
 	}
 	if mediaType == "" {
 		mediaType = "text/markdown"
 	}
+	if err := s.lockBlob(ctx, q, b.SHA); err != nil {
+		return BlobInfo{}, err
+	}
+	if b.inline != nil {
+		if _, err := q.Exec(ctx, `
+			INSERT INTO blobs (sha256, size_bytes, media_type, storage, content)
+			VALUES ($1, $2, $3, 'inline', $4)
+			ON CONFLICT (sha256) DO NOTHING`,
+			b.SHA, b.Size, mediaType, b.inline); err != nil {
+			return BlobInfo{}, translate(err)
+		}
+		return BlobInfo{SHA: b.SHA, Size: b.Size}, nil
+	}
+	uri, err := s.blobs.PutFile(ctx, b.SHA, b.path, b.Size, mediaType)
+	if err != nil {
+		return BlobInfo{}, apperr.Internal(err, "запись во внешнее хранилище")
+	}
+	if _, err := q.Exec(ctx, `
+		INSERT INTO blobs (sha256, size_bytes, media_type, storage, external_uri)
+		VALUES ($1, $2, $3, 'external', $4)
+		ON CONFLICT (sha256) DO NOTHING`,
+		b.SHA, b.Size, mediaType, uri); err != nil {
+		return BlobInfo{}, translate(err)
+	}
+	return BlobInfo{SHA: b.SHA, Size: b.Size}, nil
+}
+
+// putInline пишет содержимое из памяти в строку blobs.
+func (s *Store) putInline(ctx context.Context, q Querier, content []byte, mediaType string) (BlobInfo, error) {
+	if len(content) == 0 {
+		return BlobInfo{}, apperr.InvalidInput("содержимое артефакта пустое")
+	}
+	if limit := s.BlobLimit(); limit > 0 && len(content) > limit {
+		return BlobInfo{}, blobTooLarge(int64(limit))
+	}
+	return s.CommitBlob(ctx, q, inlineBlob(content), mediaType)
+}
+
+// putExternal спулит head и остаток потока и выносит их во внешнее
+// хранилище; спул убирается всегда.
+func (s *Store) putExternal(ctx context.Context, q Querier, head []byte, rest io.Reader, mediaType string) (BlobInfo, error) {
+	b, err := s.spoolExternal(head, rest)
+	if err != nil {
+		return BlobInfo{}, err
+	}
+	defer b.Close()
+	return s.CommitBlob(ctx, q, b, mediaType)
+}
+
+// spoolExternal спулит head и остаток потока во временный файл, считая
+// sha256 и размер. После отказа и ошибки спула не остаётся.
+func (s *Store) spoolExternal(head []byte, rest io.Reader) (_ *SpooledBlob, err error) {
+	limit := int64(s.BlobLimit())
+	if limit > 0 && int64(len(head)) > limit {
+		return nil, blobTooLarge(limit)
+	}
 
 	spool, err := os.CreateTemp(s.blobs.TempDir(), ".spool-*")
 	if err != nil {
-		return BlobInfo{}, apperr.Internal(err, "временный файл содержимого")
+		return nil, apperr.Internal(err, "временный файл содержимого")
 	}
-	// Спул убирается всегда: после отказа, после ошибки и после записи.
-	// Забранный хранилищем переименованием уже не на месте — это не ошибка.
 	defer func() {
 		_ = spool.Close()
-		_ = os.Remove(spool.Name())
+		if err != nil {
+			_ = os.Remove(spool.Name())
+		}
 	}()
 
 	h := sha256.New()
 	w := io.MultiWriter(spool, h)
 	if _, err := w.Write(head); err != nil {
-		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+		return nil, apperr.Internal(err, "запись временного файла содержимого")
 	}
 	src := &readTap{r: rest}
 	var body io.Reader = src
@@ -215,34 +297,18 @@ func (s *Store) putExternal(ctx context.Context, q Querier, head []byte, rest io
 	n, err := io.Copy(w, body)
 	if err != nil {
 		if src.err != nil {
-			return BlobInfo{}, readFailed(src.err)
+			return nil, readFailed(src.err)
 		}
-		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+		return nil, apperr.Internal(err, "запись временного файла содержимого")
 	}
 	size := int64(len(head)) + n
 	if limit > 0 && size > limit {
-		return BlobInfo{}, blobTooLarge(limit)
+		return nil, blobTooLarge(limit)
 	}
 	if err := spool.Close(); err != nil {
-		return BlobInfo{}, apperr.Internal(err, "запись временного файла содержимого")
+		return nil, apperr.Internal(err, "запись временного файла содержимого")
 	}
-	sha := hex.EncodeToString(h.Sum(nil))
-
-	if err := s.lockBlob(ctx, q, sha); err != nil {
-		return BlobInfo{}, err
-	}
-	uri, err := s.blobs.PutFile(ctx, sha, spool.Name(), size, mediaType)
-	if err != nil {
-		return BlobInfo{}, apperr.Internal(err, "запись во внешнее хранилище")
-	}
-	if _, err := q.Exec(ctx, `
-		INSERT INTO blobs (sha256, size_bytes, media_type, storage, external_uri)
-		VALUES ($1, $2, $3, 'external', $4)
-		ON CONFLICT (sha256) DO NOTHING`,
-		sha, size, mediaType, uri); err != nil {
-		return BlobInfo{}, translate(err)
-	}
-	return BlobInfo{SHA: sha, Size: size}, nil
+	return &SpooledBlob{SHA: hex.EncodeToString(h.Sum(nil)), Size: size, path: spool.Name()}, nil
 }
 
 // readTap запоминает ошибку читателя: io.Copy возвращает и ошибки чтения, и
@@ -332,7 +398,8 @@ func (s *Store) BlobContent(ctx context.Context, q Querier, sha string) ([]byte,
 const artifactSelect = `
 	SELECT a.id, a.task_id, a.project_id, a.stage_run_id, a.kind, a.title, a.format,
 	       a.blob_sha, b.size_bytes, a.version, a.supersedes_id, a.status,
-	       a.produced_by, a.approved_by, a.meta, a.created_at
+	       a.produced_by, a.approved_by, a.meta, a.created_at,
+	       a.is_attachment, a.file_name, a.media_type
 	FROM artifacts a
 	JOIN blobs b ON b.sha256 = a.blob_sha`
 
@@ -340,7 +407,8 @@ func scanArtifact(row interface{ Scan(...any) error }) (domain.Artifact, error) 
 	var a domain.Artifact
 	err := row.Scan(&a.ID, &a.TaskID, &a.ProjectID, &a.StageRunID, &a.Kind, &a.Title,
 		&a.Format, &a.BlobSHA, &a.SizeBytes, &a.Version, &a.SupersedesID, &a.Status,
-		&a.ProducedBy, &a.ApprovedBy, &a.Meta, &a.CreatedAt)
+		&a.ProducedBy, &a.ApprovedBy, &a.Meta, &a.CreatedAt,
+		&a.IsAttachment, &a.FileName, &a.MediaType)
 	return a, err
 }
 
@@ -370,13 +438,20 @@ type ArtifactCodeRef struct {
 }
 
 type CreateArtifactInput struct {
-	Task         domain.Task
-	StageRunID   *uuid.UUID
-	Kind         string
-	Title        string
-	Format       string
-	Content      []byte
-	MediaType    string
+	Task       domain.Task
+	StageRunID *uuid.UUID
+	Kind       string
+	Title      string
+	Format     string
+	Content    []byte
+	MediaType  string
+	// Blob — файл, принятый до транзакции (SpoolBlob); тогда Content не
+	// читается, а FileName и MediaType ложатся и на артефакт.
+	Blob     *SpooledBlob
+	FileName string
+	// IsAttachment — вложение (решение 0064): без прогона, заменяет только
+	// вложение той же задачи и только актуальную версию.
+	IsAttachment bool
 	SupersedesID *uuid.UUID
 	Status       string
 	Meta         json.RawMessage
@@ -391,28 +466,60 @@ type CreateArtifactInput struct {
 // с прежней через supersedes_id, а прежняя переводится в superseded. Так
 // история этапа остаётся воспроизводимой.
 func (s *Store) CreateArtifact(ctx context.Context, tx pgx.Tx, in CreateArtifactInput) (domain.Artifact, error) {
-	sha, err := s.PutBlob(ctx, tx, in.Content, in.MediaType)
-	if err != nil {
-		return domain.Artifact{}, err
-	}
-
+	// Заменяемая версия проверяется до записи содержимого: отказ не должен
+	// оставлять ни строки blobs, ни объекта во внешнем хранилище.
 	version := 1
 	if in.SupersedesID != nil {
 		var prevTask uuid.UUID
 		var prevVersion int
+		var prevAttachment bool
+		var prevStatus string
 		if err := tx.QueryRow(ctx,
-			`SELECT task_id, version FROM artifacts WHERE id = $1 FOR UPDATE`,
-			*in.SupersedesID).Scan(&prevTask, &prevVersion); err != nil {
+			`SELECT task_id, version, is_attachment, status FROM artifacts WHERE id = $1 FOR UPDATE`,
+			*in.SupersedesID).Scan(&prevTask, &prevVersion, &prevAttachment, &prevStatus); err != nil {
 			return domain.Artifact{}, notFound(err, "артефакт, который заменяется, не найден")
 		}
 		if prevTask != in.Task.ID {
 			return domain.Artifact{}, apperr.InvalidInput(
 				"нельзя заменить артефакт из другой задачи")
 		}
+		// Вложение и результат этапа друг друга не заменяют: иначе файл от
+		// viewer перекрыл бы сданный этапом артефакт, а сдача этапа — файл.
+		switch {
+		case in.IsAttachment && !prevAttachment:
+			return domain.Artifact{}, apperr.InvalidInput(
+				"вложение заменяет только вложение, а %s — артефакт этапа", in.SupersedesID)
+		case !in.IsAttachment && prevAttachment:
+			return domain.Artifact{}, apperr.InvalidInput(
+				"%s — вложение; новая версия вложения — POST /v1/tasks/<ключ>/attachments", in.SupersedesID)
+		}
+		// Две замены одной версии вложения: вторая, дождавшись FOR UPDATE,
+		// видит её перекрытой и не плодит две «вторые версии».
+		if in.IsAttachment && prevStatus == domain.ArtifactSuperseded {
+			return domain.Artifact{}, apperr.Conflict(
+				"версия %d вложения уже заменена — заменять надо актуальную", prevVersion).
+				WithDetails(map[string]any{"supersedes_id": in.SupersedesID.String()})
+		}
 		version = prevVersion + 1
 		if _, err := tx.Exec(ctx,
 			`UPDATE artifacts SET status = 'superseded' WHERE id = $1`, *in.SupersedesID); err != nil {
 			return domain.Artifact{}, translate(err)
+		}
+	}
+
+	var sha string
+	var fileName, fileType *string
+	if in.Blob != nil {
+		info, err := s.CommitBlob(ctx, tx, in.Blob, in.MediaType)
+		if err != nil {
+			return domain.Artifact{}, err
+		}
+		sha = info.SHA
+		fileName, fileType = &in.FileName, &in.MediaType
+	} else {
+		var err error
+		if sha, err = s.PutBlob(ctx, tx, in.Content, in.MediaType); err != nil {
+			return domain.Artifact{}, err
 		}
 	}
 
@@ -432,11 +539,13 @@ func (s *Store) CreateArtifact(ctx context.Context, tx pgx.Tx, in CreateArtifact
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO artifacts (task_id, project_id, stage_run_id, kind, title, format,
-		                       blob_sha, version, supersedes_id, status, produced_by, meta)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		                       blob_sha, version, supersedes_id, status, produced_by, meta,
+		                       is_attachment, file_name, media_type)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id`,
 		in.Task.ID, in.Task.ProjectID, in.StageRunID, in.Kind, in.Title, format,
 		sha, version, in.SupersedesID, status, in.ProducedBy, meta,
+		in.IsAttachment, fileName, fileType,
 	).Scan(&id); err != nil {
 		return domain.Artifact{}, translate(err)
 	}
@@ -479,9 +588,13 @@ func (s *Store) CreateArtifact(ctx context.Context, tx pgx.Tx, in CreateArtifact
 
 // ListArtifacts отдаёт артефакты задачи. includeSuperseded=false оставляет
 // только актуальные версии — именно их видит агент и проверяют гейты.
+//
+// Вложений здесь нет (R-5 CLAB-296): эту выборку читают гейты, перепроверка,
+// вход этапа и карточка, и вложение не должно засчитываться ни одним из
+// них — ни нынешним, ни будущим. Вложения читает ListAttachments.
 func (s *Store) ListArtifacts(ctx context.Context, q Querier, taskID uuid.UUID, includeSuperseded bool) ([]domain.Artifact, error) {
 	rows, err := q.Query(ctx, artifactSelect+`
-		WHERE a.task_id = $1 AND ($2 OR a.status <> 'superseded')
+		WHERE a.task_id = $1 AND NOT a.is_attachment AND ($2 OR a.status <> 'superseded')
 		ORDER BY a.created_at`, taskID, includeSuperseded)
 	if err != nil {
 		return nil, translate(err)
@@ -495,6 +608,42 @@ func (s *Store) ListArtifacts(ctx context.Context, q Querier, taskID uuid.UUID, 
 			return nil, translate(err)
 		}
 		out = append(out, a)
+	}
+	return out, translate(rows.Err())
+}
+
+// Attachment — вложение задачи с хэндлом того, кто его приложил: список
+// вложений показывают людям и агенту, и «кто» в нём — имя, а не UUID.
+type Attachment struct {
+	domain.Artifact
+	ProducedByHandle string
+}
+
+// ListAttachments — вложения задачи; includeSuperseded=false оставляет
+// актуальные версии. Отдельная выборка, а не флаг ListArtifacts: потребитель
+// артефактов этапа не может получить вложение по ошибке.
+func (s *Store) ListAttachments(ctx context.Context, q Querier, taskID uuid.UUID, includeSuperseded bool) ([]Attachment, error) {
+	rows, err := q.Query(ctx, `
+		SELECT x.*, coalesce(p.handle, '') FROM (`+artifactSelect+`
+		WHERE a.task_id = $1 AND a.is_attachment AND ($2 OR a.status <> 'superseded')) x
+		LEFT JOIN principals p ON p.id = x.produced_by
+		ORDER BY x.created_at, x.version`, taskID, includeSuperseded)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []Attachment{}
+	for rows.Next() {
+		var at Attachment
+		a := &at.Artifact
+		if err := rows.Scan(&a.ID, &a.TaskID, &a.ProjectID, &a.StageRunID, &a.Kind, &a.Title,
+			&a.Format, &a.BlobSHA, &a.SizeBytes, &a.Version, &a.SupersedesID, &a.Status,
+			&a.ProducedBy, &a.ApprovedBy, &a.Meta, &a.CreatedAt,
+			&a.IsAttachment, &a.FileName, &a.MediaType, &at.ProducedByHandle); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, at)
 	}
 	return out, translate(rows.Err())
 }
@@ -526,7 +675,7 @@ func (s *Store) LatestArtifactOfKind(ctx context.Context, q Querier, taskID uuid
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `
 		SELECT id FROM artifacts
-		WHERE task_id = $1 AND kind = $2 AND status <> 'superseded'
+		WHERE task_id = $1 AND kind = $2 AND status <> 'superseded' AND NOT is_attachment
 		ORDER BY version DESC, created_at DESC
 		LIMIT 1`, taskID, kind).Scan(&id)
 	if err != nil {
