@@ -129,6 +129,24 @@ func TestSanitizeAuditParamsURLs(t *testing.T) {
 		{"две ссылки в тексте",
 			`см. "https://a:PWMARK@h1/x" и <https://h2/y?token=TOKMARK>`,
 			`см. "https://[redacted]@h1/x" и <https://h2/y?token=[redacted]>`},
+		// AC-5: ссылки без пробела между ними и ссылка внутри ссылки —
+		// вторая лежит в «пути» первой, но чистится так же.
+		{"две ссылки через запятую",
+			"из https://a:PWMARK@x/r.git,https://c:PWMARK2@y/r.git и всё",
+			"из https://[redacted]@x/r.git,https://[redacted]@y/r.git и всё"},
+		{"две ссылки через точку с запятой", "https://a:PWMARK@x/r.git;https://c:PWMARK2@y/r.git?token=TOKMARK",
+			"https://[redacted]@x/r.git;https://[redacted]@y/r.git?token=[redacted]"},
+		{"ссылка в параметре запроса", "https://proxy.example/go?u=https://user:PWMARK@host/x%3Fa&v=1",
+			"https://proxy.example/go?u=https://[redacted]@host/x%3Fa&v=1"},
+		{"ссылка во фрагменте", "https://app.example.com/#/open/https://user:PWMARK@host/x",
+			"https://app.example.com/#/open/https://[redacted]@host/x"},
+		// Порт, IPv6, «@» не в authority: хост и порт остаются, лишнего не режем.
+		{"IPv6 с userinfo", "https://u:PWMARK@[2001:db8::1]:8443/x.git", "https://[redacted]@[2001:db8::1]:8443/x.git"},
+		{"IPv6 без userinfo", "https://[::1]:8080/x?a=1", "https://[::1]:8080/x?a=1"},
+		{"процентное кодирование в userinfo", "https://us%40er:p%40PWMARK@host/p", "https://[redacted]@host/p"},
+		{"@ в пути и запросе", "https://host/path@notuser/x?email=a@b.c&v=1", "https://host/path@notuser/x?email=a@b.c&v=1"},
+		{"@ только во фрагменте", "https://host#f@x", "https://host#f@x"},
+		{"порт без пути с секретом", "https://host:8080?token=TOKMARK", "https://host:8080?token=[redacted]"},
 		// AC-8: ссылка, которую не берёт url.Parse.
 		{"разбор не берёт", "https://u:PARSEMARK@host:99999x/p?token=PARSEMARK2", "https://[redacted]@host:99999x/p?token=[redacted]"},
 		{"разбор не берёт: процент", "https://u:PARSEMARK@host/%zz?password=PARSEMARK2&q=%", "https://[redacted]@host/%zz?password=[redacted]&q=%"},

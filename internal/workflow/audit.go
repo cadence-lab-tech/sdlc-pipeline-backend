@@ -296,20 +296,24 @@ func redactURL(u string) string {
 	if at := strings.LastIndexByte(authority, '@'); at > 0 {
 		authority = auditRedacted + authority[at:]
 	}
+	// Ссылка внутри ссылки — вторая через запятую или точку с запятой без
+	// пробела, адрес возврата в параметре запроса (?next=https://u:p@h/) —
+	// чистится так же: redactURLs идёт по остатку, он короче, рекурсия
+	// кончается.
 	var b strings.Builder
 	b.Grow(len(u))
 	b.WriteString(head)
 	b.WriteString(authority)
-	b.WriteString(path)
+	b.WriteString(redactURLs(path))
 	if hasQuery {
 		b.WriteByte('?')
-		b.WriteString(redactURLParams(query))
+		b.WriteString(redactURLs(redactURLParams(query)))
 	}
 	if hasFragment {
 		// Фрагмент вида k=v&… (неявный поток OAuth) — как строка запроса;
 		// сегмент без "=" не трогается.
 		b.WriteByte('#')
-		b.WriteString(redactURLParams(fragment))
+		b.WriteString(redactURLs(redactURLParams(fragment)))
 	}
 	return b.String()
 }
