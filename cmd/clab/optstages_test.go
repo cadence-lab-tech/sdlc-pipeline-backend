@@ -14,7 +14,7 @@ import (
 )
 
 // CLAB-316: необязательные этапы цикла (решение 0066) в clab — флаг --stage,
-// строка «Этапы», назначение перехода с пропуском, строка «пропущено».
+// строка «Выбор этапов», назначение перехода с пропуском, строка «пропущено».
 
 // Ответы сервера с выбором этапов: optional_stages есть всегда, пусть {}.
 const (
@@ -58,7 +58,7 @@ func TestCreateStageBody(t *testing.T) {
 		!equalJSON(rec.body, map[string]any{"title": "t", "optional_stages": map[string]bool{"design": false}}) {
 		t.Fatalf("%s %s %v", rec.method, rec.path, rec.body)
 	}
-	if !strings.Contains(out, "\nЭтапы: design выкл, docs вкл\n") {
+	if !strings.Contains(out, "\nВыбор этапов: design выкл, docs вкл\n") {
 		t.Fatalf("нет строки этапов:\n%s", out)
 	}
 
@@ -79,12 +79,12 @@ func TestCreateWithoutStage(t *testing.T) {
 	if _, has := rec.body["optional_stages"]; has {
 		t.Fatalf("ключ optional_stages в теле: %v", rec.body)
 	}
-	if strings.Contains(out, "Этапы:") {
+	if strings.Contains(out, "Выбор этапов:") {
 		t.Fatalf("строка этапов при пустом наборе:\n%s", out)
 	}
 	// Умолчания цикла видны и без --stage.
 	out, err, _ = runCreate(t, http.StatusCreated, taskDesignOff)
-	if err != nil || !strings.Contains(out, "Этапы: design выкл, docs вкл") {
+	if err != nil || !strings.Contains(out, "Выбор этапов: design выкл, docs вкл") {
 		t.Fatalf("умолчания цикла: %v\n%s", err, out)
 	}
 }
@@ -145,7 +145,7 @@ func TestEditStageBody(t *testing.T) {
 		!equalJSON(rec.body, map[string]any{"optional_stages": map[string]bool{"design": true}}) {
 		t.Fatalf("%d %s %s %v", rec.calls, rec.method, rec.path, rec.body)
 	}
-	if !strings.Contains(out, "Этапы: design вкл\n") {
+	if !strings.Contains(out, "Выбор этапов: design вкл\n") {
 		t.Fatalf("нет строки этапов:\n%s", out)
 	}
 }
@@ -177,7 +177,7 @@ func TestEditStageRefusals(t *testing.T) {
 		if err == nil || rec.calls != 1 || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%d: ошибка %v, запросов %d", tc.status, err, rec.calls)
 		}
-		if strings.Contains(out, "Этапы:") || strings.Contains(out, "CLAB-1") {
+		if strings.Contains(out, "Выбор этапов:") || strings.Contains(out, "CLAB-1") {
 			t.Fatalf("%d: напечатан успех:\n%s", tc.status, out)
 		}
 	}
@@ -204,7 +204,7 @@ func TestOldServerLosesStagesLoudly(t *testing.T) {
 		t.Fatalf("create без --stage: %v %q", err, out)
 	}
 	out, err, _ = runEdit(t, http.StatusOK, taskOldServer, "--priority", "high")
-	if err != nil || strings.Contains(out, "Этапы:") {
+	if err != nil || strings.Contains(out, "Выбор этапов:") {
 		t.Fatalf("edit без --stage: %v\n%s", err, out)
 	}
 }
@@ -285,11 +285,11 @@ func TestShowStagesLineAndTransitions(t *testing.T) {
 		}
 		return -1
 	}
-	ctxLine, stagesLine, transLine := idx("Контекст:"), idx("Этапы: "), idx("Переходы:")
+	ctxLine, stagesLine, transLine := idx("Контекст:"), idx("Выбор этапов: "), idx("Переходы:")
 	if stagesLine != ctxLine+1 || stagesLine < 0 || transLine < stagesLine {
 		t.Fatalf("строка этапов не после «Контекст»:\n%s", out)
 	}
-	if lines[stagesLine] != "Этапы: design выкл, docs вкл" {
+	if lines[stagesLine] != "Выбор этапов: design выкл, docs вкл" {
 		t.Fatalf("строка этапов: %q", lines[stagesLine])
 	}
 	for _, want := range []string{
@@ -306,7 +306,7 @@ func TestShowStagesLineAndTransitions(t *testing.T) {
 	empty := claimReply(t, func(r map[string]any) { r["task"].(map[string]any)["optional_stages"] = map[string]bool{} })
 	c, _ = newInviteClient(t, http.StatusOK, empty)
 	out, _, err = capture(t, func() error { return cmdShow(context.Background(), c, []string{"CLAB-146"}) })
-	if err != nil || strings.Contains(out, "Этапы:") {
+	if err != nil || strings.Contains(out, "Выбор этапов:") {
 		t.Fatalf("пустой набор: %v\n%s", err, out)
 	}
 }
@@ -319,7 +319,7 @@ func TestClaimStagesTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Этапы: design выкл, docs вкл\n",
+		"Выбор этапов: design выкл, docs вкл\n",
 		"  analysis_done → development (пропуск: design)   гейты: approval\n",
 		"  reject_to_design → недоступен: этап design выключен у задачи   гейты: problem_report\n",
 		"  dev_done → testing   гейты: artifacts\n",
@@ -461,7 +461,7 @@ func jsonEqualStrings(t *testing.T, a, b string) bool {
 func TestReadCommandsOldServerShape(t *testing.T) {
 	withJSON(t, false)
 	out, _, err, _ := runClaim(t, claimReply(t, nil))
-	if err != nil || strings.Contains(out, "Этапы:") || strings.Contains(out, "пропуск") || strings.Contains(out, "недоступен") ||
+	if err != nil || strings.Contains(out, "Выбор этапов:") || strings.Contains(out, "пропуск") || strings.Contains(out, "недоступен") ||
 		!strings.Contains(out, "  dev_done → testing   гейты: artifacts\n") {
 		t.Fatalf("claim: %v\n%s", err, out)
 	}

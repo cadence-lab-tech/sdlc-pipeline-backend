@@ -1,7 +1,7 @@
 package main
 
 // Необязательные этапы цикла (решение 0066): флаг --stage у create и edit,
-// строка «Этапы» в сводке, назначение перехода с пропуском в gates и claim,
+// строка «Выбор этапов» в сводке, назначение перехода с пропуском в gates и claim,
 // строка «пропущено» после transition. Какие ключи — необязательные этапы
 // цикла задачи, проверяет сервер: CLI знает только форму <статус>=on|off.
 
@@ -95,7 +95,7 @@ type taskStages struct {
 	OptionalStages map[string]bool `json:"optional_stages"`
 }
 
-// line — «Этапы: design выкл, docs вкл», ключи по алфавиту: порядок позиций
+// line — «Выбор этапов: design выкл, docs вкл», ключи по алфавиту: порядок позиций
 // в цикле CLI не знает. Пустой набор — строки нет.
 func (s taskStages) line() string {
 	if len(s.OptionalStages) == 0 {
@@ -114,7 +114,7 @@ func (s taskStages) line() string {
 		}
 		parts = append(parts, k+" "+state)
 	}
-	return "Этапы: " + strings.Join(parts, ", ")
+	return "Выбор этапов: " + strings.Join(parts, ", ")
 }
 
 // printStagesLine печатает строку выбора этапов из ответа с задачей; пусто
