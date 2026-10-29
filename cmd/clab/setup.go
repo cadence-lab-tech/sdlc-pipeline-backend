@@ -96,17 +96,24 @@ type setupReport struct {
 
 func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, scope, agent, name string
-	var dryRun, force bool
-	_, err := flags("setup", args, func(fs *flag.FlagSet) {
+	var dryRun, force, plugin bool
+	fs, err := flags("setup", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта; иначе SDLC_PROJECT или проект по git remote")
 		fs.StringVar(&scope, "scope", "local", "local — набор в .claude/ корня проекта и MCP для этого каталога; user — набор в ~/.claude/ и MCP везде; project — MCP в .mcp.json (только без токена)")
 		fs.StringVar(&agent, "agent", "claude", "claude — подключить Claude Code; other — только напечатать конфигурацию MCP для другого агента")
 		fs.StringVar(&name, "name", "sdlc", "имя MCP-сервера у агента")
 		fs.BoolVar(&dryRun, "dry-run", false, "показать, что будет сделано, ничего не меняя и не вызывая claude")
 		fs.BoolVar(&force, "force", false, "перезаписать и файлы набора, изменённые после установки")
+		fs.BoolVar(&plugin, "plugin", false, "только плагин Claude clab-plugin: вшит в clab, ставится в Claude в области user; без входа, проекта и сети, сочетается только с --dry-run")
 	})
 	if err != nil {
 		return err
+	}
+	if plugin {
+		if err := pluginOnly(fs); err != nil {
+			return err
+		}
+		return cmdSetupPlugin(ctx, dryRun)
 	}
 	switch scope {
 	case "local", "user", "project":
