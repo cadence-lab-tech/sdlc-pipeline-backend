@@ -314,12 +314,16 @@ type statusRequest struct {
 	IsTerminal  *bool   `json:"is_terminal"`
 	WipLimit    *int    `json:"wip_limit"`
 	Color       *string `json:"color"`
+	// Необязательный этап и его умолчание (решение 0066, п. 2).
+	IsOptional       *bool `json:"is_optional"`
+	EnabledByDefault *bool `json:"enabled_by_default"`
 }
 
 func (r statusRequest) toInput() postgres.StatusInput {
 	return postgres.StatusInput{
 		Key: r.Key, Name: r.Name, Description: r.Description, Category: r.Category,
 		Position: r.Position, IsInitial: r.IsInitial, IsTerminal: r.IsTerminal,
+		IsOptional: r.IsOptional, EnabledByDefault: r.EnabledByDefault,
 		WipLimit: r.WipLimit, Color: r.Color,
 	}
 }

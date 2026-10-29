@@ -66,7 +66,7 @@ func (s *Store) ListActiveWorkflows(ctx context.Context, q Querier, projectID uu
 func (s *Store) ListStatuses(ctx context.Context, q Querier, workflowID uuid.UUID) ([]domain.Status, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, workflow_id, key, name, description, category, position,
-		       is_initial, is_terminal, wip_limit, color
+		       is_initial, is_terminal, is_optional, enabled_by_default, wip_limit, color
 		FROM workflow_statuses WHERE workflow_id = $1 ORDER BY position`, workflowID)
 	if err != nil {
 		return nil, translate(err)
@@ -78,7 +78,7 @@ func (s *Store) ListStatuses(ctx context.Context, q Querier, workflowID uuid.UUI
 	for rows.Next() {
 		var st domain.Status
 		if err := rows.Scan(&st.ID, &st.WorkflowID, &st.Key, &st.Name, &st.Description,
-			&st.Category, &st.Position, &st.IsInitial, &st.IsTerminal, &st.WipLimit, &st.Color); err != nil {
+			&st.Category, &st.Position, &st.IsInitial, &st.IsTerminal, &st.IsOptional, &st.EnabledByDefault, &st.WipLimit, &st.Color); err != nil {
 			return nil, translate(err)
 		}
 		byID[st.ID] = len(statuses)
@@ -229,10 +229,10 @@ func (s *Store) GetStatus(ctx context.Context, q Querier, statusID uuid.UUID) (d
 	var st domain.Status
 	err := q.QueryRow(ctx, `
 		SELECT id, workflow_id, key, name, description, category, position,
-		       is_initial, is_terminal, wip_limit, color
+		       is_initial, is_terminal, is_optional, enabled_by_default, wip_limit, color
 		FROM workflow_statuses WHERE id = $1`, statusID,
 	).Scan(&st.ID, &st.WorkflowID, &st.Key, &st.Name, &st.Description, &st.Category,
-		&st.Position, &st.IsInitial, &st.IsTerminal, &st.WipLimit, &st.Color)
+		&st.Position, &st.IsInitial, &st.IsTerminal, &st.IsOptional, &st.EnabledByDefault, &st.WipLimit, &st.Color)
 	if err != nil {
 		return st, notFound(err, "статус не найден")
 	}
@@ -243,10 +243,10 @@ func (s *Store) InitialStatus(ctx context.Context, q Querier, workflowID uuid.UU
 	var st domain.Status
 	err := q.QueryRow(ctx, `
 		SELECT id, workflow_id, key, name, description, category, position,
-		       is_initial, is_terminal, wip_limit, color
+		       is_initial, is_terminal, is_optional, enabled_by_default, wip_limit, color
 		FROM workflow_statuses WHERE workflow_id = $1 AND is_initial`, workflowID,
 	).Scan(&st.ID, &st.WorkflowID, &st.Key, &st.Name, &st.Description, &st.Category,
-		&st.Position, &st.IsInitial, &st.IsTerminal, &st.WipLimit, &st.Color)
+		&st.Position, &st.IsInitial, &st.IsTerminal, &st.IsOptional, &st.EnabledByDefault, &st.WipLimit, &st.Color)
 	if err != nil {
 		return st, notFound(err, "у цикла не задан начальный статус")
 	}

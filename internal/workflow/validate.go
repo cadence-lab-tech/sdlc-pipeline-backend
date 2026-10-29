@@ -192,6 +192,12 @@ func validateWorkflow(wf domain.Workflow, implemented func(string) bool, strict 
 		}
 	}
 
+	// Необязательные этапы (решение 0066): цикл без них отсюда ничего не
+	// получает, и его вердикт тот же, что до появления отметки.
+	optProblems, optWarnings := validateOptional(wf)
+	v.Problems = append(v.Problems, optProblems...)
+	v.Warnings = append(v.Warnings, optWarnings...)
+
 	v.Valid = len(v.Problems) == 0
 	return v
 }
