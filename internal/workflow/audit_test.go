@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Параметры журнала без тел и секретов (CLAB-210, критерии 12–14): секреты
@@ -185,6 +186,12 @@ func TestSecretURLParamNames(t *testing.T) {
 		"key", "apikey", "sig", "signature", "passwd", "pwd", "auth", "credential", "session",
 		"sas_token", "upload_token", "X-Goog-Signature", "client_secret_v2", "db_password", "aws_credentials",
 		"X-Amz-Date", "x-amz-anything", "TOKEN", "Sig", "ApiKey",
+		// Возврат с merge (CLAB-226, круг 2): имена вне прежнего перечня и
+		// их родня — с дефисом, в CamelCase, с приставкой.
+		"api-key", "x-api-key", "X-API-KEY", "Api_Key", "access_key", "AccessKeyId", "AWSAccessKeyId",
+		"aws_secret_access_key", "secret_key", "jwt", "id_jwt", "pass", "bearer", "bearer_token",
+		"private-key", "PHPSESSID", "jsessionid", "session_id", "sid", "otp", "hmac", "authkey", "auth_key",
+		"user_passw", "X-Amz-Security-Token", "x_amz_date",
 	}
 	for k := range auditSecretKeys {
 		secret = append(secret, k)
@@ -194,7 +201,11 @@ func TestSecretURLParamNames(t *testing.T) {
 			t.Errorf("%q не считается секретным", name)
 		}
 	}
-	for _, name := range []string{"v", "page", "state", "ref", "q", "response-content-type", "keyword", "monkey", "author"} {
+	for _, name := range []string{
+		"v", "page", "state", "ref", "q", "response-content-type", "keyword", "monkey", "author",
+		"passport", "bypass", "compass", "sidebar", "session_count", "signed_in", "keyboard", "keys",
+		"accessibility", "author_id", "design", "codec", "zip_code", "redirect_uri", "next", "email",
+	} {
 		if secretURLParam(name) {
 			t.Errorf("%q считается секретным", name)
 		}
@@ -240,5 +251,135 @@ func TestSanitizeAuditParamsURLsNested(t *testing.T) {
 	sum := sha256.Sum256([]byte(long))
 	if out.Description.Size != len(long) || out.Description.SHA256 != hex.EncodeToString(sum[:]) || out.Token != auditRedacted {
 		t.Fatalf("длинная строка или ключ-секрет: %s", text)
+	}
+}
+
+// Возврат с merge (CLAB-226, круг 2): ссылки без схемы, процентная запись,
+// неэкранированные "/" и кавычка в пароле.
+func TestSanitizeAuditParamsURLsAwkward(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		// Ссылки без схемы.
+		{"userinfo без схемы", "u:PWMARK@host/x", "[redacted]@host/x"},
+		{"userinfo без схемы с портом", "u:PWMARK@git.example.com:8443", "[redacted]@git.example.com:8443"},
+		{"userinfo без схемы в тексте",
+			"клон из alice:ghp_PWMARK@github.com/acme/app.git, ветка main",
+			"клон из [redacted]@github.com/acme/app.git, ветка main"},
+		{"userinfo без схемы с @ в пароле", "u:p@PWMARK@host/x", "[redacted]@host/x"},
+		{"userinfo без схемы и запрос", "u:PWMARK@host/x?token=TOKMARK&v=1", "[redacted]@host/x?token=[redacted]&v=1"},
+		{"userinfo без схемы в параметре ссылки", "https://h/go?to=u:PWMARK@host/x&v=1", "https://h/go?to=[redacted]@host/x&v=1"},
+		{"ссылка от корня схемы", "//u:PWMARK@host", "//[redacted]@host"},
+		{"ссылка от корня схемы в тексте", "см. //u:PWMARK@host/x и всё", "см. //[redacted]@host/x и всё"},
+		{"запрос без схемы", "github.com/x?token=TOKMARK&v=1", "github.com/x?token=[redacted]&v=1"},
+		{"запрос и фрагмент без схемы", "/cb?code=CODEMARK&state=s#id_token=IDMARK&x=1", "/cb?code=[redacted]&state=s#id_token=[redacted]&x=1"},
+		{"фрагмент без схемы", "app.example.com/cb#access_token=FRAGMARK&state=x", "app.example.com/cb#access_token=[redacted]&state=x"},
+		// Процентная запись.
+		{"закодированная ссылка в параметре",
+			"https://h/go?next=https%3A%2F%2Fuser%3APWMARK%40host%2Fx&v=1",
+			"https://h/go?next=https%3A%2F%2F%5Bredacted%5D%40host%2Fx&v=1"},
+		{"закодированная ссылка с запросом",
+			"https://h/cb?next=%2Fapp%3Ftoken%3DTOKMARK%26v%3D1&v=2",
+			"https://h/cb?next=%2Fapp%3Ftoken%3D%5Bredacted%5D%26v%3D1&v=2"},
+		{"двойная процентная запись",
+			"https://h/go?next=https%253A%252F%252Fu%253APWMARK%2540h",
+			"https://h/go?next=https%253A%252F%252F%255Bredacted%255D%2540h"},
+		{"закодированная ссылка строкой целиком", "https%3A%2F%2Fu%3APWMARK%40host%2Fx", "https%3A%2F%2F%5Bredacted%5D%40host%2Fx"},
+		{"закодированное =", "https://h/x?token%3DTOKMARK&v=1", "https://h/x?token%3D[redacted]&v=1"},
+		{"закодированное = в нижнем регистре", "https://h/x?a=1&api_key%3dKEYMARK", "https://h/x?a=1&api_key%3d[redacted]"},
+		{"закодированные параметры строкой целиком", "a%3D1%26token%3DTOKMARK", "a%3D1%26token%3D%5Bredacted%5D"},
+		// Неэкранированные "/" и кавычка в пароле.
+		{"/ в пароле", "https://u:p/PWMARK@h/x", "https://[redacted]@h/x"},
+		{"кавычка в пароле", `https://u:p"PWMARK@h/x?token=TOKMARK`, "https://[redacted]@h/x?token=[redacted]"},
+		{"апостроф в пароле", "https://u:p'PWMARK@h", "https://[redacted]@h"},
+		{"/ в пароле, ссылка в тексте", "из https://u:a/b/PWMARK@h/x и всё", "из https://[redacted]@h/x и всё"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := SanitizeAuditParams(map[string]any{"url": tc.in})
+			var out map[string]string
+			if err := json.Unmarshal(raw, &out); err != nil {
+				t.Fatal(err)
+			}
+			if out["url"] != tc.want {
+				t.Fatalf("\nвход    %s\nвыход   %s\nожидали %s", tc.in, out["url"], tc.want)
+			}
+			for _, marker := range []string{"PWMARK", "TOKMARK", "CODEMARK", "IDMARK", "FRAGMARK", "KEYMARK"} {
+				if strings.Contains(string(raw), marker) {
+					t.Fatalf("в параметрах осталось %q: %s", marker, raw)
+				}
+			}
+		})
+	}
+}
+
+// Обычный текст без секретов проходит байт в байт (CLAB-226, круг 2):
+// почта, время, host:port, путь с «@», проценты, «//» и «#» в тексте.
+func TestSanitizeAuditParamsPlainTextUntouched(t *testing.T) {
+	for _, s := range []string{
+		"ivan@example.com",
+		"Почта:ivan@example.com",
+		"Email:ivan@example.com, телефон 12:30",
+		"mailto:ivan@example.com",
+		"встреча в 12:30, комната 4; перенос на 14:00",
+		"localhost:8080",
+		"db.internal:5432/cadence",
+		"user@host:22",
+		"ratio 3:2 @ 60fps",
+		"http://localhost:3000/@vite/client",
+		"https://medium.com/@user/post-1",
+		`["https://h:8080","me@x.io"]`,
+		"a//b и // комментарий",
+		"C# и issue #12, раздел #top",
+		"что?ключ=1",
+		"100% готово, скидка 50%25",
+		"%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82",
+		"https://example.com/search?q=%D0%BF&page=2&next=%2Fhome",
+		"https://h/?passport=1&bypass=2&pass=&token=",
+		"git@github.com:acme/app.git",
+		"owner/name@v1.2.3",
+		"https://[::1]:8080/x?a=1#f@x",
+	} {
+		raw := SanitizeAuditParams(map[string]any{"s": s})
+		var out map[string]string
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out["s"] != s {
+			t.Errorf("строка без секретов изменилась:\nвход  %s\nвыход %s", s, out["s"])
+		}
+	}
+}
+
+// Строка без "@", "=" и "%" не меняется никогда: вырезать в ней нечего — ни
+// userinfo, ни значения параметра. Разбор не паникует на любом входе.
+func FuzzRedactURLs(f *testing.F) {
+	for _, s := range []string{
+		"https://u:p@h/x?token=t#a=b", "//u:p/s@h", "u:p@h:1", "a%3D1%26token%3Dx",
+		"https%253A%252F%252Fu%253Ap%2540h", `https://u:p"s@h`, "https://", "://@", "%", "%%3D=",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		out := redactURLs(s)
+		if !strings.ContainsAny(s, "@=%") && out != s {
+			t.Fatalf("строка без секретов изменилась: %q → %q", s, out)
+		}
+	})
+}
+
+// Вложенность не раздувает время: 4 КБ из одних «//» и «%25» — рекурсия
+// конечна и укладывается в доли секунды.
+func TestRedactURLsDeepNesting(t *testing.T) {
+	for _, s := range []string{
+		strings.Repeat("//a", auditMaxString/3),
+		"https://h/?n=" + strings.Repeat("%25", auditMaxString/3-6),
+		strings.Repeat("https://u:p@h/", auditMaxString/14),
+	} {
+		start := time.Now()
+		_ = redactURLs(s)
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("строка %d байт чистилась %s", len(s), d)
+		}
 	}
 }
