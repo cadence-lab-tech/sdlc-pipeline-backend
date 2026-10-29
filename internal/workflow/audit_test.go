@@ -491,6 +491,7 @@ func TestRedactURLsLinear(t *testing.T) {
 			}
 		})
 		tBig := measure(func() { _ = redactURLs(big) })
+		t.Logf("%-16q 16 × 1 КБ — %s, 16 КБ — %s", unit, tSmall, tBig)
 		// Доли миллисекунды меряются с шумом: сравниваем, только когда
 		// длинная строка заметно дольше 1 мс.
 		if tBig > time.Millisecond && tBig > 4*tSmall {
