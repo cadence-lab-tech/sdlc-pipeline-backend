@@ -127,6 +127,13 @@ func (s *Store) ListRunUsage(ctx context.Context, q Querier, runID uuid.UUID) ([
 // missing (CLAB-219): прогоны без роли и ни разу не взятые сюда не входят,
 // агент там не работал. Деньги, их часть без признака и условная стоимость —
 // раздельно (решение 0062); cost_usd — всё сообщённое.
+//
+// Токены — сумма сообщённых input плюс сумма сообщённых output, каждая
+// считается сама по себе (CLAB-273): в SQL x + NULL = NULL, и сумма пар
+// выбрасывала бы строку, где сообщён лишь один счётчик, вместе с этим
+// счётчиком. Не сообщённый счётчик даёт вклад 0 и соседний не гасит; так же
+// считают CostMetrics и учёт прогонов в карточке. Кэш-токены не входят.
+// Поле остаётся числом, а не null: задача без токенов — 0.
 func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (domain.UsageSummary, error) {
 	var out domain.UsageSummary
 	err := q.QueryRow(ctx, `
@@ -142,7 +149,7 @@ func (s *Store) TaskUsage(ctx context.Context, q Querier, taskID uuid.UUID) (dom
 		SELECT
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1), 0)::float8,
 			coalesce(sum(u.cost_usd), 0)::float8,
-			coalesce(sum(u.input_tokens + u.output_tokens), 0)::bigint,
+			coalesce(sum(u.input_tokens), 0)::bigint + coalesce(sum(u.output_tokens), 0)::bigint,
 			(SELECT count(*) FROM runs WHERE usage_state = '`+domain.UsageStateReported+`'),
 			(SELECT count(*) FROM runs WHERE usage_state = '`+domain.UsageStateMissing+`'),
 			coalesce(sum(u.cost_usd) FILTER (WHERE r.task_id = $1 AND `+moneyPredicate+`), 0)::float8,
