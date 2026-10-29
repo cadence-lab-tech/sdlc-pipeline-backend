@@ -10,15 +10,26 @@
 # повторяется на той же базе без сброса, а сид-задачи не трогает. EPIC=<ключ>
 # берёт существующий: тип epic, статус planning и без дочерних задач — шаги
 # 3, 7 и 8 работают с детьми эпика и отменили бы чужие.
+#
+# Окружение clab сценарий задаёт сам (dev/e2e-env.sh), унаследованное не
+# читает: адрес — SDLC_API_URL, только локальный (иначе отказ с кодом 1),
+# проект — SDLC или E2E_PROJECT, пустой CLAB_CONFIG_DIR внутри рабочего
+# каталога, SDLC_TOKEN снят.
 set -euo pipefail
 
 API=${SDLC_API_URL:-http://localhost:8088/v1}
 CLI=${SDLC_CLI:-./bin/clab}
 EPIC=${EPIC:-}
-export SDLC_API_URL=$API SDLC_PROJECT=${SDLC_PROJECT:-SDLC}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+# Окружение clab сценарий задаёт сам, унаследованное не читает: адрес только
+# локальный, проект SDLC (E2E_PROJECT меняет), пустой CLAB_CONFIG_DIR, без
+# SDLC_TOKEN. Запущенный под clab heartbeat исполнителя этапа, он не доберётся
+# до рабочего инстанса (CLAB-306).
+. "$(dirname "${BASH_SOURCE[0]}")/e2e-env.sh"
+e2e_env "$API" "$work" || exit 1
 
 as() { SDLC_ACTOR="$1" "$CLI" --json "${@:2}"; }
 status() { as human:ci show "$1" | python3 -c 'import json,sys;print(json.load(sys.stdin)["task"]["status"])'; }

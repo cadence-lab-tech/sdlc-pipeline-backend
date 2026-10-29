@@ -67,7 +67,11 @@ files.
 - **A long command goes through the wrapper.** Run a command longer than
   the heartbeat interval (a full e2e, a long build) as `clab heartbeat
   <key> -- <command>` with the same prefix: the lease is renewed while it
-  runs, the exit code is its code. The token expired (`unauthenticated`:
+  runs, the exit code is its code. The command runs without clab credentials
+  (no token, host, project or actor; an empty `CLAB_CONFIG_DIR`): an inner
+  `clab` or a script needs its address and project given explicitly, and
+  `--with-credentials` is only for a `clab` that must act with the task
+  token. The token expired (`unauthenticated`:
   the task token has expired) — do not repeat and do not look for a workaround:
   what is not submitted goes into your directory, the list into the
   report.

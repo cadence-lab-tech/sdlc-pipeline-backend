@@ -446,3 +446,219 @@ func TestHeartbeatWrapViaCommand(t *testing.T) {
 		t.Fatalf("stdout %q, stderr %q, продлений %d", out, errOut, len(rec.calls()))
 	}
 }
+
+// CLAB-306: команда под обёрткой идёт без учётных данных clab.
+
+// helperClab: тестовый бинарь, запущенный как clab — «os.Args[0]
+// -test.run=^TestHelperClab$ -- <аргументы clab>». Без CLAB_TEST_HELPER=1
+// тест ничего не делает.
+func TestHelperClab(t *testing.T) {
+	if os.Getenv("CLAB_TEST_HELPER") != "1" {
+		return
+	}
+	for i, a := range os.Args {
+		if a == "--" {
+			os.Args = append([]string{"clab"}, os.Args[i+1:]...)
+			main()
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
+}
+
+// credentialEnv — окружение исполнителя этапа: токен, адрес, проект, лицо и
+// каталог конфига с хостом по умолчанию. Возвращает каталог конфига.
+func credentialEnv(t *testing.T, hostURL string) string {
+	t.Helper()
+	dir := t.TempDir()
+	host := strings.TrimPrefix(hostURL, "http://")
+	if err := saveConfigAt(dir, Config{DefaultHost: host, Hosts: map[string]HostConfig{host: {URL: hostURL, Token: "task-token"}}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAB_CONFIG_DIR", dir)
+	t.Setenv("SDLC_TOKEN", "task-token")
+	t.Setenv("SDLC_API_URL", "https://prod.example/v1")
+	t.Setenv("SDLC_PROJECT", "CLAB")
+	t.Setenv("SDLC_ACTOR", "user:alice")
+	t.Setenv("FOO", "bar")
+	return dir
+}
+
+func envMap(out string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// AC-1: по умолчанию окружение команды без учётных данных, CLAB_CONFIG_DIR
+// — другой пустой каталог, который уходит вместе с командой; остальное
+// окружение проходит.
+func TestHeartbeatWrapIsolatesCredentials(t *testing.T) {
+	needSh(t)
+	c, _ := newLeaseClient(t, func(int) (int, string) { return leaseOK(10*time.Second, 300) })
+	parentDir := credentialEnv(t, "http://127.0.0.1:1")
+	script := `env; echo ENTRIES=$(ls -A "$CLAB_CONFIG_DIR" | wc -l | tr -d ' ')`
+	code, stdout, _, log, err := wrapHeartbeat(t, c, 20*time.Millisecond, []string{"sh", "-c", script}, "", nil)
+	if err != nil || code != 0 {
+		t.Fatalf("код %d: %v", code, err)
+	}
+	env := envMap(stdout)
+	for _, name := range []string{"SDLC_TOKEN", "SDLC_API_URL", "SDLC_PROJECT", "SDLC_ACTOR"} {
+		if v, ok := env[name]; ok {
+			t.Errorf("%s дошёл до команды: %q", name, v)
+		}
+	}
+	dir := env["CLAB_CONFIG_DIR"]
+	if dir == "" || dir == parentDir {
+		t.Fatalf("CLAB_CONFIG_DIR команды %q, родителя %q", dir, parentDir)
+	}
+	if env["ENTRIES"] != "0" {
+		t.Errorf("каталог конфига команды не пуст: %q", env["ENTRIES"])
+	}
+	if env["FOO"] != "bar" || env["PATH"] != os.Getenv("PATH") {
+		t.Errorf("остальное окружение не прошло: FOO=%q PATH=%q", env["FOO"], env["PATH"])
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("временный каталог остался после выхода команды: %v", err)
+	}
+	// Сама обёртка продлевала аренду своими данными, родительский конфиг цел.
+	if _, err := os.Stat(parentDir + "/config.json"); err != nil {
+		t.Errorf("конфиг родителя тронут: %v", err)
+	}
+	// AC-5: одна строка об изоляции, с названием флага.
+	var notes []string
+	for _, l := range strings.Split(log, "\n") {
+		if strings.Contains(l, "без учётных данных clab") {
+			notes = append(notes, l)
+		}
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "--with-credentials") {
+		t.Errorf("строка об изоляции: %q\nжурнал:\n%s", notes, log)
+	}
+}
+
+// Права каталога — только владельцу (os.MkdirTemp даёт 0700).
+func TestHeartbeatWrapConfigDirMode(t *testing.T) {
+	needSh(t)
+	c, _ := newLeaseClient(t, func(int) (int, string) { return leaseOK(10*time.Second, 300) })
+	code, stdout, _, _, err := wrapHeartbeat(t, c, 20*time.Millisecond,
+		[]string{"sh", "-c", `stat -c %a "$CLAB_CONFIG_DIR" 2>/dev/null || stat -f %Lp "$CLAB_CONFIG_DIR"`}, "", nil)
+	if err != nil || code != 0 {
+		t.Fatalf("код %d: %v", code, err)
+	}
+	if mode := strings.TrimSpace(stdout); mode != "700" {
+		t.Fatalf("права каталога %q, ждали 700", mode)
+	}
+}
+
+// AC-4: --with-credentials — окружение как у родителя, строки об изоляции нет.
+func TestHeartbeatWrapWithCredentialsInherits(t *testing.T) {
+	needSh(t)
+	c, _ := newLeaseClient(t, func(int) (int, string) { return leaseOK(10*time.Second, 300) })
+	parentDir := credentialEnv(t, "http://127.0.0.1:1")
+	var log, stdout, stderr bytes.Buffer
+	h := &heartbeater{c: c, task: "CLAB-7", every: 20 * time.Millisecond, out: &log, warn: &log, withCredentials: true}
+	code, err := h.wrap(context.Background(), []string{"sh", "-c", "env"}, strings.NewReader(""), &stdout, &stderr, nil)
+	if err != nil || code != 0 {
+		t.Fatalf("код %d: %v", code, err)
+	}
+	env := envMap(stdout.String())
+	want := map[string]string{"SDLC_TOKEN": "task-token", "SDLC_API_URL": "https://prod.example/v1", "SDLC_PROJECT": "CLAB",
+		"SDLC_ACTOR": "user:alice", "CLAB_CONFIG_DIR": parentDir, "FOO": "bar"}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("%s=%q, ждали %q", k, env[k], v)
+		}
+	}
+	if strings.Contains(log.String(), "без учётных данных") {
+		t.Errorf("строка об изоляции при --with-credentials:\n%s", log.String())
+	}
+}
+
+// AC-2: внутренний clab без адреса не ходит на хост по умолчанию из конфига
+// исполнителя; на сервер приходит только heartbeat обёртки.
+func TestHeartbeatWrapInnerClabStaysOffConfigHost(t *testing.T) {
+	needSh(t)
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/tasks/CLAB-7/heartbeat" {
+			code, out := leaseOK(10*time.Second, 300)
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(out))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	credentialEnv(t, srv.URL)
+	t.Setenv("SDLC_API_URL", "") // как у исполнителя: адрес берётся из конфига
+	t.Setenv("CLAB_TEST_HELPER", "1")
+	c := &Client{base: srv.URL + "/v1", origin: srv.URL, actor: "user:alice", token: "task-token", http: srv.Client()}
+
+	inner := []string{os.Args[0], "-test.run=^TestHelperClab$", "--", "show", "CLAB-7"}
+	code, _, stderr, _, err := wrapHeartbeat(t, c, 20*time.Millisecond, inner, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || !strings.Contains(stderr, "хост не настроен") {
+		t.Fatalf("внутренний clab: код %d, stderr %q", code, stderr)
+	}
+	requests := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+	got := requests()
+	for _, r := range got {
+		if r != "POST /v1/tasks/CLAB-7/heartbeat" {
+			t.Errorf("на хост из конфига ушёл запрос %q (все: %v)", r, got)
+		}
+	}
+	if len(got) == 0 {
+		t.Error("обёртка не продлевала аренду")
+	}
+
+	// С флагом внутренний clab берёт хост и токен исполнителя — и доходит до сервера.
+	h := &heartbeater{c: c, task: "CLAB-7", every: 5 * time.Second, out: io.Discard, warn: io.Discard, withCredentials: true}
+	if _, err = h.wrap(context.Background(), inner, strings.NewReader(""), io.Discard, io.Discard, nil); err != nil {
+		t.Fatal(err)
+	}
+	var reached bool
+	for _, r := range requests() {
+		reached = reached || strings.HasPrefix(r, "GET /v1/")
+	}
+	if !reached {
+		t.Errorf("с --with-credentials внутренний clab не дошёл до хоста конфига: %v", requests())
+	}
+}
+
+// AC-4: --with-credentials без команды — ошибка флагов, сервер не тронут.
+func TestHeartbeatWithCredentialsNeedsCommand(t *testing.T) {
+	c, rec := newLeaseClient(t, func(int) (int, string) { return leaseOK(10*time.Second, 300) })
+	for _, args := range []string{"CLAB-7 --with-credentials", "CLAB-7 --every 5m --with-credentials"} {
+		_, _, err := capture(t, func() error { return cmdHeartbeat(context.Background(), c, strings.Fields(args)) })
+		if err == nil || !strings.Contains(err.Error(), "--with-credentials относится к команде после --") {
+			t.Errorf("%q: %v", args, err)
+		}
+	}
+	if n := len(rec.calls()); n != 0 {
+		t.Fatalf("запросов к серверу %d", n)
+	}
+}
+
+// Ключи окружения сравниваются точно: SDLC_TOKEN_FILE и похожие остаются.
+func TestIsolatedEnvExactNames(t *testing.T) {
+	got := isolatedEnv([]string{"A=1", "SDLC_TOKEN=x", "SDLC_TOKEN_FILE=y", "CLAB_CONFIG_DIR=/p", "SDLC_ACTOR=z", "SDLC_API_URL=u", "SDLC_PROJECT=P", "X=SDLC_TOKEN=q"}, "/tmp/d")
+	want := "A=1 SDLC_TOKEN_FILE=y X=SDLC_TOKEN=q CLAB_CONFIG_DIR=/tmp/d"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("%v", got)
+	}
+}

@@ -8,6 +8,12 @@ package main
 //	clab heartbeat K --every 5m [--for 2h] продлевать, пока аренда наша
 //	clab heartbeat K [--every 5m] -- cmd   продлевать, пока работает команда
 //
+// Команда после «--» идёт без учётных данных clab (CLAB-306): ни токена, ни
+// адреса, ни проекта, ни действующего лица, а CLAB_CONFIG_DIR — пустой
+// временный каталог. Иначе вложенный clab, сценарий проверки или make с
+// вызовом CLI унаследовали бы токен задачи рабочего инстанса и ушли бы на него.
+// --with-credentials возвращает прежнее наследование.
+//
 // Цикл закреплён за прогоном из первого ответа: следующий прогон той же
 // задачи он не продлевает, даже если его забрал тот же принципал. Про роли и
 // этапы CLI ничего не знает — только прогон и аренду.
@@ -22,6 +28,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -37,9 +45,11 @@ func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {
 	task, rest := popTask(args)
 	flagArgs, command, wrapped := splitCommand(rest)
 	var every, forDur time.Duration
+	var withCreds bool
 	fs, err := flags("heartbeat", flagArgs, func(fs *flag.FlagSet) {
 		fs.DurationVar(&every, "every", 0, "продлевать с этим интервалом (5m, 30s); по умолчанию — интервал heartbeat из ответа сервера")
 		fs.DurationVar(&forDur, "for", 0, "перестать продлевать через это время; без него — пока аренда наша или до сигнала")
+		fs.BoolVar(&withCreds, "with-credentials", false, "передать команде учётные данные clab (SDLC_TOKEN, SDLC_API_URL, SDLC_PROJECT, SDLC_ACTOR, CLAB_CONFIG_DIR); по умолчанию команда идёт без них")
 	})
 	if err != nil {
 		return err
@@ -61,6 +71,8 @@ func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {
 		return fmt.Errorf("после -- нет команды: clab heartbeat %s -- <команда> [аргументы]", task)
 	case wrapped && set["for"]:
 		return fmt.Errorf("--for не сочетается с командой: продление идёт, пока она работает")
+	case !wrapped && withCreds:
+		return fmt.Errorf("--with-credentials относится к команде после --: clab heartbeat %s --with-credentials -- <команда>", task)
 	}
 
 	if !wrapped && !set["every"] && !set["for"] {
@@ -72,7 +84,7 @@ func cmdHeartbeat(ctx context.Context, c *Client, args []string) error {
 		return print(out)
 	}
 
-	h := &heartbeater{c: c, task: task, every: every}
+	h := &heartbeater{c: c, task: task, every: every, withCredentials: withCreds}
 	if !wrapped {
 		h.out, h.warn = os.Stdout, os.Stderr
 		return h.loop(ctx, forDur)
@@ -110,6 +122,40 @@ type heartbeater struct {
 	// out — строки о ходе продления, warn — сбои. У обёртки оба — stderr:
 	// stdout принадлежит команде.
 	out, warn io.Writer
+	// withCredentials — команда обёртки получает окружение clab как есть;
+	// иначе без учётных данных (isolatedEnv).
+	withCredentials bool
+}
+
+// credentialVars — переменные, которыми clab берёт хост, токен, проект и
+// действующее лицо; тот же набор показывает clab auth status.
+var credentialVars = []string{"SDLC_TOKEN", "SDLC_API_URL", "SDLC_PROJECT", "SDLC_ACTOR", "CLAB_CONFIG_DIR"}
+
+// isolatedEnv — окружение родителя без учётных данных clab и с пустым
+// CLAB_CONFIG_DIR. Пустой каталог, а не снятая переменная: без неё clab
+// возьмёт ~/.config/clab, то есть личный токен человека. Пустой конфиг —
+// «хост не настроен» (CLAB-147), и без явного адреса вложенный clab в сеть
+// не ходит.
+func isolatedEnv(env []string, configDir string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if isCredentialVar(name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "CLAB_CONFIG_DIR="+configDir)
+}
+
+func isCredentialVar(name string) bool {
+	for _, v := range credentialVars {
+		// В Windows имена переменных окружения не различают регистр.
+		if name == v || (runtime.GOOS == "windows" && strings.EqualFold(name, v)) {
+			return true
+		}
+	}
+	return false
 }
 
 // first — первое продление: закрепляет прогон и интервал. Отказ сервера
@@ -215,6 +261,17 @@ func (h *heartbeater) wrap(ctx context.Context, argv []string, stdin io.Reader, 
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
+	if !h.withCredentials {
+		// Изолируется только дочерний процесс: клиент обёртки собран
+		// до разбора и продлевает аренду прежними учётными данными.
+		dir, err := os.MkdirTemp("", "clab-heartbeat-")
+		if err != nil {
+			return 0, fmt.Errorf("пустой каталог конфига для команды: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		cmd.Env = isolatedEnv(os.Environ(), dir)
+		fmt.Fprintf(h.warn, "clab heartbeat: команда идёт без учётных данных clab (SDLC_TOKEN, SDLC_API_URL, SDLC_PROJECT, SDLC_ACTOR, CLAB_CONFIG_DIR не переданы); вернуть их — --with-credentials\n")
+	}
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("команда не запустилась: %w", err)
 	}
