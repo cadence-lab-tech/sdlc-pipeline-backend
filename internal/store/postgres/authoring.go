@@ -115,9 +115,10 @@ func (s *Store) CopyWorkflowContent(ctx context.Context, q Querier, srcID, dstID
 			SELECT id, key FROM workflow_statuses WHERE workflow_id = $1
 		), ins AS (
 			INSERT INTO workflow_statuses (workflow_id, key, name, description, category,
-			            position, is_initial, is_terminal, wip_limit, color)
+			            position, is_initial, is_terminal, is_optional, enabled_by_default,
+			            wip_limit, color)
 			SELECT $2, key, name, description, category, position,
-			       is_initial, is_terminal, wip_limit, color
+			       is_initial, is_terminal, is_optional, enabled_by_default, wip_limit, color
 			FROM workflow_statuses WHERE workflow_id = $1
 			RETURNING id, key
 		)
@@ -402,6 +403,10 @@ type StatusInput struct {
 	IsTerminal  *bool
 	WipLimit    *int
 	Color       *string
+	// IsOptional и EnabledByDefault согласует слой сервиса (решение 0066,
+	// п. 2): сюда приходит уже итоговая пара, nil — не менять.
+	IsOptional       *bool
+	EnabledByDefault *bool
 }
 
 func (s *Store) CreateStatus(ctx context.Context, q Querier, workflowID uuid.UUID, in StatusInput) (domain.Status, error) {
@@ -413,14 +418,17 @@ func (s *Store) CreateStatus(ctx context.Context, q Querier, workflowID uuid.UUI
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `
 		INSERT INTO workflow_statuses (workflow_id, key, name, description, category,
-		            position, is_initial, is_terminal, wip_limit, color)
+		            position, is_initial, is_terminal, wip_limit, color,
+		            is_optional, enabled_by_default)
 		SELECT $1, $2, $3, $4, $5,
 		       coalesce($6, (SELECT coalesce(max(position), 0) + 1
 		                     FROM workflow_statuses WHERE workflow_id = $1)),
-		       coalesce($7, false), coalesce($8, false), $9, $10
+		       coalesce($7, false), coalesce($8, false), $9, $10,
+		       coalesce($11, false), coalesce($12, true)
 		RETURNING id`,
 		workflowID, in.Key, in.Name, in.Description, in.Category, in.Position,
-		in.IsInitial, in.IsTerminal, in.WipLimit, in.Color).Scan(&id)
+		in.IsInitial, in.IsTerminal, in.WipLimit, in.Color,
+		in.IsOptional, in.EnabledByDefault).Scan(&id)
 	if err != nil {
 		return domain.Status{}, translate(err)
 	}
@@ -447,10 +455,12 @@ func (s *Store) UpdateStatus(ctx context.Context, q Querier, workflowID uuid.UUI
 			is_initial  = coalesce($7, is_initial),
 			is_terminal = coalesce($8, is_terminal),
 			wip_limit   = coalesce($9, wip_limit),
-			color       = coalesce($10, color)
+			color       = coalesce($10, color),
+			is_optional        = coalesce($11, is_optional),
+			enabled_by_default = coalesce($12, enabled_by_default)
 		WHERE id = $1`, st.ID, nullIfEmpty(in.Key), nullIfEmpty(in.Name), in.Description,
 		nullIfEmpty(in.Category), in.Position, in.IsInitial, in.IsTerminal,
-		in.WipLimit, in.Color); err != nil {
+		in.WipLimit, in.Color, in.IsOptional, in.EnabledByDefault); err != nil {
 		return st, translate(err)
 	}
 	return s.GetStatus(ctx, q, st.ID)

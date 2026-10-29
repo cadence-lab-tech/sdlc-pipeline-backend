@@ -428,6 +428,10 @@ func (a *Authoring) edit(ctx context.Context, id uuid.UUID, fn func(tx pgx.Tx, w
 func (a *Authoring) CreateStatus(ctx context.Context, id uuid.UUID, in postgres.StatusInput) (domain.Status, error) {
 	var out domain.Status
 	err := a.edit(ctx, id, func(tx pgx.Tx, wf domain.Workflow) error {
+		// Новый статус по умолчанию обязательный и включённый.
+		if err := resolveOptional(false, true, &in); err != nil {
+			return err
+		}
 		var err error
 		out, err = a.store.CreateStatus(ctx, tx, wf.ID, in)
 		return err
@@ -438,11 +442,44 @@ func (a *Authoring) CreateStatus(ctx context.Context, id uuid.UUID, in postgres.
 func (a *Authoring) UpdateStatus(ctx context.Context, id uuid.UUID, key string, in postgres.StatusInput) (domain.Status, error) {
 	var out domain.Status
 	err := a.edit(ctx, id, func(tx pgx.Tx, wf domain.Workflow) error {
-		var err error
+		cur, err := a.store.GetStatusByKey(ctx, tx, wf.ID, key)
+		if err != nil {
+			return err
+		}
+		if err := resolveOptional(cur.IsOptional, cur.EnabledByDefault, &in); err != nil {
+			return err
+		}
 		out, err = a.store.UpdateStatus(ctx, tx, wf.ID, key, in)
 		return err
 	})
 	return out, err
+}
+
+// resolveOptional сводит отметку необязательного этапа и его умолчание к
+// итоговой паре (решение 0066, п. 2). Поля, которых нет во вводе, берутся из
+// статуса до правки.
+//
+// Умолчание «выключен» бывает только у необязательного статуса: такой ввод
+// отбивается здесь, до записи, — CHECK в базе лишь страховка, и его текст
+// автору цикла ничего не объяснил бы. Снятие отметки возвращает умолчание
+// во «включён» само: у обязательного статуса умолчания нет, и требовать
+// ради этого второго поля в запросе незачем.
+func resolveOptional(isOptional, enabledByDefault bool, in *postgres.StatusInput) error {
+	if in.IsOptional != nil {
+		isOptional = *in.IsOptional
+	}
+	if isOptional {
+		return nil
+	}
+	if in.EnabledByDefault != nil && !*in.EnabledByDefault {
+		return apperr.InvalidInput(
+			"enabled_by_default: false бывает только у необязательного статуса (is_optional: true)")
+	}
+	if !enabledByDefault {
+		on := true
+		in.EnabledByDefault = &on
+	}
+	return nil
 }
 
 func (a *Authoring) DeleteStatus(ctx context.Context, id uuid.UUID, key string) error {

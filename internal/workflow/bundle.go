@@ -102,16 +102,27 @@ type BundleWorkflow struct {
 }
 
 type BundleStatus struct {
-	Key         string   `json:"key"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Category    string   `json:"category"`
-	IsInitial   bool     `json:"is_initial,omitempty"`
-	IsTerminal  bool     `json:"is_terminal,omitempty"`
-	WipLimit    *int     `json:"wip_limit,omitempty"`
-	Color       string   `json:"color,omitempty"`
-	Role        string   `json:"role,omitempty"`
-	Reviewers   []string `json:"reviewers,omitempty"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category"`
+	IsInitial   bool   `json:"is_initial,omitempty"`
+	IsTerminal  bool   `json:"is_terminal,omitempty"`
+	// Необязательный этап (решение 0066, п. 3). Нет поля — обязательный.
+	IsOptional bool `json:"is_optional,omitempty"`
+	// Нет поля — «включён»: связка прежней версии и необязательный этап,
+	// включённый по умолчанию, выглядят одинаково. Указатель, потому что
+	// нулевое значение bool выключило бы этап у связки без поля.
+	EnabledByDefault *bool    `json:"enabled_by_default,omitempty"`
+	WipLimit         *int     `json:"wip_limit,omitempty"`
+	Color            string   `json:"color,omitempty"`
+	Role             string   `json:"role,omitempty"`
+	Reviewers        []string `json:"reviewers,omitempty"`
+}
+
+// enabledByDefault — умолчание этапа с учётом отсутствующего поля.
+func (s BundleStatus) enabledByDefault() bool {
+	return s.EnabledByDefault == nil || *s.EnabledByDefault
 }
 
 type BundleTransition struct {
@@ -331,6 +342,7 @@ func sameWorkflow(have, want BundleWorkflow) bool {
 		h, w := have.Statuses[i], want.Statuses[i]
 		if h.Key != w.Key || h.Name != w.Name || h.Description != w.Description ||
 			h.Category != w.Category || h.IsInitial != w.IsInitial || h.IsTerminal != w.IsTerminal ||
+			h.IsOptional != w.IsOptional || h.enabledByDefault() != w.enabledByDefault() ||
 			!eqIntPtr(h.WipLimit, w.WipLimit) || h.Color != w.Color ||
 			h.Role != w.Role || !eqStrings(h.Reviewers, w.Reviewers) {
 			return false
@@ -464,11 +476,21 @@ func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, ac
 	for i, st := range w.Statuses {
 		pos := i + 1
 		initial, terminal := st.IsInitial, st.IsTerminal
-		if _, err := a.store.CreateStatus(ctx, tx, wf.ID, postgres.StatusInput{
+		isOptional, enabled := st.IsOptional, st.enabledByDefault()
+		in := postgres.StatusInput{
 			Key: st.Key, Name: st.Name, Description: optional(st.Description),
 			Category: st.Category, Position: &pos, IsInitial: &initial, IsTerminal: &terminal,
+			IsOptional: &isOptional, EnabledByDefault: &enabled,
 			WipLimit: st.WipLimit, Color: optional(st.Color),
-		}); err != nil {
+		}
+		// Та же пара, что у REST авторинга: несогласованная откатывает импорт
+		// целиком, а не заводит черновик со статусом, который не сохранить.
+		if err := resolveOptional(false, true, &in); err != nil {
+			return ImportEntry{}, Validation{}, apperr.InvalidInput(
+				"статус %q: enabled_by_default: false бывает только у необязательного статуса (is_optional: true)",
+				st.Key).WithDetails(map[string]any{"status": st.Key})
+		}
+		if _, err := a.store.CreateStatus(ctx, tx, wf.ID, in); err != nil {
 			return ImportEntry{}, Validation{}, fmt.Errorf("статус %q: %w", st.Key, err)
 		}
 		roles := []postgres.StatusRoleInput{}
@@ -628,6 +650,13 @@ func exportWorkflow(wf domain.Workflow) *BundleWorkflow {
 			Key: st.Key, Name: st.Name, Description: deref(st.Description),
 			Category: st.Category, IsInitial: st.IsInitial, IsTerminal: st.IsTerminal,
 			WipLimit: st.WipLimit, Color: deref(st.Color),
+			IsOptional: st.IsOptional,
+		}
+		// Умолчание пишется, только когда этап выключен по умолчанию: связка
+		// цикла без необязательных этапов остаётся байт в байт прежней.
+		if st.IsOptional && !st.EnabledByDefault {
+			off := false
+			bs.EnabledByDefault = &off
 		}
 		for _, r := range st.Roles {
 			if r.IsPrimary {

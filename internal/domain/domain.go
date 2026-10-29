@@ -324,6 +324,13 @@ type Status struct {
 	WipLimit    *int         `json:"wip_limit,omitempty"`
 	Color       *string      `json:"color,omitempty"`
 	Roles       []StatusRole `json:"roles,omitempty"`
+
+	// Необязательный этап (решение 0066): задача может его пропустить, если
+	// он у неё выключен. EnabledByDefault — что получает задача, в которой
+	// этап не назван; у обязательного статуса всегда true. Оба поля отдаются
+	// всегда: клиент не должен гадать, обязателен ли статус без ключа.
+	IsOptional       bool `json:"is_optional"`
+	EnabledByDefault bool `json:"enabled_by_default"`
 }
 
 type StatusRole struct {
