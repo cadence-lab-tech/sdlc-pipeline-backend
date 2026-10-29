@@ -42,6 +42,9 @@ type Server struct {
 	tracer trace.TracerProvider
 	// Журнал действий (CLAB-210): один писатель на процесс, общий с MCP.
 	audit *workflow.Audit
+	// Будильник долгого опроса событий (CLAB-323): один на процесс, иначе
+	// каждый Handler() заводил бы свой такт.
+	feed *feedHub
 }
 
 func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
@@ -49,6 +52,7 @@ func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engin
 		cfg: cfg, log: log, store: store, engine: engine,
 		authoring: authoring, auth: auth, mcp: mcpServer,
 		audit: workflow.NewAudit(store, log),
+		feed:  newFeedHub(store, log),
 	}
 	if mcpServer != nil {
 		mcpServer.UseAudit(s.audit)
@@ -166,6 +170,9 @@ func (s *Server) Handler() http.Handler {
 		v1.DELETE("/projects/:projectKey", projectAdmin, s.deleteProject)
 		v1.GET("/projects/:projectKey/workflow", viewer, s.getWorkflow)
 		v1.GET("/projects/:projectKey/tasks", viewer, s.listTasks)
+		// События долгим опросом (CLAB-323, решение 0067 п. 4): кто читает
+		// задачу или проект, читает и их события.
+		v1.GET("/projects/:projectKey/events", viewer, s.projectEvents)
 		// Заводить задачи вправе и агент, но только дочерние к той, которую он
 		// держит, и внутри её области — правило исполняет движок (решение 0024).
 		v1.POST("/projects/:projectKey/tasks", agent, s.createTask)
@@ -229,6 +236,7 @@ func (s *Server) Handler() http.Handler {
 
 		v1.GET("/tasks/:taskKey", viewer, s.getTask)
 		v1.GET("/tasks/:taskKey/timeline", viewer, s.listEvents)
+		v1.GET("/tasks/:taskKey/events", viewer, s.taskEvents)
 		// Постановка задачи: заголовок, описание, приоритет, метки, ссылка на
 		// основной трекер. Уровень agent — точное право проверяет движок, как
 		// и у области.

@@ -105,6 +105,18 @@ passed`, and only when the human explicitly asks. Before approving, show
 them what they approve: the stage's artifacts with titles and the gist.
 A refusal — `--status failed --details '{"reason":"…"}'`.
 
+An agent does not hold its turn waiting for an approval. It waits on the
+server: `clab wait <key> --gate human_approval [--transition <transition>]
+[--timeout 8h] [--json]` long-polls the task's events and returns once the
+gate is decided or the task changes status, with one line (or one JSON
+object) and an exit code: `0` passed, `3` returned (with the reason), `4`
+status changed otherwise, `5` timeout, `1` error, `2` nothing to wait for.
+`--gate` matches the gate type or its key, so it works on any transition of
+any cycle. `clab wait` does not touch the lease — run it as `clab heartbeat
+<key> --with-credentials -- clab wait …` in the background; against a
+server without the events endpoint it polls the task every 15 seconds. The
+outcome is a hint: re-read `clab gates <key>` and go by the state.
+
 ## Task tokens and stage executors
 
 An orchestrator (skill `clab-run`) issues a **task token** for a stage it
@@ -176,6 +188,7 @@ clab edit ABC-12 [--model-level high | --model-level ""]
                  [--model-level-for <status>=high | --model-level-for <status>=]
 clab relate ABC-3 --to ABC-4 --rel blocks
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
+clab wait ABC-12 --gate human_approval [--transition <transition>] [--timeout 8h]   # 0 passed, 3 returned, 4 changed, 5 timeout
 clab version                                 # CLI and server versions
 ```
 
