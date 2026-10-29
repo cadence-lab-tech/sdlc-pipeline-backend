@@ -351,22 +351,27 @@ async function eventsPage($: $T, s: Session, path: string): Promise<EventsPage |
 // Включить мод: только у сессии с поверхностью. Без неё (claude -p, раннер,
 // саб-агент без UI) мод не зовёт clab, не ходит в сеть, не ставит строку
 // статуса и таймеров (решение 0067, п. 3).
-async function activate($: $T, opts: Options): Promise<Session> {
+function activate($: $T, opts: Options): Session {
   const s = newSession(opts)
   s.ready = (async () => {
     await resolveSession($, s)
     await readInstance($, s)
   })()
-  await $.command.register({
-    name: 'clab-plugin',
-    description: 'Задачи Cadence Lab этого чата: /clab-plugin [КЛЮЧ|tasks|approvals|remove КЛЮЧ]',
-    argumentHint: '[КЛЮЧ|tasks|approvals|remove КЛЮЧ]',
-  })
   void s.ready.then(
     () => wake($, s),
     () => wake($, s),
   )
   return s
+}
+
+// Команда регистрируется уже включённым модом и до первого промпта: хук
+// session.start её дожидается.
+async function registerCommand($: $T) {
+  await $.command.register({
+    name: 'clab-plugin',
+    description: 'Задачи Cadence Lab этого чата: /clab-plugin [КЛЮЧ|tasks|approvals|remove КЛЮЧ]',
+    argumentHint: '[КЛЮЧ|tasks|approvals|remove КЛЮЧ]',
+  })
 }
 
 async function runCommand($: $T, s: Session, args: string): Promise<string> {
@@ -417,14 +422,20 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     if (live) stop(live)
     live = null
-    if (e.surface !== null || e.isInteractive) live = await activate($, opts)
+    if (e.surface !== null || e.isInteractive) {
+      live = activate($, opts)
+      await registerCommand($)
+    }
     return started
   })
 
   // Поверхность появилась позже (Claude Desktop подключился к сессии).
   on('session.attach', async ($, e, next) => {
     const attached = await next(e)
-    if (!live) live = await activate($, opts)
+    if (!live) {
+      live = activate($, opts)
+      await registerCommand($)
+    }
     return attached
   })
 
