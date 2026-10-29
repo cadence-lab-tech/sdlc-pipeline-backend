@@ -555,6 +555,12 @@ type UpdateTaskInput struct {
 	ModelLevel *string
 	// Настройки этапов: сливаются с прежними по ключам статуса и полям.
 	StageSettings *json.RawMessage
+	// Выбор необязательных этапов: сливается с прежним по ключам (решение
+	// 0066, п. 9). nil — не трогать, {} — не правка.
+	OptionalStages *json.RawMessage
+	// Привязка токена задачи (Auth.Bound): выбор этапов своей задачи токену
+	// задачи закрыт (п. 11). nil — человек или личный токен.
+	Bound *TaskBinding
 	// Уровень актора в проекте. Ниже сопровождающего действует правило
 	// агента: править можно задачу с его живой арендой и её дочерние —
 	// ровно та рамка, в которой он их заводит. Пусто — правило выключено:
@@ -567,9 +573,10 @@ type UpdateTaskInput struct {
 //
 // Тип, статус, родитель, область и исполнитель этой ручкой не меняются — у
 // каждого своя операция и свои правила. Особого правила для терминальных
-// статусов нет: агента и так ограничивает аренда, которой у закрытой задачи
-// не бывает, а сопровождающий вправе поправить опечатку и в закрытой
-// постановке.
+// статусов у постановки нет: агента и так ограничивает аренда, которой у
+// закрытой задачи не бывает, а сопровождающий вправе поправить опечатку и в
+// закрытой постановке. Исключение — выбор этапов (решение 0066, п. 9): путь
+// закрытой задачи пройден, и менять его нечему.
 func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID, in UpdateTaskInput) (domain.Task, error) {
 	fields := postgres.UpdateTaskFieldsInput{
 		Description: in.Description, Priority: in.Priority, Labels: in.Labels,
@@ -610,10 +617,10 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 			return domain.Task{}, err
 		}
 	}
-	if !fields.Any() && in.StageSettings == nil {
+	if !fields.Any() && in.StageSettings == nil && in.OptionalStages == nil {
 		return domain.Task{}, apperr.InvalidInput(
 			"не указано ни одно поле: править можно title, description, priority, labels, " +
-				"external_ref, model_level, stage_settings")
+				"external_ref, model_level, stage_settings, optional_stages")
 	}
 
 	var out domain.Task
@@ -621,6 +628,14 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
 		if err != nil {
 			return err
+		}
+		// Отказ токену задачи — раньше разбора выбора и раньше всего
+		// остального: весь запрос отбивается, а неверный ключ в нём не
+		// превращает 403 в 400.
+		if in.OptionalStages != nil {
+			if err := ownStageChoice(in.Bound, task); err != nil {
+				return err
+			}
 		}
 		if err := e.agentMayEdit(ctx, tx, actor, task, in.Level); err != nil {
 			return err
@@ -637,6 +652,28 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 				return err
 			}
 			fields.StageSettings = &merged
+		}
+		// Выбор этапов — под той же блокировкой, что переход: правка ждёт
+		// идущий переход и проверяется по статусу, где задача встала.
+		var stagesFrom, stagesTo map[string]bool
+		if in.OptionalStages != nil {
+			if stagesFrom, stagesTo, err = e.mergeOptionalStages(ctx, tx, task, *in.OptionalStages); err != nil {
+				return err
+			}
+			if !sameChoice(stagesFrom, stagesTo) {
+				raw, err := choiceJSON(stagesTo)
+				if err != nil {
+					return err
+				}
+				fields.OptionalStages = &raw
+			}
+		}
+		// Выбор не изменился и больше править нечего — не правка: 200 без
+		// события, а не «не указано ни одно поле» клиенту, который шлёт
+		// форму целиком.
+		if !fields.Any() {
+			out, err = e.store.GetTaskByKey(ctx, tx, taskKey)
+			return err
 		}
 		if err := e.store.UpdateTaskFields(ctx, tx, task.ID, fields); err != nil {
 			return err
@@ -674,6 +711,9 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 				"from": task.StageSettings, "to": *fields.StageSettings,
 			}
 		}
+		if fields.OptionalStages != nil {
+			changed["optional_stages"] = map[string]any{"from": stagesFrom, "to": stagesTo}
+		}
 		fieldNames := make([]string, 0, len(changed))
 		for name := range changed {
 			fieldNames = append(fieldNames, name)
@@ -694,6 +734,45 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 	})
 
 	return out, err
+}
+
+// mergeOptionalStages сверяет и сливает выбор этапов из запроса с выбором
+// задачи (решение 0066, п. 9). Отдаёт полные наборы до и после; «до» — с
+// разрешёнными умолчаниями, чтобы задача, заведённая до выбора, не считала
+// правкой запись тех же значений.
+//
+// Порядок отказов: разбор и ключи (400), затем закрытая задача и текущий
+// статус (409) — эти зависят от состояния, а не от запроса.
+func (e *Engine) mergeOptionalStages(ctx context.Context, tx pgx.Tx, task domain.Task, raw json.RawMessage) (from, to map[string]bool, err error) {
+	patch, err := parseOptionalStages(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	statuses, err := e.store.ListStatuses(ctx, tx, task.WorkflowID)
+	if err != nil {
+		return nil, nil, err
+	}
+	optional := optionalOf(statuses)
+	if err := checkOptionalKeys(optional, patch); err != nil {
+		return nil, nil, err
+	}
+	from = resolveChoice(optional, storedChoice(task.OptionalStages), nil)
+	if len(patch) == 0 {
+		return from, from, nil
+	}
+	if task.ClosedAt != nil {
+		return nil, nil, apperr.Conflict(
+			"задача %s закрыта: выбор этапов у неё не меняется", task.Key)
+	}
+	to = resolveChoice(optional, from, patch)
+	// Задача не стоит в выключенном этапе: выключить текущий статус нельзя,
+	// а запись того же значения — не правка.
+	if on, ok := patch[task.StatusKey]; ok && !on && from[task.StatusKey] {
+		return nil, nil, apperr.Conflict(
+			"этап %s — текущий статус задачи %s: выключить его нельзя", task.StatusKey, task.Key).
+			WithDetails(map[string]any{"status": task.StatusKey})
+	}
+	return from, to, nil
 }
 
 // nullIfEmpty отличает «описания нет» от пустой строки: в ленте у очистки
@@ -761,6 +840,9 @@ type CreateTaskInput struct {
 	// Ключи задач, которые новая задача блокирует: порядок работ оркестратор
 	// задаёт сразу при нарезке, а держит его гейт dependencies_closed.
 	Blocks []string
+	// Выбор необязательных этапов (решение 0066, п. 9): не названные берут
+	// умолчание цикла, который задача получит по типу.
+	OptionalStages json.RawMessage
 	// Уровень актора в проекте. Ниже сопровождающего действует правило агента:
 	// заводить можно только детей задачи, которую он держит по аренде, и только
 	// внутри её области (решение 0024). Пусто — правило выключено: в режиме
@@ -787,6 +869,10 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		if err != nil {
 			return err
 		}
+		stages, err := parseOptionalStages(in.OptionalStages)
+		if err != nil {
+			return err
+		}
 		if in.AssigneeHandle != "" {
 			assignee, err := e.resolveAssignee(ctx, tx, in.AssigneeHandle)
 			if err != nil {
@@ -805,6 +891,13 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		// Ключи этапов сверяются с циклом, который хранилище выбрало по типу:
 		// раньше его не знает никто. Отказ откатывает и задачу.
 		if err := e.checkStageKeys(ctx, tx, out.WorkflowID, patch); err != nil {
+			return err
+		}
+		// Выбор этапов — тоже по циклу, выбранному хранилищем, и полным
+		// набором: умолчания цикла пишутся явно, правка умолчания в следующей
+		// версии путь этой задачи не меняет. Отказ откатывает и задачу, и
+		// счётчик ключей.
+		if out.OptionalStages, err = e.initialOptionalStages(ctx, tx, out, stages); err != nil {
 			return err
 		}
 
@@ -849,6 +942,9 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 		if string(out.StageSettings) != "{}" {
 			payload["stage_settings"] = out.StageSettings
 		}
+		if string(out.OptionalStages) != "{}" {
+			payload["optional_stages"] = out.OptionalStages
+		}
 		if err := e.store.AppendEvent(ctx, tx, out.ID, &run.ID, domain.EventTaskCreated, actor,
 			payload); err != nil {
 			return err
@@ -858,6 +954,31 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 	})
 
 	return out, err
+}
+
+// initialOptionalStages сверяет выбор заводимой задачи с версией её цикла и
+// пишет полный набор. Цикл без необязательных — {} без записи.
+func (e *Engine) initialOptionalStages(ctx context.Context, tx pgx.Tx, task domain.Task, patch optionalPatch) (json.RawMessage, error) {
+	statuses, err := e.store.ListStatuses(ctx, tx, task.WorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	optional := optionalOf(statuses)
+	if err := checkOptionalKeys(optional, patch); err != nil {
+		return nil, err
+	}
+	if len(optional) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	raw, err := choiceJSON(resolveChoice(optional, nil, patch))
+	if err != nil {
+		return nil, err
+	}
+	if err := e.store.UpdateTaskFields(ctx, tx, task.ID,
+		postgres.UpdateTaskFieldsInput{OptionalStages: &raw}); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // prepareTaskModelLevels проверяет уровни модели заводимой задачи и сводит

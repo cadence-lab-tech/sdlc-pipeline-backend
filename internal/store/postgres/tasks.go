@@ -16,7 +16,7 @@ const taskSelect = `
 	SELECT t.id, t.project_id, p.key, t.parent_id, parent.key, t.key, t.seq, t.title, t.description,
 	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id, assignee.handle,
 	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at,
-	       t.model_level, t.stage_settings
+	       t.model_level, t.stage_settings, t.optional_stages
 	FROM tasks t
 	JOIN projects p ON p.id = t.project_id
 	JOIN workflow_statuses ws ON ws.id = t.status_id
@@ -28,7 +28,7 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.ParentID, &t.ParentKey, &t.Key, &t.Seq,
 		&t.Title, &t.Description, &t.WorkflowID, &t.StatusID, &t.StatusKey, &t.StatusName,
 		&t.Priority, &t.AssigneeID, &t.AssigneeHandle, &t.ExternalRef, &t.Labels, &t.Properties,
-		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt, &t.ModelLevel, &t.StageSettings)
+		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt, &t.ModelLevel, &t.StageSettings, &t.OptionalStages)
 	return t, err
 }
 
@@ -502,12 +502,16 @@ type UpdateTaskFieldsInput struct {
 	ModelLevel *string
 	// Настройки этапов целиком — уже слитые движком с прежними.
 	StageSettings *json.RawMessage
+	// Выбор необязательных этапов полным набором — уже слитый и проверенный
+	// движком (решение 0066).
+	OptionalStages *json.RawMessage
 }
 
 // Any отвечает на вопрос, есть ли что писать.
 func (in UpdateTaskFieldsInput) Any() bool {
 	return in.Title != nil || in.Description != nil || in.Priority != nil || in.Labels != nil ||
-		in.ExternalRef != nil || in.ModelLevel != nil || in.StageSettings != nil
+		in.ExternalRef != nil || in.ModelLevel != nil || in.StageSettings != nil ||
+		in.OptionalStages != nil
 }
 
 // UpdateTaskFields пишет переданные поля постановки и двигает updated_at.
@@ -544,19 +548,27 @@ func (s *Store) UpdateTaskFields(ctx context.Context, tx pgx.Tx, taskID uuid.UUI
 			stageSettings = []byte(`{}`)
 		}
 	}
+	var optionalStages []byte
+	if in.OptionalStages != nil {
+		optionalStages = *in.OptionalStages
+		if len(optionalStages) == 0 {
+			optionalStages = []byte(`{}`)
+		}
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE tasks
-		SET title          = coalesce($2, title),
-		    description    = CASE WHEN $3::boolean THEN $4 ELSE description END,
-		    priority       = coalesce($5, priority),
-		    labels         = coalesce($6::text[], labels),
-		    external_ref   = coalesce($7::jsonb, external_ref),
-		    model_level    = CASE WHEN $8::boolean THEN nullif($9::text, '') ELSE model_level END,
-		    stage_settings = coalesce($10::jsonb, stage_settings),
-		    updated_at     = now()
+		SET title           = coalesce($2, title),
+		    description     = CASE WHEN $3::boolean THEN $4 ELSE description END,
+		    priority        = coalesce($5, priority),
+		    labels          = coalesce($6::text[], labels),
+		    external_ref    = coalesce($7::jsonb, external_ref),
+		    model_level     = CASE WHEN $8::boolean THEN nullif($9::text, '') ELSE model_level END,
+		    stage_settings  = coalesce($10::jsonb, stage_settings),
+		    optional_stages = coalesce($11::jsonb, optional_stages),
+		    updated_at      = now()
 		WHERE id = $1`,
 		taskID, in.Title, in.Description != nil, description, in.Priority, labels, externalRef,
-		in.ModelLevel != nil, in.ModelLevel, stageSettings)
+		in.ModelLevel != nil, in.ModelLevel, stageSettings, optionalStages)
 	return translate(err)
 }
 

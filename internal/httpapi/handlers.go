@@ -205,6 +205,9 @@ type createTaskRequest struct {
 	// {"development": {"model_level": "high"}}. Проверяет движок.
 	ModelLevel    *string         `json:"model_level"`
 	StageSettings json.RawMessage `json:"stage_settings"`
+	// Выбор необязательных этапов (решение 0066): {"design": false}.
+	// Проверяет движок по циклу, который задача получит по типу.
+	OptionalStages json.RawMessage `json:"optional_stages"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -243,6 +246,7 @@ func (s *Server) createTask(c *gin.Context) {
 			},
 			AssigneeHandle: req.Assignee,
 			Blocks:         req.Blocks,
+			OptionalStages: req.OptionalStages,
 			Level:          level,
 		})
 	if err != nil {
@@ -488,8 +492,11 @@ func (s *Server) executeTransition(c *gin.Context) {
 		return
 	}
 
+	// skips — пропущенные выключенные этапы (решение 0066, п. 15);
+	// task.status — фактический статус после цепочки.
 	c.JSON(http.StatusOK, gin.H{
 		"task":         res.Task,
+		"skips":        res.Skips,
 		"gates":        res.Gates,
 		"stage_run":    res.NewRun,
 		"previous_run": res.FromRun,
@@ -537,6 +544,8 @@ type updateTaskRequest struct {
 	// прежними по ключам статуса и полям этапа (решение 0060).
 	ModelLevel    *string          `json:"model_level"`
 	StageSettings *json.RawMessage `json:"stage_settings"`
+	// Выбор необязательных этапов, сливается по ключам (решение 0066).
+	OptionalStages *json.RawMessage `json:"optional_stages"`
 }
 
 // updateTask меняет постановку задачи. Право проверяет движок: у агента она
@@ -559,14 +568,18 @@ func (s *Server) updateTask(c *gin.Context) {
 
 	task, err := s.engine.UpdateTask(c.Request.Context(), c.Param("taskKey"), actor(c).ID,
 		workflow.UpdateTaskInput{
-			Title:         req.Title,
-			Description:   req.Description,
-			Priority:      req.Priority,
-			Labels:        req.Labels,
-			ExternalRef:   req.ExternalRef,
-			ModelLevel:    req.ModelLevel,
-			StageSettings: req.StageSettings,
-			Level:         level,
+			Title:          req.Title,
+			Description:    req.Description,
+			Priority:       req.Priority,
+			Labels:         req.Labels,
+			ExternalRef:    req.ExternalRef,
+			ModelLevel:     req.ModelLevel,
+			StageSettings:  req.StageSettings,
+			OptionalStages: req.OptionalStages,
+			// Выбор этапов своей задачи токену задачи закрыт — правило
+			// движка, транспорт передаёт привязку.
+			Bound: s.auth.Bound(identity(c)),
+			Level: level,
 		})
 	if err != nil {
 		fail(c, s.log, err)

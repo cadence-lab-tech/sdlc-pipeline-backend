@@ -172,12 +172,18 @@ type GateSpec struct {
 	Blocking bool            `json:"blocking"`
 }
 
+// TransitionSpec — переход впереди: ToStatus — назначение в цикле, LandsIn,
+// Skips и Unavailable — где встанет задача с её выбором этапов (решение
+// 0066, п. 15), те же поля и тот же расчёт, что у TransitionPreview.
 type TransitionSpec struct {
-	Transition string     `json:"transition"`
-	Name       string     `json:"name"`
-	Kind       string     `json:"kind"`
-	ToStatus   string     `json:"to_status"`
-	Gates      []GateSpec `json:"gates"`
+	Transition  string     `json:"transition"`
+	Name        string     `json:"name"`
+	Kind        string     `json:"kind"`
+	ToStatus    string     `json:"to_status"`
+	LandsIn     *string    `json:"lands_in"`
+	Skips       []string   `json:"skips"`
+	Unavailable string     `json:"unavailable,omitempty"`
+	Gates       []GateSpec `json:"gates"`
 }
 
 type TaskView struct {
@@ -201,6 +207,8 @@ type TaskView struct {
 	// по которой разрешён execution.
 	ModelLevel    *string         `json:"model_level"`
 	StageSettings json.RawMessage `json:"stage_settings"`
+	// Выбор необязательных этапов (решение 0066): какие этапы задача пройдёт.
+	OptionalStages json.RawMessage `json:"optional_stages"`
 }
 
 // StageView — состояние прогона для агента.
@@ -267,7 +275,7 @@ var (
 		"stage_run_id", "kind", "lease", "usage_report", "boundary", "execution", "stage_limit",
 		"task.key", "task.status", "task.status_name", "task.attempt", "task.priority",
 		"task.type", "task.parent", "task.model_level", "task.stage_settings",
-		"context.baselines",
+		"task.optional_stages", "context.baselines",
 	}
 )
 
@@ -633,6 +641,7 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 		ExternalRef: task.ExternalRef, Properties: task.Properties,
 		Type: task.Type(), Parent: task.ParentKey,
 		ModelLevel: task.ModelLevel, StageSettings: task.StageSettings,
+		OptionalStages: task.OptionalStages,
 	}
 
 	var err error
@@ -872,24 +881,23 @@ func (e *Engine) reviewContext(ctx context.Context, q postgres.Querier, task dom
 // gatesAhead отдаёт требования гейтов до начала работы. Агент должен знать
 // условия заранее, а не узнавать о них на попытке перехода.
 func (e *Engine) gatesAhead(ctx context.Context, q postgres.Querier, task domain.Task) ([]TransitionSpec, error) {
-	transitions, err := e.store.AvailableTransitions(ctx, q, task.WorkflowID, task.StatusID)
+	g, err := e.cycleGraph(ctx, q, task.WorkflowID)
 	if err != nil {
 		return nil, err
 	}
-	statuses, err := e.store.ListStatuses(ctx, q, task.WorkflowID)
-	if err != nil {
-		return nil, err
-	}
-	statusKey := map[uuid.UUID]string{}
-	for _, st := range statuses {
-		statusKey[st.ID] = st.Key
-	}
+	transitions := g.available(task.StatusID)
+	choice := storedChoice(task.OptionalStages)
 
 	out := make([]TransitionSpec, 0, len(transitions))
 	for _, t := range transitions {
+		land, err := planLanding(g, choice, t)
+		if err != nil {
+			return nil, err
+		}
 		spec := TransitionSpec{
 			Transition: t.Key, Name: t.Name, Kind: t.Kind,
-			ToStatus: statusKey[t.ToStatusID], Gates: []GateSpec{},
+			ToStatus: g.byID[t.ToStatusID].Key, LandsIn: land.landsIn(), Skips: land.skipKeys(),
+			Unavailable: land.Unavailable, Gates: []GateSpec{},
 		}
 		for _, g := range t.Gates {
 			spec.Gates = append(spec.Gates, GateSpec{

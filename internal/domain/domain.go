@@ -450,12 +450,16 @@ type Task struct {
 	// Рекомендованный уровень модели задачи и её этапов (решение 0060):
 	// уровень этапа перекрывает уровень задачи, тот — уровень роли.
 	// StageSettings — объект «ключ статуса → объект настроек этапа».
-	ModelLevel    *string          `json:"model_level"`
-	StageSettings json.RawMessage  `json:"stage_settings"`
-	Repositories  []TaskRepository `json:"repositories,omitempty"`
-	CreatedAt     time.Time        `json:"created_at"`
-	UpdatedAt     time.Time        `json:"updated_at"`
-	ClosedAt      *time.Time       `json:"closed_at,omitempty"`
+	ModelLevel    *string         `json:"model_level"`
+	StageSettings json.RawMessage `json:"stage_settings"`
+	// Выбор необязательных этапов (решение 0066): «ключ необязательного
+	// статуса версии цикла задачи → включён ли». Полный набор; у задачи на
+	// цикле без необязательных — {}. Отдаётся всегда.
+	OptionalStages json.RawMessage  `json:"optional_stages"`
+	Repositories   []TaskRepository `json:"repositories,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	ClosedAt       *time.Time       `json:"closed_at,omitempty"`
 }
 
 // DefaultTaskType — тип задачи, если она его не называет. Набор типов
@@ -958,6 +962,9 @@ const (
 	EventStageOverdue = "stage.overdue"
 	// К задаче приложен файл (решение 0064): без прогона, цикл не движется.
 	EventAttachmentAdded = "attachment.added"
+	// Переход прошёл мимо выключенного у задачи этапа (решение 0066, п. 14):
+	// одно событие на пропущенный статус, без прогона.
+	EventStageSkipped = "stage.skipped"
 )
 
 // TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где

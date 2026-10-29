@@ -286,9 +286,11 @@ type MovedTask struct {
 // гейтам, — а правила им нужны актуальные (решение 0036).
 //
 // Статус выбирается по ключу, если в новой версии есть такой же статус той же
-// категории; иначе — начальный статус новой версии. Старая попытка закрывается
-// как abandoned/cancelled, на новом статусе открывается свежая с текущей
-// версией роли, в ленту задачи ложатся события переезда и входа в статус.
+// категории; иначе — начальный статус новой версии. Выбор необязательных
+// этапов пересчитывается под новую версию (решение 0066, п. 16). Старая
+// попытка закрывается как abandoned/cancelled, на новом статусе открывается
+// свежая с текущей версией роли, в ленту задачи ложатся события переезда и
+// входа в статус.
 //
 // Всё — одним запросом: бэклог проекта может быть в тысячи задач, а перенос
 // идёт в транзакции активации, и построчный цикл (десяток запросов на задачу)
@@ -301,7 +303,8 @@ func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID 
 	}
 	rows, err := tx.Query(ctx, `
 		WITH waiting AS (
-			SELECT t.id AS task_id, t.key, t.seq, ws.key AS from_status, sr.id AS run_id
+			SELECT t.id AS task_id, t.key, t.seq, ws.key AS from_status, sr.id AS run_id,
+			       t.optional_stages AS from_stages
 			FROM tasks t
 			JOIN workflow_statuses ws ON ws.id = t.status_id
 			JOIN LATERAL (
@@ -322,7 +325,19 @@ func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID 
 			       coalesce((SELECT max(attempt) FROM stage_runs x
 			                 WHERE x.task_id = w.task_id
 			                   AND x.status_id = coalesce(same.id, $3::uuid)
-			                   AND x.kind = 'stage'), 0) + 1 AS attempt
+			                   AND x.kind = 'stage'), 0) + 1 AS attempt,
+			       w.from_stages,
+			       -- Выбор этапов под новую версию (решение 0066, п. 16):
+			       -- совпавший ключ необязательного статуса сохраняет значение,
+			       -- новый берёт умолчание, исчезнувший отпадает. Статус
+			       -- переезда включается: задача не стоит в выключенном этапе.
+			       coalesce((
+			           SELECT jsonb_object_agg(o.key, CASE
+			               WHEN o.id = coalesce(same.id, $3::uuid) THEN to_jsonb(true)
+			               WHEN jsonb_typeof(w.from_stages -> o.key) = 'boolean' THEN w.from_stages -> o.key
+			               ELSE to_jsonb(o.enabled_by_default) END)
+			           FROM workflow_statuses o
+			           WHERE o.workflow_id = $2 AND o.is_optional), '{}'::jsonb) AS to_stages
 			FROM waiting w
 			LEFT JOIN workflow_statuses same
 			       ON same.workflow_id = $2 AND same.key = w.from_status AND same.category = 'backlog'
@@ -334,7 +349,8 @@ func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID 
 			RETURNING id
 		),
 		moved AS (
-			UPDATE tasks t SET workflow_id = $2, status_id = d.to_status_id, updated_at = now()
+			UPDATE tasks t SET workflow_id = $2, status_id = d.to_status_id,
+			                   optional_stages = d.to_stages, updated_at = now()
 			FROM dest d WHERE t.id = d.task_id
 			RETURNING t.id
 		),
@@ -361,7 +377,8 @@ func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID 
 			       jsonb_build_object(
 			           'from_workflow_id', $1::text, 'to_workflow_id', $2::text,
 			           'workflow', $7::text, 'version', $8::int,
-			           'from_status', d.from_status, 'to_status', d.to_status),
+			           'from_status', d.from_status, 'to_status', d.to_status,
+			           'optional_stages', jsonb_build_object('from', d.from_stages, 'to', d.to_stages)),
 			       clock_timestamp()
 			FROM dest d
 			UNION ALL

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -18,7 +19,9 @@ import (
 // часть контракта: по ним агент выбирает тул, не читая документацию.
 func (s *Server) registerTools() {
 	add(s, "sdlc_whoami",
-		"Кто я, к какому проекту подключён и какие роли в нём заведены.",
+		"Кто я, к какому проекту подключён и какие роли в нём заведены. workflows — активные "+
+			"циклы: типы задач и необязательные этапы optional_stages [{key, name, "+
+			"enabled_by_default}] — ключи для optional_stages в sdlc_create_task.",
 		s.whoami)
 	add(s, "sdlc_list_tasks",
 		"Задачи проекта. claimable=true оставляет только то, что можно забрать прямо сейчас, "+
@@ -81,11 +84,16 @@ func (s *Server) registerTools() {
 		"Закрыть сигнал дрейфа разбором (resolved) или отклонить его (dismissed).",
 		s.resolveDrift)
 	add(s, "sdlc_check_gates",
-		"Что мешает переходу прямо сейчас. Побочных эффектов нет — чистая проверка.",
+		"Что мешает переходу прямо сейчас и где встанет задача: to_status — назначение в цикле, "+
+			"lands_in и skips — статус с учётом выключенных у задачи этапов и пропущенные этапы; "+
+			"unavailable: stage_disabled — возврат в выключенный этап недоступен. Побочных "+
+			"эффектов нет — чистая проверка.",
 		s.checkGates)
 	add(s, "sdlc_request_transition",
 		"Запросить переход вперёд или откат назад. Движок прогоняет гейты; "+
-			"непройденные возвращаются с объяснением, задача остаётся на месте.",
+			"непройденные возвращаются с объяснением, задача остаётся на месте. Выключенные у "+
+			"задачи этапы переход вперёд пропускает: task.status — где задача встала, skips — "+
+			"пропущенные.",
 		s.requestTransition)
 	add(s, "sdlc_heartbeat",
 		"Продлить аренду. Без heartbeat аренда протухает и задача возвращается в общий доступ.",
@@ -175,6 +183,14 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 	if err != nil {
 		return fail(err)
 	}
+	// Необязательные этапы каждого цикла (решение 0066, п. 18): чтение цикла
+	// токену задачи закрыто, а заводящему детей набор нужен до заведения.
+	for i := range active {
+		if active[i].Statuses, err = s.store.ListStatuses(ctx, q, active[i].ID); err != nil {
+			return fail(err)
+		}
+	}
+	workflows := workflowTypes(active)
 
 	roleViews := make([]map[string]any, 0, len(roles))
 	for _, r := range roles {
@@ -203,7 +219,7 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 		"actor":     map[string]any{"handle": me.Handle, "kind": me.Kind},
 		"project":   map[string]any{"key": project.Key, "name": project.Name},
 		"workflow":  map[string]any{"name": wf.Name, "version": wf.Version, "statuses": statuses},
-		"workflows": workflowTypes(active),
+		"workflows": workflows,
 		"roles":     roleViews,
 		// В режиме заголовка актор — это то, чем представился клиент, а не
 		// то, что кто-то проверил (решение 0021).
@@ -305,17 +321,31 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 			"type": t.Type(), "parent": t.ParentKey, "assignee": t.AssigneeHandle,
 			"priority": t.Priority, "multi_repo": t.MultiRepo(),
 			"repositories": repoNames(t), "external_ref": t.ExternalRef,
+			"optional_stages": t.OptionalStages,
 		})
 	}
 	return ok(map[string]any{"tasks": items})
 }
 
-// workflowTypes — какой цикл ведёт какие типы задач.
+// workflowTypes — какой цикл ведёт какие типы задач и какие этапы в нём
+// необязательны: {key, name, enabled_by_default} по position, у цикла без
+// них [].
 func workflowTypes(workflows []domain.Workflow) []map[string]any {
 	out := make([]map[string]any, 0, len(workflows))
 	for _, wf := range workflows {
+		optional := []map[string]any{}
+		statuses := append([]domain.Status(nil), wf.Statuses...)
+		sort.SliceStable(statuses, func(i, j int) bool { return statuses[i].Position < statuses[j].Position })
+		for _, st := range statuses {
+			if st.IsOptional {
+				optional = append(optional, map[string]any{
+					"key": st.Key, "name": st.Name, "enabled_by_default": st.EnabledByDefault,
+				})
+			}
+		}
 		out = append(out, map[string]any{
 			"name": wf.Name, "version": wf.Version, "task_types": wf.TaskTypes,
+			"optional_stages": optional,
 		})
 	}
 	return out
@@ -713,9 +743,14 @@ func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallT
 		if err != nil {
 			return fail(err)
 		}
-		return ok(map[string]any{
+		view := map[string]any{
 			"transition": p.Key, "can_transition": p.Allowed, "gates": p.Gates,
-		})
+			"to_status": p.ToStatus, "lands_in": p.LandsIn, "skips": p.Skips,
+		}
+		if p.Unavailable != "" {
+			view["unavailable"] = p.Unavailable
+		}
+		return ok(view)
 	}
 
 	task, err := s.store.GetTaskByKey(ctx, s.store.DB(), in.TaskKey)
@@ -787,8 +822,11 @@ func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sd
 			}))
 	}
 
+	// task.status — фактический статус после пропусков, skips — пропущенные
+	// выключенные этапы (решение 0066, п. 15).
 	return ok(map[string]any{
 		"task":           map[string]any{"key": res.Task.Key, "status": res.Task.StatusKey},
+		"skips":          res.Skips,
 		"gates":          res.Gates,
 		"new_stage_run":  res.NewRun,
 		"finished_stage": res.FromRun.ID,
