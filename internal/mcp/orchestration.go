@@ -77,6 +77,8 @@ type createTaskInput struct {
 	ModelLevel  string `json:"model_level,omitempty" jsonschema:"рекомендованный уровень модели задачи: low, medium, high"`
 	// any — по той же причине, что external_ref.
 	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов: {\"development\": {\"model_level\": \"high\"}}; ключи — статусы цикла задачи с ролью-исполнителем"`
+	// any — по той же причине, что external_ref.
+	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов: {\"design\": false}; ключи — необязательные статусы цикла (sdlc_whoami, workflows[].optional_stages), не названные берут умолчание цикла"`
 }
 
 func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallToolResult, any, error) {
@@ -112,6 +114,10 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 	if in.ModelLevel != "" {
 		modelLevel = &in.ModelLevel
 	}
+	optionalStages, err := rawArgument(in.OptionalStages)
+	if err != nil {
+		return fail(err)
+	}
 	task, err := s.engine.CreateTask(ctx, key, actor(ctx).ID, workflow.CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{
 			ParentKey: in.Parent, TaskType: in.Type, Title: in.Title,
@@ -121,6 +127,7 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		},
 		AssigneeHandle: in.Assignee,
 		Blocks:         in.Blocks,
+		OptionalStages: optionalStages,
 		Level:          level,
 	})
 	if err != nil {
@@ -132,6 +139,7 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		"assignee": task.AssigneeHandle, "repositories": repoNames(task),
 		"external_ref": task.ExternalRef,
 		"model_level":  task.ModelLevel, "stage_settings": task.StageSettings,
+		"optional_stages": task.OptionalStages,
 	})
 }
 
@@ -159,6 +167,8 @@ type updateTaskInput struct {
 	ModelLevel  *string `json:"model_level,omitempty" jsonschema:"уровень модели задачи: low, medium, high; пустая строка снимает его"`
 	// any — по той же причине, что external_ref; nil — не трогать.
 	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов, сливаются с прежними: {\"testing\": {\"model_level\": \"low\"}}; {\"testing\": {\"model_level\": \"\"}} снимает уровень этапа"`
+	// any — по той же причине; nil — не трогать.
+	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов, сливается по ключам: {\"design\": true}; своей задаче токеном задачи — нельзя (решение человека), дочерним — можно"`
 }
 
 func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallToolResult, any, error) {
@@ -180,6 +190,15 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 	edit := workflow.UpdateTaskInput{
 		Title: in.Title, Description: in.Description, Priority: in.Priority,
 		Labels: in.Labels, ModelLevel: in.ModelLevel, Level: level,
+		// Выбор этапов своей задачи токену задачи закрыт — правило движка.
+		Bound: s.auth.Bound(identity(ctx)),
+	}
+	if in.OptionalStages != nil {
+		stages, err := rawArgument(in.OptionalStages)
+		if err != nil {
+			return fail(err)
+		}
+		edit.OptionalStages = &stages
 	}
 	if in.StageSettings != nil {
 		settings, err := rawArgument(in.StageSettings)
@@ -204,6 +223,7 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 		"priority": task.Priority, "labels": task.Labels, "status": task.StatusKey,
 		"external_ref": task.ExternalRef,
 		"model_level":  task.ModelLevel, "stage_settings": task.StageSettings,
+		"optional_stages": task.OptionalStages,
 	})
 }
 

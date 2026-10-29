@@ -77,22 +77,37 @@ func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {
 }
 
 // TransitionPreview — переход вместе с текущим вердиктом его гейтов.
+//
+// ToStatus — назначение перехода в цикле, как всегда; где встанет задача с
+// её выбором этапов — LandsIn и Skips (решение 0066, п. 15). Поля
+// добавочные: клиент прежней версии читает ToStatus с прежним смыслом.
 type TransitionPreview struct {
-	Key      string        `json:"key"`
-	Name     string        `json:"name"`
-	Kind     string        `json:"kind"`
-	ToStatus string        `json:"to_status"`
-	Allowed  bool          `json:"allowed"`
-	Gates    []GateOutcome `json:"gates"`
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	ToStatus string `json:"to_status"`
+	// Статус, где встанет задача: без пропуска — ToStatus, у недоступного
+	// перехода — null.
+	LandsIn *string `json:"lands_in"`
+	// Ключи выключенных этапов, которые переход пропустит, по порядку.
+	Skips []string `json:"skips"`
+	// Почему переход недоступен (UnavailableStageDisabled); только у
+	// недоступного.
+	Unavailable string        `json:"unavailable,omitempty"`
+	Allowed     bool          `json:"allowed"`
+	Gates       []GateOutcome `json:"gates"`
 }
 
 // TransitionResult — итог выполненного (или заблокированного) перехода.
+// Task.Status — фактический статус задачи после цепочки пропусков.
 type TransitionResult struct {
 	Task    domain.Task      `json:"task"`
 	Blocked bool             `json:"blocked"`
 	Gates   []GateOutcome    `json:"gates"`
 	FromRun domain.StageRun  `json:"from_stage_run"`
 	NewRun  *domain.StageRun `json:"new_stage_run,omitempty"`
+	// Ключи пропущенных выключенных этапов по порядку; без пропуска [].
+	Skips []string `json:"skips"`
 }
 
 // Preview прогоняет гейты всех доступных переходов, ничего не меняя.
@@ -100,10 +115,11 @@ type TransitionResult struct {
 func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPreview, error) {
 	q := e.store.DB()
 
-	transitions, err := e.store.AvailableTransitions(ctx, q, task.WorkflowID, task.StatusID)
+	g, err := e.cycleGraph(ctx, q, task.WorkflowID)
 	if err != nil {
 		return nil, err
 	}
+	transitions := g.available(task.StatusID)
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
 	if err != nil {
 		return nil, err
@@ -112,24 +128,25 @@ func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPre
 	if err != nil {
 		return nil, err
 	}
-	statuses, err := e.store.ListStatuses(ctx, q, task.WorkflowID)
-	if err != nil {
-		return nil, err
-	}
-	statusKey := map[uuid.UUID]string{}
-	for _, st := range statuses {
-		statusKey[st.ID] = st.Key
-	}
+	choice := storedChoice(task.OptionalStages)
 
 	out := make([]TransitionPreview, 0, len(transitions))
 	for _, t := range transitions {
+		land, err := planLanding(g, choice, t)
+		if err != nil {
+			return nil, err
+		}
+		// Гейты недоступного перехода вычисляются как обычно: человек видит,
+		// что ещё понадобится, когда включит этап.
 		outcomes, allowed, err := e.evaluate(ctx, q, task, run, t, stageArtifacts, taskArtifacts)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, TransitionPreview{
 			Key: t.Key, Name: t.Name, Kind: t.Kind,
-			ToStatus: statusKey[t.ToStatusID], Allowed: allowed, Gates: outcomes,
+			ToStatus: g.byID[t.ToStatusID].Key, LandsIn: land.landsIn(), Skips: land.skipKeys(),
+			Unavailable: land.Unavailable,
+			Allowed:     allowed && land.Unavailable == "", Gates: outcomes,
 		})
 	}
 	return out, nil
@@ -150,7 +167,7 @@ func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, act
 // человека к 0049). nil — переход человека или агента с личным токеном,
 // правила те же, что у Execute. Транспорты зовут его, а не Execute.
 func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, bound *TaskBinding, comment string) (TransitionResult, error) {
-	var res TransitionResult
+	res := TransitionResult{Skips: []string{}}
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
@@ -172,6 +189,23 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			if err := executorTransition(bound, task, transition); err != nil {
 				return err
 			}
+		}
+
+		// Куда встанет задача, решает её выбор этапов под той же блокировкой
+		// (решение 0066, п. 12): правка выбора ждёт конца перехода, и цепочка
+		// видит либо прежний набор, либо новый целиком. Возврат в
+		// выключенный этап отбивается до гейтов — иначе в gate_results лёг бы
+		// след и завелась бы перепроверка перехода, который не состоится.
+		g, err := e.cycleGraph(ctx, tx, task.WorkflowID)
+		if err != nil {
+			return err
+		}
+		land, err := planLanding(g, storedChoice(task.OptionalStages), transition)
+		if err != nil {
+			return err
+		}
+		if land.Unavailable != "" {
+			return stageDisabled(land)
 		}
 
 		run, err := e.store.CurrentStageRun(ctx, tx, task.ID, task.StatusID)
@@ -224,10 +258,10 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 				map[string]any{"transition": transition.Key, "gates": outcomes})
 		}
 
-		toStatus, err := e.store.GetStatus(ctx, tx, transition.ToStatusID)
-		if err != nil {
-			return err
-		}
+		// Гейты обходных переходов цепочки не вычисляются и не пишутся
+		// (п. 12, 16): гейты — только у запрошенного перехода.
+		toStatus := land.To
+		res.Skips = land.skipKeys()
 
 		runState, outcome, eventType := finishSemantics(transition.Kind)
 		if err := e.store.FinishStageRun(ctx, tx, run.ID, runState, outcome); err != nil {
@@ -237,11 +271,15 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			return err
 		}
 
+		// Цепочка бывает только у advance, поэтому rejected_from при пропуске
+		// не пишется. Прогон открывается только там, где задача встала, и
+		// помнит последний обходной переход: по нему действует
+		// stage_time_limit (0061, п. 9).
 		var rejectedFrom *uuid.UUID
 		if transition.Kind == "reject" {
 			rejectedFrom = &run.ID
 		}
-		newRun, err := e.store.EnterStatus(ctx, tx, task.ID, toStatus.ID, rejectedFrom, &transition.ID)
+		newRun, err := e.store.EnterStatus(ctx, tx, task.ID, toStatus.ID, rejectedFrom, &land.Via.ID)
 		if err != nil {
 			return err
 		}
@@ -252,15 +290,27 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			"from":       task.StatusKey,
 			"to":         toStatus.Key,
 		}
+		if len(land.Skipped) > 0 {
+			payload["skips"] = res.Skips
+		}
 		if comment != "" {
 			payload["comment"] = comment
 		}
 		if err := e.store.AppendEvent(ctx, tx, task.ID, &run.ID, eventType, actor, payload); err != nil {
 			return err
 		}
+		// У пропущенного этапа нет прогона, исполнителя и попытки: след —
+		// только событие в ленте задачи.
+		for i, st := range land.Skipped {
+			if err := e.store.AppendEvent(ctx, tx, task.ID, nil, domain.EventStageSkipped, actor,
+				map[string]any{"status": st.Key, "bypass_transition": land.Bypass[i].Key,
+					"transition": transition.Key}); err != nil {
+				return err
+			}
+		}
 		if err := e.store.AppendEvent(ctx, tx, task.ID, &newRun.ID, domain.EventStageEntered, actor,
 			map[string]any{"status": toStatus.Key, "attempt": newRun.Attempt,
-				"transition": transition.Key}); err != nil {
+				"transition": land.Via.Key}); err != nil {
 			return err
 		}
 
