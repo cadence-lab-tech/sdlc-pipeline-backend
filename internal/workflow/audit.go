@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +46,26 @@ var auditSecretKeys = map[string]bool{
 	"code_verifier": true, "id_token": true, "access_token": true, "refresh_token": true,
 }
 
+// auditSecretParams — имена параметров строки запроса и фрагмента ссылки,
+// значения которых не пишутся (CLAB-226): все ключи auditSecretKeys и эти.
+// Сравнение без учёта регистра.
+var auditSecretParams = map[string]bool{
+	"key": true, "apikey": true, "sig": true, "signature": true, "passwd": true,
+	"pwd": true, "auth": true, "credential": true, "session": true,
+}
+
+// auditSecretParamParts — подстроки, по которым имя параметра ссылки считается
+// секретным (sas_token, upload_token, X-Goog-Signature).
+var auditSecretParamParts = []string{"token", "secret", "password", "signature", "credential"}
+
+// auditSecretParamPrefix — подписанная ссылка S3: вырезаются все X-Amz-*,
+// половина подписи без даты и ключа бесполезна, а оставлять её незачем.
+const auditSecretParamPrefix = "x-amz-"
+
+// auditURL — ссылка внутри строки параметра: схема по RFC 3986 и всё до
+// пробела, кавычки или угловой скобки.
+var auditURL = regexp.MustCompile("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'`<>«»]+")
+
 // auditBodyKeys — тела артефактов и документов: вместо содержимого — размер
 // и sha256, по которому запись сверяется с blobs.
 var auditBodyKeys = map[string]bool{"content": true}
@@ -54,7 +76,8 @@ type AuditEntry struct {
 	Identity Identity
 	Channel  string
 	Action   string
-	// Параметры как пришли: писатель сам чистит их от секретов и тел.
+	// Параметры как пришли: писатель сам чистит их от секретов, тел и
+	// учётных данных внутри ссылок.
 	Params     any
 	Outcome    string
 	HTTPStatus int
@@ -179,7 +202,9 @@ func (a *Audit) Record(ctx context.Context, e AuditEntry) {
 
 // SanitizeAuditParams превращает параметры вызова в то, что можно хранить:
 // секреты — "[redacted]", тела (content) и строки длиннее 4 КБ — размер и
-// sha256, всё целиком — не больше 16 КБ.
+// sha256, всё целиком — не больше 16 КБ. Секрет ищется по имени ключа, а в
+// коротких строках — ещё и по содержимому: у ссылок вырезаются userinfo и
+// значения секретных параметров запроса и фрагмента (CLAB-226).
 func SanitizeAuditParams(params any) json.RawMessage {
 	if params == nil {
 		return json.RawMessage(`{}`)
@@ -236,9 +261,89 @@ func sanitizeValue(v any, key string) any {
 		if len(x) > auditMaxString {
 			return digest([]byte(x))
 		}
-		return x
+		return redactURLs(x)
 	}
 	return v
+}
+
+// redactURLs чистит ссылки внутри строки: и строку-ссылку целиком, и ссылку,
+// вставленную в текст. Текст вокруг ссылки не меняется; если вырезать
+// нечего, строка возвращается та же, байт в байт.
+func redactURLs(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	return auditURL.ReplaceAllStringFunc(s, redactURL)
+}
+
+// redactURL режет ссылку по RFC 3986 на сырые сегменты и меняет только
+// секреты: userinfo — на "[redacted]@", значения секретных параметров — на
+// "[redacted]". Разбор строковый, без url.Parse: ссылка, которую стандартный
+// разбор не берёт (порт не числом, неэкранированные символы), чистится так
+// же, а прочие параметры не перекодируются и не пересортировываются.
+func redactURL(u string) string {
+	i := strings.Index(u, "://")
+	head, rest := u[:i+3], u[i+3:]
+	rest, fragment, hasFragment := strings.Cut(rest, "#")
+	rest, query, hasQuery := strings.Cut(rest, "?")
+	authority, path := rest, ""
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		authority, path = rest[:j], rest[j:]
+	}
+	// Userinfo — до последней "@" в authority, как у url.Parse: в пароле
+	// "@" бывает неэкранированной. Токен GitHub работает и именем
+	// пользователя, поэтому вырезается и userinfo без пароля.
+	if at := strings.LastIndexByte(authority, '@'); at > 0 {
+		authority = auditRedacted + authority[at:]
+	}
+	var b strings.Builder
+	b.Grow(len(u))
+	b.WriteString(head)
+	b.WriteString(authority)
+	b.WriteString(path)
+	if hasQuery {
+		b.WriteByte('?')
+		b.WriteString(redactURLParams(query))
+	}
+	if hasFragment {
+		// Фрагмент вида k=v&… (неявный поток OAuth) — как строка запроса;
+		// сегмент без "=" не трогается.
+		b.WriteByte('#')
+		b.WriteString(redactURLParams(fragment))
+	}
+	return b.String()
+}
+
+// redactURLParams заменяет значения секретных параметров в сырой строке
+// k=v&k=v; имена, прочие значения и порядок остаются как были.
+func redactURLParams(raw string) string {
+	segs := strings.Split(raw, "&")
+	for i, seg := range segs {
+		name, value, ok := strings.Cut(seg, "=")
+		if ok && value != "" && secretURLParam(name) {
+			segs[i] = name + "=" + auditRedacted
+		}
+	}
+	return strings.Join(segs, "&")
+}
+
+// secretURLParam — имя параметра ссылки секретное: из auditSecretKeys или
+// auditSecretParams, с секретной подстрокой или префиксом x-amz-. Имя
+// сравнивается раскодированным (access%5Ftoken) и без учёта регистра.
+func secretURLParam(name string) bool {
+	if dec, err := url.QueryUnescape(name); err == nil {
+		name = dec
+	}
+	n := strings.ToLower(strings.TrimSpace(name))
+	if auditSecretKeys[n] || auditSecretParams[n] || strings.HasPrefix(n, auditSecretParamPrefix) {
+		return true
+	}
+	for _, part := range auditSecretParamParts {
+		if strings.Contains(n, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func digest(b []byte) map[string]any {
