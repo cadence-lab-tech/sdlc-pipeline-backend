@@ -192,6 +192,25 @@ func TestOptionalStagesOverRESTAndMCP(t *testing.T) {
 	if code, body := f.json("PATCH", "/v1/tasks/"+key, tt, map[string]any{"title": "Свой заголовок"}); code != http.StatusOK {
 		t.Fatalf("заголовок своей задачи токеном: %d %v", code, body)
 	}
+	// AC-5: выбор задачи вне круга записи токена — 403 по REST и MCP, выбор
+	// не изменён.
+	code, stranger := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Чужая"})
+	if code != http.StatusCreated {
+		t.Fatalf("задача вне круга записи: %d %v", code, stranger)
+	}
+	strangerKey := stranger["key"].(string)
+	if code, body := f.json("PATCH", "/v1/tasks/"+strangerKey, tt, map[string]any{
+		"optional_stages": map[string]any{"design": true}}); code != http.StatusForbidden {
+		t.Fatalf("выбор задачи вне круга записи токеном: %d %v", code, body)
+	}
+	if out, isErr := f.mcp(tt, "sdlc_update_task", map[string]any{
+		"task_key": strangerKey, "optional_stages": map[string]any{"design": true}}); !isErr {
+		t.Fatalf("sdlc_update_task задачи вне круга записи: %v", out)
+	}
+	if _, got := f.json("GET", "/v1/tasks/"+strangerKey, f.root, nil); !reflect.DeepEqual(stagesOf(got),
+		map[string]any{"design": false, "docs": true}) {
+		t.Fatalf("отказ вне круга записи изменил выбор: %v", got["task"])
+	}
 
 	// AC-11: человек выключает оба этапа — представление у всех каналов.
 	if code, body := f.json("PATCH", "/v1/tasks/"+key, f.root, map[string]any{
