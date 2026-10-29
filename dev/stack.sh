@@ -386,7 +386,10 @@ e2e)
     # Сквозной проход в своём стеке: сценарий заводит свою задачу и идёт
     # против API этого стека, поэтому повторяется на той же базе.
     load_or_create "${1:?какой задаче}"
-    SDLC_API_URL="http://localhost:$API_PORT/v1" "$dev/e2e.sh"
+    # Окружение явное: адрес стека, без токена, проекта и конфига
+    # запустившего (исполнитель этапа держит там данные рабочего инстанса).
+    env -u SDLC_TOKEN -u SDLC_PROJECT -u CLAB_CONFIG_DIR \
+        SDLC_API_URL="http://localhost:$API_PORT/v1" "$dev/e2e.sh"
     ;;
 test-db)
     # Выбор базы для make test-integration: вся логика реестра здесь, Makefile

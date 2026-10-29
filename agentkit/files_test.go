@@ -29,7 +29,7 @@ func TestKitDescribesFiles(t *testing.T) {
 		"clab submit",
 		"--file shot.png",
 		"format: binary",
-		"clab heartbeat <key> -- clab attach <key> big.bin",
+		"clab heartbeat <key> --with-credentials -- clab attach <key> big.bin",
 		"clab show",
 		"clab claim",
 		"attachments",

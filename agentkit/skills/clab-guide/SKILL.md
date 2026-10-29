@@ -86,7 +86,10 @@ the rest of the commands.
   `clab transition --artifact` takes text only.
 - A file over the server limit is refused before sending; "the server does
   not support attachments" means an older server. A long transfer runs
-  through the wrapper: `clab heartbeat <key> -- clab attach <key> big.bin`.
+  through the wrapper: `clab heartbeat <key> --with-credentials -- clab attach <key> big.bin`.
+  Without `--with-credentials` the wrapper runs the command without clab
+  credentials (no token, host, project or actor, an empty `CLAB_CONFIG_DIR`),
+  so an inner `clab` would have no host.
 
 ## Scope
 

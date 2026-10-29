@@ -84,8 +84,8 @@ The steps are the same in both modes.
    - A file over the server limit is refused before it is sent; "the server
      does not support attachments" means an older server. An upload or a
      download that can outlast the heartbeat interval runs through the
-     wrapper: `clab heartbeat <key> -- clab attach <key> big.bin` (an
-     executor writes it with the usual prefix). An executor saves files
+     wrapper: `clab heartbeat <key> --with-credentials -- clab attach <key>
+     big.bin` (an executor writes it with the usual prefix). An executor saves files
      only into its own run directory.
 
    **Rules and data.** The stage rules are the role instruction, its
@@ -131,7 +131,16 @@ The steps are the same in both modes.
    the lease while you wait for it — run it through the wrapper: `clab
    heartbeat <key> -- <command> [arguments]`. The wrapper renews the lease
    while the command runs, hands it stdin and output and exits with its
-   code; an executor writes it with the same prefix as any `clab`. Under
+   code; an executor writes it with the same prefix as any `clab`. The
+   command runs without clab credentials: no `SDLC_TOKEN`, `SDLC_API_URL`,
+   `SDLC_PROJECT` or `SDLC_ACTOR`, and `CLAB_CONFIG_DIR` is an empty
+   temporary directory, so an end-to-end script or a built `clab` inside it
+   cannot reach the working instance with the task token; the wrapper
+   itself renews the lease with its own credentials. Pass `--with-credentials`
+   only when the command is a `clab` that must act with the task token
+   (`clab heartbeat <key> --with-credentials -- clab attach <key> big.bin`).
+   The wrapper prints one line to stderr saying the credentials were left
+   out. Under
    `/clab-run` the orchestrator holds the lease too, the wrapper is a
    safety net. To drop the stage unfinished — `clab usage`, then `clab
    release <key> --note "…"`.
