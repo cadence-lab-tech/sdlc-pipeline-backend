@@ -192,6 +192,10 @@ func TestSecretURLParamNames(t *testing.T) {
 		"aws_secret_access_key", "secret_key", "jwt", "id_jwt", "pass", "bearer", "bearer_token",
 		"private-key", "PHPSESSID", "jsessionid", "session_id", "sid", "otp", "hmac", "authkey", "auth_key",
 		"user_passw", "X-Amz-Security-Token", "x_amz_date",
+		// Круг 3: слово целиком — где угодно в имени, в любом написании.
+		"authToken", "apiSecret", "GITHUB_TOKEN", "private_token", "personal_access_token",
+		"SecretAccessKey", "accesstoken", "refreshtoken", "sessionId", "db_pass", "user_pwd",
+		"ClientSecret", "clientsecret", "codeVerifier", "max_token", "access%5Ftoken",
 	}
 	for k := range auditSecretKeys {
 		secret = append(secret, k)
@@ -205,9 +209,23 @@ func TestSecretURLParamNames(t *testing.T) {
 		"v", "page", "state", "ref", "q", "response-content-type", "keyword", "monkey", "author",
 		"passport", "bypass", "compass", "sidebar", "session_count", "signed_in", "keyboard", "keys",
 		"accessibility", "author_id", "design", "codec", "zip_code", "redirect_uri", "next", "email",
+		// Круг 3 (решение человека): подстрока — не слово.
+		"tokens", "max_tokens", "maxTokens", "tokenizer", "passenger", "passage",
+		"authority", "authenticated", "authors", "signal", "signup", "sidekiq", "ssid", "kid", "turkey",
+		"hashkey", "sortkey", "primary_key", "status_code", "key_id", "sig_alg", "hmac_alg",
+		"auth_type", "session_timeout", "secretary", "keypass_hint",
 	} {
 		if secretURLParam(name) {
 			t.Errorf("%q считается секретным", name)
+		}
+	}
+}
+
+// Быстрый отсев в secretURLParam не теряет слов перечня.
+func TestSecretWordHints(t *testing.T) {
+	for w := range auditSecretParamWords {
+		if !containsAny(w, auditSecretWordHints) {
+			t.Errorf("слово %q не содержит ни одного куска auditSecretWordHints", w)
 		}
 	}
 }
@@ -332,12 +350,32 @@ func TestSanitizeAuditParamsPlainTextUntouched(t *testing.T) {
 		"a//b и // комментарий",
 		"C# и issue #12, раздел #top",
 		"что?ключ=1",
+		// Круг 3 (решение человека): перед "?" не хост и не путь — проза.
+		"что?key=1",
+		"x?token=abc",
+		"Вопрос?pass=1, а дальше#token=2",
+		"https://h/?tokens=5&max_tokens=100&tokenizer=bpe",
+		"api.example.com/v1/chat?max_tokens=100&tokenizer=bpe",
 		"100% готово, скидка 50%25",
 		"%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82",
 		"https://example.com/search?q=%D0%BF&page=2&next=%2Fhome",
 		"https://h/?passport=1&bypass=2&pass=&token=",
 		"git@github.com:acme/app.git",
 		"owner/name@v1.2.3",
+		// Строки из проверки круга 2 — после круга 3 так же байт в байт.
+		"http://localhost:3000/@vite/client?x=1",
+		"@scope/pkg@1.2.3",
+		"ghcr.io/org/img@sha256:0123abcd",
+		"v1.2.3@sha256:0123abcd",
+		"a:b@c",
+		"%s %d и date +%Y-%m-%d",
+		"https://github.com/o/r/blob/main/a.go#L10-L20",
+		"https://h:8080/x@y",
+		"https://h:abc/x",
+		"tel: +7 (999) 123-45-67",
+		"https://h/x?q=%D0%BF%D1%80",
+		"?q=%D0%BF&next=%2Fhome",
+		"https://h/x?password=",
 		"https://[::1]:8080/x?a=1#f@x",
 	} {
 		raw := SanitizeAuditParams(map[string]any{"s": s})
@@ -347,6 +385,49 @@ func TestSanitizeAuditParamsPlainTextUntouched(t *testing.T) {
 		}
 		if out["s"] != s {
 			t.Errorf("строка без секретов изменилась:\nвход  %s\nвыход %s", s, out["s"])
+		}
+	}
+}
+
+// Секреты, вырезанные на круге 2 (проверка тестировщика), вырезаются и
+// после круга 3: предел глубины и узкие имена их не задевают.
+func TestRedactURLsRound2Still(t *testing.T) {
+	for _, in := range []string{
+		"//MARK@host/p", "u:MARK@[::1]:80/p", "u:MARK@10.0.0.1/p", "/cb?access_token=MARK",
+		"host/cb#access_token=MARK", "u:MARK@host?x=1", "u:MARK@host#f", "u:p@MARK@host/x",
+		"u:MARK%40x@host/x", "см. token%3DMARK в логе", "https://h/x?a=1#access_token%3DMARK",
+		"https://u%3AMARK@host/x", "https://u:MARK%40@host/x", "https://h/x?%74oken=MARK",
+		"https://h/go?next=https%3A%2F%2Fu%3Ap%2540MARK%40host%2Fx%3Ftoken%3DMARK2",
+		`https://u:p"MARK@h`, "https://u:p'MARK@h", "https://u:p`MARK@h", "https://u:p<MARK@h",
+		"https://u:p/MARK/z@h/x", "https://u:p/ss@h/p?token=MARK",
+		"git clone https://alice:pa/MARK@github.com/a/b.git",
+		"postgres://app:MARK@db:5432/cadence?sslmode=disable", "redis://:MARK@h:6379",
+		"git+ssh://u:MARK@h/x.git", "HTTPS://U:MARK@H/X", "https://u:MARK:more@h/x",
+		`{"url":"https://u:MARK@h/x"}`, "(https://u:MARK@h/x)", "a;https://u:MARK@h/x,b",
+		"строка\nhttps://u:MARK@h/x\nещё", "https://h/?api-key=MARK&x-api-key=MARK2&AWSAccessKeyId=MARK3",
+		"https://h/?PHPSESSID=MARK&jsessionid=MARK2&X-Amz-Security-Token=MARK3&pass=MARK4",
+	} {
+		if got := redactURLs(in); strings.Contains(got, "MARK") {
+			t.Errorf("секрет остался:\nвход  %s\nвыход %s", in, got)
+		}
+	}
+}
+
+// Известные пробелы (решение человека, круг 3): не закрываются и описаны в
+// CLAUDE.md, MCP_CONTRACT.md и admin.md пакета. Тест держит описание
+// честным: закрыли пробел — строку отсюда и из трёх документов убрать.
+func TestRedactURLsKnownGaps(t *testing.T) {
+	for _, in := range []string{
+		"u:GAPMARK@host",                // без схемы, без пути и порта
+		"https://u:12/GAPMARK@h",        // пароль из цифр с "/" — как порт
+		"https://u:p/a@GAP/MARK@h/x",    // пароль с "/" после "@"
+		"https://u:p GAPMARK@h",         // пробел в пароле
+		"см. %74oken=GAPMARK",           // имя в процентной записи вне ссылки
+		"localhost:8080?token=GAPMARK",  // без схемы, перед "?" нет точки и "/"
+		"https://h/?dbpassword=GAPMARK", // склеенное имя вне перечня
+	} {
+		if got := redactURLs(in); !strings.Contains(got, "MARK") {
+			t.Errorf("пробел закрыт, обновите документацию: %q → %q", in, got)
 		}
 	}
 }
@@ -368,18 +449,108 @@ func FuzzRedactURLs(f *testing.F) {
 	})
 }
 
-// Вложенность не раздувает время: 4 КБ из одних «//» и «%25» — рекурсия
-// конечна и укладывается в доли секунды.
-func TestRedactURLsDeepNesting(t *testing.T) {
-	for _, s := range []string{
-		strings.Repeat("//a", auditMaxString/3),
-		"https://h/?n=" + strings.Repeat("%25", auditMaxString/3-6),
-		strings.Repeat("https://u:p@h/", auditMaxString/14),
-	} {
-		start := time.Now()
-		_ = redactURLs(s)
-		if d := time.Since(start); d > 2*time.Second {
-			t.Fatalf("строка %d байт чистилась %s", len(s), d)
+// auditWorstUnits — куски, из повторов которых строка разбиралась дольше
+// всего: «//» и «/» — вложенность ссылок, «%25» и «%2525» — процентная
+// запись в процентной записи, остальные — userinfo, запрос и фрагмент на
+// каждом шаге (CLAB-226, круг 3).
+var auditWorstUnits = []string{
+	"//", "/", "//:@", "///@", "https://", "https://u:p@h/", "//u@h?token=x&", "//a?x=//a#y=",
+	"%25", "%2525", "%2F%2F", "%3D", "a%3D", "%40%3A",
+	"a:b@", "a:b@c/", "u:p/s@h/", ":@", "@", "?a=", "#a=", "?", "a.b/c?token=", "x?",
+}
+
+// worstString — строка длиной не больше n из повторов unit; "%2525"
+// повторяется как "%" и хвост "25", чтобы раскодировалась на каждом уровне.
+func worstString(unit string, n int) string {
+	if unit == "%2525" {
+		return "%" + strings.Repeat("25", (n-1)/2)
+	}
+	return strings.Repeat(unit, n/len(unit))
+}
+
+// Разбор ссылок линеен по длине строки (CLAB-226, круг 3): шестнадцать
+// строк по 1 КБ и одна в 16 КБ из того же куска чистятся за сравнимое
+// время. Квадратичный разбор даёт на длинной строке в шестнадцать раз
+// больше, линейный — столько же; порог 4 оставляет место шуму машины.
+// Минимум из пяти замеров убирает паузы сборщика мусора.
+func TestRedactURLsLinear(t *testing.T) {
+	measure := func(fn func()) time.Duration {
+		best := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			fn()
+			best = min(best, time.Since(start))
 		}
+		return best
+	}
+	for _, unit := range auditWorstUnits {
+		small, big := worstString(unit, 1<<10), worstString(unit, 16<<10)
+		tSmall := measure(func() {
+			for range 16 {
+				_ = redactURLs(small)
+			}
+		})
+		tBig := measure(func() { _ = redactURLs(big) })
+		// Доли миллисекунды меряются с шумом: сравниваем, только когда
+		// длинная строка заметно дольше 1 мс.
+		if tBig > time.Millisecond && tBig > 4*tSmall {
+			t.Errorf("%q: 16 × 1 КБ — %s, 16 КБ — %s: рост быстрее линейного", unit, tSmall, tBig)
+		}
+	}
+}
+
+// Тело в 4 МБ из тысячи строк по 4 КБ худшего вида — то, что api
+// принимает и на отказе 401 (CLAB-226, круг 3: было 44 с). Порог щедрый на
+// медленную машину CI; замер на верстаке — в разборе изменений.
+func TestSanitizeAuditParamsWorstBody(t *testing.T) {
+	for _, unit := range []string{"//", "//:@", "%2525", "https://u:p@h/", "//u@h?token=x&"} {
+		s := worstString(unit, auditMaxString-2)
+		items := make([]any, 1000)
+		for i := range items {
+			items[i] = s
+		}
+		start := time.Now()
+		_ = SanitizeAuditParams(map[string]any{"x": items})
+		d := time.Since(start)
+		t.Logf("%q: тело из 1000 строк по %d байт — %s", unit, len(s), d)
+		if d > 3*time.Second {
+			t.Errorf("%q: тело из 1000 строк по %d байт чистилось %s", unit, len(s), d)
+		}
+	}
+}
+
+// Глубже auditMaxDepth разбор не идёт: кусок, где может лежать секрет,
+// заменяется целиком, остальное остаётся байт в байт.
+func TestRedactURLsTooDeep(t *testing.T) {
+	deep := "https://h/" + strings.Repeat("a//", auditMaxDepth+2)
+	if got := redactURLs(deep + "x"); got != deep+"x" {
+		t.Fatalf("глубокая ссылка без секретов изменилась: %q", got)
+	}
+	for _, in := range []string{
+		deep + "ghp_DEEPMARK@host/x",
+		deep + "x?token=DEEPMARK",
+		strings.Repeat("https://h/?u=", auditMaxDepth+2) + "https://h/x?a=1&token=DEEPMARK",
+		"https://h/?n=%" + strings.Repeat("25", auditMaxDepth+2) + "3D",
+	} {
+		if got := redactURLs(in); strings.Contains(got, "DEEPMARK") || !strings.Contains(got, auditRedacted) && strings.Contains(in, "MARK") {
+			t.Errorf("глубже предела секрет остался:\nвход  %s\nвыход %s", in, got)
+		}
+	}
+	// В пределах глубины разбор прежний: вырезается только секрет.
+	in := "https://h/go?u=https://h2/go?u=https://u:SHALLOWMARK@h3/x&v=1"
+	if got, want := redactURLs(in), "https://h/go?u=https://h2/go?u=https://[redacted]@h3/x&v=1"; got != want {
+		t.Fatalf("\nвход    %s\nвыход   %s\nожидали %s", in, got, want)
+	}
+}
+
+func BenchmarkRedactURLs(b *testing.B) {
+	for _, unit := range auditWorstUnits {
+		s := worstString(unit, auditMaxString)
+		b.Run(unit, func(b *testing.B) {
+			b.SetBytes(int64(len(s)))
+			for b.Loop() {
+				_ = redactURLs(s)
+			}
+		})
 	}
 }
