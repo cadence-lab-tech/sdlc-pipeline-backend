@@ -90,6 +90,7 @@ type stateView struct {
 		Description *string         `json:"description"`
 		ExternalRef json.RawMessage `json:"external_ref"`
 		taskLevels
+		taskStages
 	} `json:"task"`
 	// Рекомендация прогона (решение 0060). Сервер прежней версии её не
 	// отдаёт — тогда строк уровня в сводке нет.
@@ -140,8 +141,8 @@ type stateView struct {
 	} `json:"context"`
 	GatesAhead []struct {
 		Transition string `json:"transition"`
-		ToStatus   string `json:"to_status"`
-		Gates      []struct {
+		landing
+		Gates []struct {
 			Key      string `json:"key"`
 			Blocking bool   `json:"blocking"`
 		} `json:"gates"`
@@ -217,6 +218,7 @@ func printSummary(s stateView, rejectionLine bool) {
 	pairs = append(pairs, "Репозитории:", joinOr(repos, "—"))
 	pairs = append(pairs, "Контекст:", fmt.Sprintf("артефактов ранее %d, сигналов дрейфа %d",
 		len(s.Context.PriorArtifacts), len(s.Context.Drift)))
+	stagesAfter := len(pairs) / 2
 	if s.Context.Rejection != nil && rejectionLine {
 		pairs = append(pairs, "Возврат:", trunc(s.Context.Rejection.Reason, 120))
 	}
@@ -224,6 +226,12 @@ func printSummary(s stateView, rejectionLine bool) {
 		pairs = append(pairs, "Предел этапа:", s.StageLimit.line(s.Task.Key))
 	}
 	lines := kvLines(pairs...)
+	// Выбор этапов — строкой без выравнивания, сразу после «Контекст»
+	// (решение 0066): пустого набора и сервера прежней версии для вывода нет.
+	if line := s.Task.taskStages.line(); line != "" {
+		stagesAfter = min(stagesAfter, len(lines))
+		lines = append(lines[:stagesAfter], append([]string{line}, lines[stagesAfter:]...)...)
+	}
 	if s.Execution != nil {
 		levelsAfter = min(levelsAfter, len(lines))
 		levels := []string{s.Execution.recommendedLine(), s.Task.taskLevels.summaryLine()}
@@ -243,7 +251,7 @@ func printSummary(s stateView, rejectionLine bool) {
 				}
 				gates = append(gates, name)
 			}
-			fmt.Printf("  %s → %s   гейты: %s\n", tr.Transition, tr.ToStatus, joinOr(gates, "нет"))
+			fmt.Printf("  %s → %s   гейты: %s\n", tr.Transition, tr.landing.text(), joinOr(gates, "нет"))
 		}
 	}
 }
@@ -445,11 +453,11 @@ type gateOutcome struct {
 }
 
 type transitionPreview struct {
-	Key      string        `json:"key"`
-	Name     string        `json:"name"`
-	ToStatus string        `json:"to_status"`
-	Allowed  bool          `json:"allowed"`
-	Gates    []gateOutcome `json:"gates"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
+	landing
+	Allowed bool          `json:"allowed"`
+	Gates   []gateOutcome `json:"gates"`
 }
 
 func renderTransitions(items []transitionPreview) error {
@@ -462,7 +470,7 @@ func renderTransitions(items []transitionPreview) error {
 		if tr.Allowed {
 			mark = "✓"
 		}
-		fmt.Printf("%s %s → %s (%s)\n", mark, tr.Key, tr.ToStatus, tr.Name)
+		fmt.Printf("%s %s → %s (%s)\n", mark, tr.Key, tr.landing.text(), tr.Name)
 		printGates(tr.Gates)
 	}
 	return nil
@@ -489,6 +497,7 @@ func renderTransitionResult(raw json.RawMessage) error {
 			StatusKey string `json:"status_key"`
 		} `json:"task"`
 		Blocked bool          `json:"blocked"`
+		Skips   []string      `json:"skips"`
 		Gates   []gateOutcome `json:"gates"`
 		FromRun struct {
 			StatusKey string `json:"status_key"`
@@ -501,6 +510,9 @@ func renderTransitionResult(raw json.RawMessage) error {
 		fmt.Printf("%s остаётся в %s: гейты не пройдены\n", out.Task.Key, out.Task.StatusKey)
 	} else {
 		fmt.Printf("%s: %s → %s\n", out.Task.Key, dash(out.FromRun.StatusKey), out.Task.StatusKey)
+		if line := skippedLine(out.Skips); line != "" {
+			fmt.Println(line)
+		}
 	}
 	printGates(out.Gates)
 	return nil
@@ -539,7 +551,8 @@ func renderEditedTask(raw json.RawMessage) error {
 		}
 		fmt.Println(levels.editLine())
 	}
-	return nil
+	// Выбор этапов — строкой, если у цикла задачи есть необязательные этапы.
+	return printStagesLine(raw)
 }
 
 // renderCreatedWithLevels — строка заведённой задачи и её уровни: create с
@@ -555,7 +568,16 @@ func renderCreatedWithLevels(raw json.RawMessage) error {
 		}
 		fmt.Println(levels.editLine())
 	}
-	return nil
+	return printStagesLine(raw)
+}
+
+// renderCreated — строка заведённой задачи и, если у цикла есть
+// необязательные этапы, выбор этапов: умолчания цикла видны и без --stage.
+func renderCreated(raw json.RawMessage) error {
+	if err := renderTask(raw); err != nil {
+		return err
+	}
+	return printStagesLine(raw)
 }
 
 // externalLinks раскладывает ссылки на основной трекер в строки «система

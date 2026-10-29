@@ -20,6 +20,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	var repos, labels, blocks, properties, modelLevel string
 	var external externalRefFlag
 	var stageLevels stageLevelFlag
+	var stages optionalStageFlag
 	fs, err := flags("create", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&title, "title", "", "заголовок задачи")
@@ -35,6 +36,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		fs.Var(&external, "external-ref", externalRefUsage)
 		fs.StringVar(&modelLevel, "model-level", "", modelLevelUsage)
 		fs.Var(&stageLevels, "model-level-for", stageLevelUsage)
+		fs.Var(&stages, "stage", stageUsage)
 	})
 	if err != nil {
 		return err
@@ -85,12 +87,13 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	passed := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
 	levels := addModelLevels(body, passed, modelLevel, &stageLevels)
+	chosen := addOptionalStages(body, passed, &stages)
 
 	var out json.RawMessage
 	if err := c.do(ctx, "POST", "/projects/"+key+"/tasks", body, &out); err != nil {
 		return err
 	}
-	human := renderTask
+	human := renderCreated
 	if levels {
 		human = renderCreatedWithLevels
 	}
@@ -101,6 +104,11 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		var t taskRow
 		_ = json.Unmarshal(out, &t)
 		return levelsNotStored("задача " + dash(t.Key) + " заведена без уровней")
+	}
+	if chosen && !serverKnowsOptionalStages(out) {
+		var t taskRow
+		_ = json.Unmarshal(out, &t)
+		return optionalStagesNotStored("задача " + dash(t.Key) + " заведена на умолчаниях цикла")
 	}
 	return nil
 }
@@ -115,6 +123,7 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 	var title, description, descriptionFile, priority, labels, modelLevel string
 	var external externalRefFlag
 	var stageLevels stageLevelFlag
+	var stages optionalStageFlag
 	task, rest := popTask(args)
 	fs, err := flags("edit", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&title, "title", "", "новый заголовок, не длиннее 80 символов")
@@ -125,6 +134,7 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		fs.Var(&external, "external-ref", externalRefUsage+"; \"\" снимает ссылки")
 		fs.StringVar(&modelLevel, "model-level", "", modelLevelUsage)
 		fs.Var(&stageLevels, "model-level-for", stageLevelUsage)
+		fs.Var(&stages, "stage", stageUsage)
 	})
 	if err != nil {
 		return err
@@ -173,10 +183,11 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		body["external_ref"] = external.links
 	}
 	levels := addModelLevels(body, passed, modelLevel, &stageLevels)
+	chosen := addOptionalStages(body, passed, &stages)
 	if len(body) == 0 {
 		fs.Usage()
 		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority, " +
-			"--labels, --external-ref, --model-level или --model-level-for")
+			"--labels, --external-ref, --model-level, --model-level-for или --stage")
 	}
 
 	var out json.RawMessage
@@ -188,6 +199,9 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 	}
 	if levels && !serverKnowsLevels(out) {
 		return levelsNotStored("остальная правка " + task + " применена")
+	}
+	if chosen && !serverKnowsOptionalStages(out) {
+		return optionalStagesNotStored("остальная правка " + task + " применена")
 	}
 	return nil
 }
