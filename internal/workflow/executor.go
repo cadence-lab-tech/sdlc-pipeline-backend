@@ -43,7 +43,7 @@ func init() {
 		"sdlc_claim_task", "sdlc_heartbeat", "sdlc_release", "sdlc_submit_artifact",
 		"sdlc_link_repo_ref", "sdlc_report_usage", "sdlc_request_transition",
 		"sdlc_resolve_drift", "sdlc_check_gates", "sdlc_create_task",
-		// Чтение в пределах круга чтения.
+		// Чтение — весь свой проект (решение 0065).
 		"sdlc_whoami", "sdlc_list_tasks", "sdlc_get_task", "sdlc_get_artifact",
 		"sdlc_get_drift", "sdlc_search_context",
 		// Чтение правил.
@@ -157,7 +157,8 @@ func (a *Auth) RequireWriteCircle(ctx context.Context, id Identity, taskKey, act
 // 2026-10-21: обе задачи в круге записи — любая связь; одна — relates_to,
 // shares_surface, duplicates и «своя blocks чужую»; «чужая blocks свою»
 // меняет порядок работ своей задачи и остаётся человеку. Задача вне круга
-// записи должна быть в круге чтения: иначе связь сама открыла бы её чтению.
+// записи — любая задача своего проекта (решение 0065): читать её токен и
+// так может, а связь между проектами отбивает ещё LinkTasks.
 func (a *Auth) RequireLink(ctx context.Context, id Identity, fromKey, toKey, rel string) error {
 	b := a.Bound(id)
 	if b == nil {

@@ -202,7 +202,8 @@ func TestExecutorOverREST(t *testing.T) {
 			t.Errorf("решение %s/%s %s: %d %v", c.transition, c.gate, c.status, code, body)
 		}
 	}
-	// Чужая задача — отказ ещё на круге чтения или записи (CLAB-212).
+	// Чужая задача — отказ своей задачи в решении по гейту: читать её токен
+	// может (CLAB-305), решать по ней — нет.
 	if code, _ := decide(tm, "SDLC-3", "analysis_done", "selfhosted", "passed"); code != http.StatusForbidden {
 		t.Errorf("чек-лист чужой задачи: %d", code)
 	}
@@ -233,11 +234,16 @@ func TestExecutorOverREST(t *testing.T) {
 	}{
 		{"PATCH", "/v1/tasks/SDLC-3", map[string]any{"priority": "high"}},
 		{"PUT", "/v1/tasks/SDLC-3/assignee", map[string]any{"assignee": "agent:pool"}},
-		{"POST", "/v1/tasks/SDLC-1/links", map[string]any{"task": "SDLC-3", "rel": "relates_to"}},
+		// Чужая блокирует свою — порядок работ решает человек.
+		{"POST", "/v1/tasks/SDLC-3/links", map[string]any{"task": "SDLC-1", "rel": "blocks"}},
 	} {
 		if code, body := call(c.method, c.path, tm, c.body); code != http.StatusForbidden {
 			t.Errorf("%s %s токеном задачи SDLC-1: %d %v", c.method, c.path, code, body)
 		}
+	}
+	// Своя связана с любой задачей своего проекта (CLAB-305, AC-6).
+	if code, body := call("POST", "/v1/tasks/SDLC-1/links", tm, map[string]any{"task": "SDLC-3", "rel": "relates_to"}); code != http.StatusOK {
+		t.Errorf("связь своей задачи с SDLC-3: %d %v", code, body)
 	}
 	if code, body := call("PUT", "/v1/tasks/SDLC-1/assignee", tm, map[string]any{"assignee": "agent:pool"}); code != http.StatusOK {
 		t.Errorf("назначение своей задачи: %d %v", code, body)

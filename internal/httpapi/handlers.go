@@ -183,15 +183,6 @@ func (s *Server) listTasks(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	if s.auth.SummaryOnly(identity(c)) {
-		// Список проекта токеном задачи — сводка (решение 0049 п. 5).
-		items := make([]gin.H, 0, len(tasks))
-		for _, t := range tasks {
-			items = append(items, taskSummary(t))
-		}
-		c.JSON(http.StatusOK, gin.H{"tasks": items})
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 

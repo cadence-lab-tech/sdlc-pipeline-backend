@@ -209,39 +209,6 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 	return t, p, nil
 }
 
-// TaskReadCircle — задачи, которые читает токен задачи (решение 0049 п. 5):
-// сама задача, её дети, все предки по parent_id и задачи, связанные через
-// task_links в любую сторону и любым rel. Одним запросом: круг считается на
-// каждое чтение токеном задачи.
-func (s *Store) TaskReadCircle(ctx context.Context, q Querier, taskID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.Query(ctx, `
-		WITH RECURSIVE ancestors(id) AS (
-		    SELECT parent_id FROM tasks WHERE id = $1 AND parent_id IS NOT NULL
-		    UNION
-		    SELECT t.parent_id FROM tasks t JOIN ancestors a ON t.id = a.id
-		    WHERE t.parent_id IS NOT NULL
-		)
-		SELECT $1::uuid
-		UNION SELECT id FROM tasks WHERE parent_id = $1
-		UNION SELECT id FROM ancestors
-		UNION SELECT to_task_id FROM task_links WHERE from_task_id = $1
-		UNION SELECT from_task_id FROM task_links WHERE to_task_id = $1`, taskID)
-	if err != nil {
-		return nil, translate(err)
-	}
-	defer rows.Close()
-
-	out := []uuid.UUID{}
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, translate(err)
-		}
-		out = append(out, id)
-	}
-	return out, translate(rows.Err())
-}
-
 // leaseState — состояния прогона, в которых у него может быть живая аренда.
 // gating сюда не входит: пока идёт перепроверка, работать в этапе некому.
 func leaseState(state string) bool {

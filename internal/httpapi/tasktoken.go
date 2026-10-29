@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
-	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
 // Токен задачи в REST (решение 0049). Правило «что видит и куда пишет
@@ -51,10 +50,10 @@ func (s *Server) taskOfPath(c *gin.Context) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
 
-// readableTask — круг чтения токена задачи для любого маршрута про задачу.
-// Зовётся из guard: читать надо, чтобы что-то делать, поэтому круг чтения —
-// общее условие и для ручек записи; запись сверх того сужают ownTask и
-// ownRun в самих ручках.
+// readableTask — чтение токеном задачи для любого маршрута про задачу:
+// задача своего проекта (решение 0065). Зовётся из guard и потому — общее
+// условие и для ручек записи; запись сужают ownTask, OwnRun,
+// RequireWriteCircle и RequireLink в самих ручках.
 func (s *Server) readableTask(c *gin.Context) error {
 	id := identity(c)
 	if s.auth.Bound(id) == nil {
@@ -78,18 +77,4 @@ func (s *Server) ownTask(c *gin.Context) error {
 		return err
 	}
 	return s.auth.RequireOwnTask(id, taskID)
-}
-
-// taskSummary — задача в списке, как её видит токен задачи: без описания,
-// свойств и прочего, что есть только в карточке.
-func taskSummary(t domain.Task) gin.H {
-	repos := make([]string, 0, len(t.Repositories))
-	for _, r := range t.Repositories {
-		repos = append(repos, r.Owner+"/"+r.Name)
-	}
-	return gin.H{
-		"key": t.Key, "title": t.Title, "status": t.StatusKey, "status_name": t.StatusName,
-		"type": t.Type(), "parent": t.ParentKey, "assignee": t.AssigneeHandle,
-		"repositories": repos,
-	}
 }

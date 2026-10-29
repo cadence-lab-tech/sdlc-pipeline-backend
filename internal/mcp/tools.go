@@ -934,8 +934,9 @@ func (s *Server) inProject(ctx context.Context, taskKey string) error {
 	if task.ProjectKey != key {
 		return apperr.NotFound("задача %q не принадлежит проекту %s", taskKey, key)
 	}
-	// Круг чтения токена задачи — общее условие любого тула по ключу задачи:
-	// запись сверх того сужают ownTarget, leaseTarget и проверки в тулах.
+	// Чтение токеном задачи — весь свой проект (решение 0065): проверка
+	// проекта токена — общее условие любого тула по ключу задачи, запись
+	// сужают ownTarget, leaseTarget и проверки в тулах.
 	return s.auth.RequireReadable(ctx, identity(ctx), task.ID)
 }
 
@@ -985,16 +986,11 @@ func (s *Server) searchContext(ctx context.Context, in searchInput) (*sdk.CallTo
 	if err != nil {
 		return fail(err)
 	}
-	bound, err := s.auth.SearchBound(ctx, identity(ctx))
-	if err != nil {
-		return fail(err)
-	}
 	res, err := s.engine.SearchContext(ctx, key, workflow.SearchInput{
 		Query:        in.Query,
 		Scopes:       in.Scope,
 		Repositories: in.Repositories,
 		TopK:         in.TopK,
-		Bound:        bound,
 	})
 	if err != nil {
 		return fail(err)
