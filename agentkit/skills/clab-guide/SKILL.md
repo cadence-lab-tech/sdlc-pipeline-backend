@@ -32,6 +32,17 @@ installs this kit into `.claude/`; running it again is harmless and updates
 the kit to the instance's version. The web page `https://<instance>/docs`
 has the same steps with ready-to-copy commands.
 
+The Claude plugin `clab-plugin` is a separate, machine-wide step:
+`clab setup --plugin` (`--dry-run` shows the folder, version and `claude`
+commands without changing anything). The plugin ships inside `clab` and has
+the same version; nothing is downloaded, and it is installed for the user,
+not for one project. It signs in with your own `clab auth login` and has no
+login of its own. In a chat it opens with `/clab-plugin` (the command is not
+namespaced: `/clab-plugin`, not `/clab-plugin:…`): `/clab-plugin <KEY>`,
+`tasks`, `approvals`, `remove <KEY>`. It shows the tasks the chat mentions
+and their status, never changes a task or the conversation by itself, and
+does nothing in sessions without a window (`claude -p`, runners, executors).
+
 ## The task path
 
 1. A task is created (`clab create`) in the initial status of the cycle of
