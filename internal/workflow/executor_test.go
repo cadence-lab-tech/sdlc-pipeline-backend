@@ -247,9 +247,24 @@ func TestExecutorWriteCircle(t *testing.T) {
 	} {
 		refused(t, w.auth.RequireLink(ctx, tid, l.from, l.to, l.rel), l.from+" "+l.rel+" "+l.to)
 	}
-	// Вне круга чтения второй конец не открывается связью.
-	if err := w.auth.RequireLink(ctx, tid, c.Key, z.Key, domain.TaskLinkRelatesTo); code(err) != apperr.CodeForbidden {
-		t.Fatalf("связь с задачей вне круга чтения: %v", err)
+	// Второй конец — любая задача своего проекта (CLAB-305, AC-6): Z не
+	// родня C, но связь «своя → Z» разрешена, а «Z blocks свою» — нет.
+	for _, l := range []struct{ from, rel, to string }{
+		{c.Key, domain.TaskLinkRelatesTo, z.Key},
+		{d.Key, domain.TaskLinkSharesSurface, z.Key},
+		{z.Key, domain.TaskLinkDuplicates, c.Key},
+		{c.Key, domain.TaskLinkBlocks, z.Key},
+	} {
+		if err := w.auth.RequireLink(ctx, tid, l.from, l.to, l.rel); err != nil {
+			t.Fatalf("%s %s %s: %v", l.from, l.rel, l.to, err)
+		}
+	}
+	refused(t, w.auth.RequireLink(ctx, tid, z.Key, c.Key, domain.TaskLinkBlocks), z.Key+" blocks "+c.Key)
+	// Задача другого проекта — отказ границы проекта, а не круга.
+	foreign, _ := testdb.ForeignTask(t, w.store)
+	if err := w.auth.RequireLink(ctx, tid, c.Key, foreign.Key, domain.TaskLinkRelatesTo); code(err) != apperr.CodeForbidden ||
+		!strings.Contains(err.Error(), "другому проекту") {
+		t.Fatalf("связь с задачей другого проекта: %v", err)
 	}
 	if err := w.auth.RequireLink(ctx, w.pool, z.Key, c.Key, domain.TaskLinkBlocks); err != nil {
 		t.Fatalf("личный токен: %v", err)

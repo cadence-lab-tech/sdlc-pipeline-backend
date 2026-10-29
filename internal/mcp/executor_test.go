@@ -46,7 +46,8 @@ func TestExecutorOverMCP(t *testing.T) {
 	if _, err := engine.ClaimWith(ctx, "SDLC-1", pool.Principal.ID, "pool", workflow.ClaimOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	// SDLC-2 связана с SDLC-1: в круге чтения, но не в круге записи.
+	// SDLC-2 связана с SDLC-1: читается (как и любая задача проекта), но не
+	// в круге записи.
 	if _, err := engine.LinkTasks(ctx, "SDLC-1", "SDLC-2", "relates_to", "", root.Principal.ID, false); err != nil {
 		t.Fatal(err)
 	}

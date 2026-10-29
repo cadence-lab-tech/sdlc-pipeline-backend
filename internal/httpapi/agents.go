@@ -135,18 +135,6 @@ func (s *Server) listQueue(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	if s.auth.SummaryOnly(identity(c)) {
-		// Очередь токеном задачи — сводка задач без описаний (решение 0049).
-		items := make([]gin.H, 0, len(runs))
-		for _, r := range runs {
-			items = append(items, gin.H{
-				"task": taskSummary(r.Task), "stage_run": r.Run,
-				"role_key": r.RoleKey, "role_name": r.RoleName, "claimable": r.Claimable,
-			})
-		}
-		c.JSON(http.StatusOK, gin.H{"queue": items})
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{"queue": runs})
 }
 

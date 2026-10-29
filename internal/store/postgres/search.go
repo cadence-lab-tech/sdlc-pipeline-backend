@@ -58,12 +58,6 @@ type SearchInput struct {
 	Scopes       []string
 	Repositories []string
 	TopK         int
-	// Repositories — исчерпывающий список, а не фильтр по желанию: пустой
-	// означает «кода нет», а не «весь проект» (токен задачи без области).
-	RestrictRepositories bool
-	// Артефакты только этих задач (круг чтения токена задачи).
-	TaskIDs       []uuid.UUID
-	RestrictTasks bool
 }
 
 // rrfK — константа Reciprocal Rank Fusion. Гибрид нужен потому, что половина
@@ -107,12 +101,6 @@ func (s *Store) SearchContext(ctx context.Context, q Querier, in SearchInput) ([
 	}
 
 	for _, scope := range scopes {
-		if scope == ScopeCode && in.RestrictRepositories && len(in.Repositories) == 0 {
-			continue
-		}
-		if scope == ScopeArtifacts && in.RestrictTasks && len(in.TaskIDs) == 0 {
-			continue
-		}
 		text, vector, err := s.searchScope(ctx, q, scope, in, candidates)
 		if err != nil {
 			return nil, err
@@ -149,7 +137,7 @@ func (s *Store) searchScope(ctx context.Context, q Querier, scope string, in Sea
 	case ScopeCode:
 		textSQL, vectorSQL, scan = codeSearchSQL()
 	case ScopeArtifacts:
-		textSQL, vectorSQL, scan = artifactSearchSQL(taskFilter(in))
+		textSQL, vectorSQL, scan = artifactSearchSQL()
 	case ScopeDocuments:
 		textSQL, vectorSQL, scan = documentSearchSQL()
 	default:
@@ -236,27 +224,10 @@ func codeSearchSQL() (string, string, func(interface{ Scan(...any) error }) (Sea
 	return text, vector, scan
 }
 
-// taskFilter — условие на задачи артефактов. Идентификаторы вставляются
-// литералами: это uuid.UUID, а не ввод клиента, и позиционные параметры
-// текстового и векторного запросов от этого не разъезжаются.
-func taskFilter(in SearchInput) string {
-	if !in.RestrictTasks {
-		return ""
-	}
-	if len(in.TaskIDs) == 0 {
-		return " AND false"
-	}
-	ids := make([]string, 0, len(in.TaskIDs))
-	for _, id := range in.TaskIDs {
-		ids = append(ids, "'"+id.String()+"'")
-	}
-	return " AND ac.task_id IN (" + strings.Join(ids, ",") + ")"
-}
-
-func artifactSearchSQL(filter string) (string, string, func(interface{ Scan(...any) error }) (SearchHit, error)) {
+func artifactSearchSQL() (string, string, func(interface{ Scan(...any) error }) (SearchHit, error)) {
 	// Перекрытые версии из выдачи исключены: агенту нужен актуальный разбор,
 	// а не тот, который уже переписали.
-	columns := `
+	const columns = `
 		SELECT ac.id, a.id, t.key, coalesce(ws.key, ''), a.kind, a.title,
 		       coalesce(a.file_name, ''), a.is_attachment, ac.text
 		FROM artifact_chunks ac
@@ -265,7 +236,7 @@ func artifactSearchSQL(filter string) (string, string, func(interface{ Scan(...a
 		LEFT JOIN stage_runs sr        ON sr.id = a.stage_run_id
 		LEFT JOIN workflow_statuses ws ON ws.id = sr.status_id
 		WHERE ac.project_id = $1 AND cardinality($2::text[]) >= 0
-		  AND a.status <> 'superseded'` + filter
+		  AND a.status <> 'superseded'`
 
 	text := columns + `
 		  AND ac.tsv @@ sdlc_tsquery('russian', $3)

@@ -497,11 +497,13 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   запросе, `RevokeRunTokens` гасит токены в транзакции события аренды
   (release, протухание, повторный захват, `gating`, `FinishStageRun`).
   Рамки — `workflow/tasktoken.go`: запись в свою задачу и свой прогон
-  (`RequireOwnTask`, `OwnRun`), чтение в круге задачи (`RequireReadable`,
-  `TaskReadCircle`), сводка списков, поиск по области (`SearchBound`).
-  REST зовёт их из `guard` и ручек записи, MCP — из `inProject`,
-  `ownTarget`, `leaseTarget`. Только в режиме `token` и только для токена
-  задачи: личный токен и сессия этих проверок не видят.
+  (`RequireOwnTask`, `OwnRun`), чтение — любая задача своего проекта
+  (`RequireReadable`, [решение 0065](../docs/decisions/0065-task-token-reads-project.md)):
+  списки и поиск — те же, что у личного токена. REST зовёт их из `guard` и
+  ручек записи, MCP — из `inProject`, `ownTarget`, `leaseTarget`; чтение
+  не заменяет проверку записи — её держат сами действия. Только в режиме
+  `token` и только для токена задачи: личный токен и сессия этих проверок
+  не видят.
 - **Токену задачи — белый список, по умолчанию отказ** (CLAB-208).
   Перечень тулов, промптов и маршрутов — `workflow/executor.go`
   (`ExecutorMay`); его зовут обёртка `add`/`addPrompt` в MCP и слой

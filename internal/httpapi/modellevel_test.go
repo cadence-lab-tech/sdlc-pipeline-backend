@@ -159,10 +159,9 @@ func TestModelLevelOverRESTAndMCP(t *testing.T) {
 		t.Fatalf("уровень ребёнка: %d %v", code, body)
 	}
 
-	// Вне круга: внук, сосед по эпику, чужая задача — 403 и запись в журнал.
-	// Задачу вне круга чтения (внук, чужая) отбивает раньше проверка чтения
-	// своим текстом; соседа по эпику, которого токен читает, — круг записи
-	// текстом ExecutorRefusal.
+	// Вне круга записи: внук, сосед по эпику, чужая задача — 403 и запись в
+	// журнал. Читает их токен все (CLAB-305), поэтому отбивает каждую круг
+	// записи текстом ExecutorRefusal.
 	code, grand := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Внук", "parent_key": childKey})
 	if code != http.StatusCreated {
 		t.Fatalf("внук: %d %v", code, grand)
@@ -176,7 +175,7 @@ func TestModelLevelOverRESTAndMCP(t *testing.T) {
 		code, body := f.json("PATCH", "/v1/tasks/"+key, tt, map[string]any{
 			"model_level": "high", "stage_settings": map[string]any{"qa": map[string]any{"model_level": "high"}},
 		})
-		if code != http.StatusForbidden || errCode(body) != "forbidden" || (key == "SDLC-2" && !executorRefused(body)) {
+		if code != http.StatusForbidden || errCode(body) != "forbidden" || !executorRefused(body) {
 			t.Errorf("%s вне круга: %d %v", key, code, body)
 		}
 		_, task := f.json("GET", "/v1/tasks/"+key, f.root, nil)

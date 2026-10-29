@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -18,9 +19,10 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/workflow"
 )
 
-// Токен задачи по REST (CLAB-212, решение 0049): ручка выпуска, работа
-// своей задачей, отказы по чужой задаче пула, круг чтения, сводка списка,
-// /auth/me. Те же правила, что у MCP, — их держит workflow.Auth.
+// Токен задачи по REST (CLAB-212, решение 0049; чтение — CLAB-305, решение
+// 0065): ручка выпуска, работа своей задачей, отказы записи по чужой задаче,
+// чтение всего проекта и граница проекта, полные списки, поиск, /auth/me.
+// Те же правила, что у MCP, — их держит workflow.Auth.
 
 type restCall func(method, path, token string, body any) (int, map[string]any)
 
@@ -189,31 +191,40 @@ func TestTaskTokenOverREST(t *testing.T) {
 		t.Fatalf("SDLC-3 тронут: аренда %v, артефактов %d", held.ClaimedBy, len(arts))
 	}
 
-	// Круг чтения (критерий 11): родитель SDLC-4, ребёнок D, blocks →SDLC-2,
-	// relates_to Y→SDLC-1; Z вне круга.
+	// Чтение — весь проект (CLAB-305, AC-1, AC-2): прежний круг (родитель
+	// SDLC-4, ребёнок D, blocks →SDLC-2, relates_to Y→SDLC-1) и задачи вне
+	// него (Z, SDLC-3 пула) отвечают 200 и тем же телом, что личному токену.
 	_, y := call("POST", "/v1/projects/SDLC/tasks", rootToken, map[string]any{"title": "Y"})
-	_, z := call("POST", "/v1/projects/SDLC/tasks", rootToken, map[string]any{"title": "Z"})
+	_, z := call("POST", "/v1/projects/SDLC/tasks", rootToken, map[string]any{
+		"title": "Z", "description": "описание Z",
+	})
 	yKey, zKey := y["key"].(string), z["key"].(string)
 	if code, body := call("POST", "/v1/tasks/"+yKey+"/links", rootToken, map[string]any{
 		"task": "SDLC-1", "rel": "relates_to",
 	}); code != http.StatusOK {
 		t.Fatalf("связь: %d %v", code, body)
 	}
-	readable := []string{"SDLC-1", "SDLC-4", child["key"].(string), "SDLC-2", yKey}
-	paths := []string{"", "/state", "/timeline", "/artifacts", "/drift", "/repo-refs", "/usage", "/transitions"}
+	readable := []string{"SDLC-1", "SDLC-4", child["key"].(string), "SDLC-2", yKey, zKey, "SDLC-3"}
+	paths := []string{"", "/state", "/timeline", "/artifacts", "/attachments", "/drift", "/repo-refs", "/usage", "/transitions"}
 	for _, key := range readable {
 		for _, p := range paths {
-			if code, body := call("GET", "/v1/tasks/"+key+p, tok, nil); code != http.StatusOK {
-				t.Errorf("GET %s%s в круге: %d %v", key, p, code, body)
+			code, body := call("GET", "/v1/tasks/"+key+p, tok, nil)
+			if code != http.StatusOK {
+				t.Errorf("GET %s%s токеном задачи: %d %v", key, p, code, body)
+				continue
+			}
+			if p == "/state" {
+				// Состояние несёт поля зрителя (кто держит аренду), и
+				// принципал у обоих токенов один — тело совпадает целиком.
+				if _, same := call("GET", "/v1/tasks/"+key+p, pool, nil); mustJSON(t, same) != mustJSON(t, body) {
+					t.Errorf("GET %s%s: токену задачи не то, что личному", key, p)
+				}
 			}
 		}
 	}
-	for _, key := range []string{zKey, "SDLC-3"} {
-		for _, p := range paths {
-			if code, _ := call("GET", "/v1/tasks/"+key+p, tok, nil); code != http.StatusForbidden {
-				t.Errorf("GET %s%s вне круга: %d", key, p, code)
-			}
-		}
+	_, zCard := call("GET", "/v1/tasks/"+zKey, tok, nil)
+	if got, _ := zCard["task"].(map[string]any); got == nil || got["description"] != "описание Z" {
+		t.Errorf("карточка Z без описания: %v", zCard)
 	}
 	code, art3 := call("POST", "/v1/tasks/SDLC-3/artifacts", rootToken, map[string]any{
 		"kind": "analysis.brief", "title": "чужое", "content": "секрет SDLC-3",
@@ -230,47 +241,102 @@ func TestTaskTokenOverREST(t *testing.T) {
 	if code, _ := call("GET", "/v1/artifacts/"+ownArt+"/content", tok, nil); code != http.StatusOK {
 		t.Errorf("содержимое своего артефакта: %d", code)
 	}
-	if code, _ := call("GET", "/v1/artifacts/"+art3["id"].(string)+"/content", tok, nil); code != http.StatusForbidden {
-		t.Errorf("содержимое артефакта вне круга: %d", code)
+	if code, body := call("GET", "/v1/artifacts/"+art3["id"].(string)+"/content", tok, nil); code != http.StatusOK ||
+		!strings.Contains(body["raw"].(string), "секрет SDLC-3") {
+		t.Errorf("содержимое артефакта чужой задачи проекта: %d %v", code, body)
+	}
+
+	// Запись по Z, которую токен теперь читает, — 403, Z не тронута (AC-5).
+	for _, c := range []struct {
+		method, path string
+		body         any
+	}{
+		{"PATCH", "/v1/tasks/" + zKey, map[string]any{"priority": "high"}},
+		{"PUT", "/v1/tasks/" + zKey + "/assignee", map[string]any{"assignee": "agent:pool"}},
+		{"POST", "/v1/tasks/" + zKey + "/attachments", nil},
+		{"POST", "/v1/tasks/" + zKey + "/artifacts", map[string]any{"kind": "analysis.brief", "title": "x", "content": "x"}},
+		{"POST", "/v1/tasks/" + zKey + "/repo-refs", map[string]any{"repository": "cadence-lab-tech/sdlc-pipeline-backend", "ref": "14"}},
+		{"POST", "/v1/tasks/" + zKey + "/usage", map[string]any{"model": "m"}},
+		{"POST", "/v1/tasks/" + zKey + "/transitions/start", nil},
+		{"POST", "/v1/tasks/" + zKey + "/transitions/analysis_done/gates/artifacts/decision", map[string]any{"status": "passed"}},
+		{"POST", "/v1/tasks/" + zKey + "/links", map[string]any{"task": "SDLC-1", "rel": "blocks"}},
+		{"POST", "/v1/projects/SDLC/tasks", map[string]any{"title": "x", "parent_key": zKey}},
+	} {
+		if code, body := call(c.method, c.path, tok, c.body); code != http.StatusForbidden {
+			t.Errorf("%s %s токеном задачи SDLC-1: %d %v", c.method, c.path, code, body)
+		}
+	}
+	zTask, _ := store.GetTaskByKey(ctx, store.DB(), zKey)
+	zArts, _ := store.ListArtifacts(ctx, store.DB(), zTask.ID, true)
+	zAttach, _ := store.ListAttachments(ctx, store.DB(), zTask.ID, true)
+	if zTask.StatusKey != "new" || zTask.Priority != "normal" || zTask.AssigneeID != nil ||
+		len(zArts) != 0 || len(zAttach) != 0 {
+		t.Fatalf("Z тронута отказами: %+v, артефактов %d, вложений %d", zTask, len(zArts), len(zAttach))
+	}
+	var refusals int
+	if err := store.DB().QueryRow(ctx, `
+		SELECT count(*) FROM audit_log
+		WHERE token_kind = 'task' AND outcome = 'forbidden' AND task_id = $1`, zTask.ID).Scan(&refusals); err != nil {
+		t.Fatal(err)
+	}
+	if refusals == 0 {
+		t.Error("отказы записи по Z не в журнале")
+	}
+
+	// Граница проекта (AC-7): задача, артефакт и списки другого проекта — 403.
+	foreign, foreignArt := testdb.ForeignTask(t, store)
+	for _, p := range paths {
+		code, body := call("GET", "/v1/tasks/"+foreign.Key+p, tok, nil)
+		if code != http.StatusForbidden || !strings.Contains(mustJSON(t, body), "другому проекту") {
+			t.Errorf("GET %s%s другого проекта: %d %v", foreign.Key, p, code, body)
+		}
+	}
+	for _, path := range []string{
+		"/v1/artifacts/" + foreignArt.ID.String() + "/content",
+		"/v1/projects/OTHER/tasks", "/v1/projects/OTHER/queue", "/v1/projects/OTHER/search?q=x",
+	} {
+		if code, body := call("GET", path, tok, nil); code != http.StatusForbidden {
+			t.Errorf("GET %s другого проекта: %d %v", path, code, body)
+		}
+	}
+	_, projects := call("GET", "/v1/projects", tok, nil)
+	if ps, _ := projects["projects"].([]any); len(ps) != 1 || ps[0].(map[string]any)["key"] != "SDLC" {
+		t.Errorf("проекты токена задачи: %v", projects)
 	}
 	// Личный токен того же принципала читает Z, как раньше (эпик 1–3).
 	if code, _ := call("GET", "/v1/tasks/"+zKey, pool, nil); code != http.StatusOK {
 		t.Errorf("личный токен не читает Z: %d", code)
 	}
 
-	// Список проекта — сводка (критерий 12); личным — с описаниями.
-	_, summary := call("GET", "/v1/projects/SDLC/tasks", tok, nil)
+	// Списки — полные строки, как личному токену (AC-3).
+	_, own := call("GET", "/v1/projects/SDLC/tasks", tok, nil)
 	_, full := call("GET", "/v1/projects/SDLC/tasks", pool, nil)
-	items, _ := summary["tasks"].([]any)
-	fullItems, _ := full["tasks"].([]any)
-	if len(items) == 0 || len(items) != len(fullItems) {
-		t.Fatalf("сводка: %d задач против %d", len(items), len(fullItems))
+	if mustJSON(t, own) != mustJSON(t, full) {
+		t.Fatalf("список токену задачи не тот, что личному:\n%s\n%s", mustJSON(t, own), mustJSON(t, full))
 	}
+	items, _ := own["tasks"].([]any)
+	described := false
 	for _, it := range items {
 		m := it.(map[string]any)
-		if _, has := m["description"]; has {
-			t.Fatalf("в сводке описание: %v", m)
-		}
-		for _, f := range []string{"key", "title", "status", "type", "parent", "repositories", "assignee"} {
+		for _, f := range []string{"key", "title", "status_key", "properties", "updated_at"} {
 			if _, has := m[f]; !has {
-				t.Fatalf("в сводке нет %s: %v", f, m)
+				t.Fatalf("в строке списка нет %s: %v", f, m)
 			}
 		}
-	}
-	described := false
-	for _, it := range fullItems {
-		if _, has := it.(map[string]any)["description"]; has {
+		if m["key"] == child["key"] && m["parent_key"] != "SDLC-1" {
+			t.Fatalf("у ребёнка нет parent_key: %v", m)
+		}
+		if m["key"] == zKey && m["description"] == "описание Z" {
 			described = true
 		}
 	}
 	if !described {
-		t.Fatal("личный токен потерял описания в списке")
+		t.Fatal("в списке токену задачи нет описаний")
 	}
 	_, queue := call("GET", "/v1/projects/SDLC/queue", tok, nil)
-	for _, it := range queue["queue"].([]any) {
-		if _, has := it.(map[string]any)["task"].(map[string]any)["description"]; has {
-			t.Fatal("в очереди токеном задачи описание")
-		}
+	_, fullQueue := call("GET", "/v1/projects/SDLC/queue", pool, nil)
+	if qs, _ := queue["queue"].([]any); len(qs) == 0 || mustJSON(t, queue) != mustJSON(t, fullQueue) {
+		t.Fatalf("очередь токену задачи не та, что личному:\n%s\n%s", mustJSON(t, queue), mustJSON(t, fullQueue))
 	}
 
 	// Кто я (критерий 14).
@@ -294,8 +360,73 @@ func TestTaskTokenOverREST(t *testing.T) {
 	if code, body := call("POST", "/v1/tasks/SDLC-1/transitions/cancel", rootToken, nil); code != http.StatusOK {
 		t.Fatalf("переход человеком: %d %v", code, body)
 	}
-	code, body := call("GET", "/v1/tasks/SDLC-1", tok, nil)
-	if code != http.StatusUnauthorized || !strings.Contains(body["error"].(map[string]any)["message"].(string), "токен задачи погас") {
-		t.Fatalf("после перехода: %d %v", code, body)
+	// Погасший токен не читает ни свою, ни чужую задачу проекта (AC-9).
+	for _, key := range []string{"SDLC-1", zKey} {
+		code, body := call("GET", "/v1/tasks/"+key, tok, nil)
+		if code != http.StatusUnauthorized || !strings.Contains(body["error"].(map[string]any)["message"].(string), "токен задачи погас") {
+			t.Fatalf("%s после перехода: %d %v", key, code, body)
+		}
+	}
+}
+
+// AC-4 CLAB-305: поиск токеном задачи — та же выдача, что личному токену
+// того же принципала: код всех репозиториев проекта, артефакты любых задач;
+// репозиторий вне области задачи в фильтре сужает выдачу, а не
+// отбрасывается.
+func TestTaskTokenSearchOverREST(t *testing.T) {
+	_, store, call := newTaskTokenServer(t)
+	code, issuedPool := call("POST", "/v1/auth/tokens", rootToken, map[string]any{
+		"name": "runner", "principal": "agent:pool", "project": "SDLC",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("личный токен: %d %v", code, issuedPool)
+	}
+	pool := issuedPool["token"].(string)
+	if code, body := call("POST", "/v1/tasks/SDLC-1/transitions/start", rootToken, nil); code != http.StatusOK {
+		t.Fatalf("старт: %d %v", code, body)
+	}
+	if code, body := call("POST", "/v1/tasks/SDLC-1/claim", pool, nil); code != http.StatusOK {
+		t.Fatalf("захват: %d %v", code, body)
+	}
+	_, issued := call("POST", "/v1/tasks/SDLC-1/task-token", pool, nil)
+	tok := issued["token"].(string)
+	// Область SDLC-1 — только backend; SDLC-3 вне прежнего круга.
+	testdb.SearchCorpus(t, store, "quasar", "SDLC-1", "SDLC-3")
+
+	search := func(token string, repos ...string) (code []string, tasks []string) {
+		t.Helper()
+		status, body := call("POST", "/v1/projects/SDLC/search", token, map[string]any{
+			"query": "quasar", "repositories": repos, "top_k": 50,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("поиск: %d %v", status, body)
+		}
+		hits, _ := body["results"].([]any)
+		for _, h := range hits {
+			m := h.(map[string]any)
+			switch m["scope"] {
+			case "code":
+				code = append(code, m["repository"].(string))
+			case "artifacts":
+				tasks = append(tasks, m["task"].(string))
+			}
+		}
+		// Равные оценки выдача упорядочивает как придётся — сравниваем
+		// состав, а не порядок.
+		sort.Strings(code)
+		sort.Strings(tasks)
+		return
+	}
+	codeAll, tasksAll := search(pool)
+	if len(codeAll) != 3 || len(tasksAll) != 2 {
+		t.Fatalf("личный токен: код %v, артефакты %v", codeAll, tasksAll)
+	}
+	code1, tasks1 := search(tok)
+	if mustJSON(t, code1) != mustJSON(t, codeAll) || mustJSON(t, tasks1) != mustJSON(t, tasksAll) {
+		t.Fatalf("токен задачи: код %v, артефакты %v; личный: %v, %v", code1, tasks1, codeAll, tasksAll)
+	}
+	code2, _ := search(tok, "cadence-lab-tech/sdlc-pipeline-frontend")
+	if len(code2) != 1 || code2[0] != "cadence-lab-tech/sdlc-pipeline-frontend" {
+		t.Fatalf("репозиторий вне области задачи: %v", code2)
 	}
 }

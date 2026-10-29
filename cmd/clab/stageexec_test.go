@@ -65,13 +65,13 @@ func TestArtifactPrintsContent(t *testing.T) {
 	}
 }
 
-// Критерий 1: вне круга видимости токена задачи — код сервера forbidden,
+// Критерий 1: артефакт другого проекта — код сервера forbidden,
 // неизвестный id — not_found; без id — подсказка, запроса нет.
 func TestArtifactErrors(t *testing.T) {
 	withJSON(t, false)
 	for status, code := range map[int]string{http.StatusForbidden: "forbidden", http.StatusNotFound: "not_found"} {
 		c, _ := artifactServer(t, status, "application/json",
-			`{"error":{"code":"`+code+`","message":"артефакт вне круга задачи"}}`)
+			`{"error":{"code":"`+code+`","message":"токен привязан к другому проекту"}}`)
 		out, _, err := capture(t, func() error { return cmdArtifact(context.Background(), c, []string{artifactID}) })
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) || apiErr.Code != code || apiErr.Status != status {

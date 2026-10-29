@@ -11,11 +11,13 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/testdb"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/migrations"
 )
 
 // Токен задачи (CLAB-212, решение 0049): выпуск по аренде, жизнь с арендой,
-// привязка к своей задаче, круг чтения. Интеграционные: жизнь токена — это
+// привязка к своей задаче, чтение всего проекта (CLAB-305, решение 0065).
+// Интеграционные: жизнь токена — это
 // свойство связки «токен плюс прогон», и на моках она не проверяется.
 
 // taskTokenWorld — инстанс в режиме токенов: администратор, пул раннеров
@@ -351,9 +353,10 @@ func TestTaskTokenReviewAndForwardTransition(t *testing.T) {
 	}
 }
 
-// Критерии 9 и 11: запись — только своя задача и свой прогон, чтение — круг
-// задачи. Пул держит две задачи, токен одной не трогает другую.
-func TestTaskTokenBindingAndReadCircle(t *testing.T) {
+// Критерий 9 CLAB-212 и AC-1, AC-7 CLAB-305: запись — только своя задача и
+// свой прогон, чтение — любая задача своего проекта. Пул держит две задачи,
+// токен одной читает другую, но не пишет в неё.
+func TestTaskTokenBindingAndProjectRead(t *testing.T) {
 	ctx := context.Background()
 	w := newTaskTokenWorld(t, AuthToken)
 	w.claim(t, w.pool, "SDLC-1")
@@ -379,8 +382,9 @@ func TestTaskTokenBindingAndReadCircle(t *testing.T) {
 		t.Fatalf("захват задачи B прогоном задачи A: %v", err)
 	}
 
-	// Круг SDLC-1: родитель SDLC-4, ребёнок D, blocks SDLC-1→SDLC-2,
-	// relates_to Y→SDLC-1; Z вне круга.
+	// Прежний круг SDLC-1 (родитель SDLC-4, ребёнок D, blocks SDLC-1→SDLC-2,
+	// relates_to Y→SDLC-1) и задачи вне него (Z, SDLC-3 пула) читаются
+	// одинаково; задача другого проекта — нет.
 	child, err := w.engine.CreateTask(ctx, "SDLC", w.admin.Principal.ID, CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{Title: "D", ParentKey: "SDLC-1"},
 	})
@@ -409,14 +413,24 @@ func TestTaskTokenBindingAndReadCircle(t *testing.T) {
 		}
 		return w.auth.RequireReadable(ctx, tid, task.ID)
 	}
-	for _, key := range []string{"SDLC-1", "SDLC-4", child.Key, "SDLC-2", y.Key} {
+	for _, key := range []string{"SDLC-1", "SDLC-4", child.Key, "SDLC-2", y.Key, "SDLC-3", z.Key} {
 		if err := read(key); err != nil {
-			t.Errorf("%s в круге, но не читается: %v", key, err)
+			t.Errorf("%s своего проекта не читается: %v", key, err)
 		}
 	}
+	foreign, _ := testdb.ForeignTask(t, w.store)
+	if err := w.auth.RequireReadable(ctx, tid, foreign.ID); code(err) != apperr.CodeForbidden ||
+		!strings.Contains(err.Error(), "другому проекту") {
+		t.Errorf("задача другого проекта читается: %v", err)
+	}
+	// Чтение не открыло запись: Z и SDLC-3 — вне круга записи.
 	for _, key := range []string{"SDLC-3", z.Key} {
-		if err := read(key); code(err) != apperr.CodeForbidden {
-			t.Errorf("%s вне круга, но читается: %v", key, err)
+		if err := w.auth.RequireWriteCircle(ctx, tid, key, "правка постановки"); code(err) != apperr.CodeForbidden {
+			t.Errorf("правка %s токеном задачи SDLC-1: %v", key, err)
+		}
+		task, _ := w.store.GetTaskByKey(ctx, w.store.DB(), key)
+		if err := w.auth.RequireOwnTask(tid, task.ID); code(err) != apperr.CodeForbidden {
+			t.Errorf("запись в %s токеном задачи SDLC-1: %v", key, err)
 		}
 	}
 
@@ -429,119 +443,11 @@ func TestTaskTokenBindingAndReadCircle(t *testing.T) {
 	if err := w.auth.RequireReadable(ctx, w.pool, zt.ID); err != nil {
 		t.Fatal(err)
 	}
-	if w.auth.SummaryOnly(w.pool) || !w.auth.SummaryOnly(tid) {
-		t.Fatal("сводка списков: не тому")
-	}
 }
 
-// Критерий 13: поиск токеном задачи — код только области задачи, артефакты
-// только круга чтения, документы как есть.
-func TestTaskTokenSearchBound(t *testing.T) {
-	ctx := context.Background()
-	w := newTaskTokenWorld(t, AuthToken)
-	w.claim(t, w.pool, "SDLC-1") // область: sdlc-pipeline-backend
-	_, tid := w.issue(t, w.pool, "SDLC-1")
-	pid := projectID(t, w.store)
-
-	repos, err := w.store.ListRepositories(ctx, w.store.DB(), pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range repos {
-		run, _, err := w.store.EnqueueIndexRun(ctx, w.store.DB(), postgres.EnqueueIndexRunInput{
-			RepositoryID: r.ID, Branch: "main", CommitSHA: strings.Repeat("b", 40), Trigger: "manual",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var fileID uuid.UUID
-		if err := w.store.DB().QueryRow(ctx, `
-			INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes)
-			VALUES ($1, $2, 'quasar.go', 'go', 10) RETURNING id`, run.ID, r.ID).Scan(&fileID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.store.DB().Exec(ctx, `
-			INSERT INTO code_chunks (code_file_id, project_id, ord, start_line, end_line, text)
-			VALUES ($1, $2, 0, 1, 10, 'func quasar() {}')`, fileID, pid); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.store.DB().Exec(ctx, `
-			UPDATE repo_index_runs SET state = 'completed', finished_at = now() WHERE id = $1`, run.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, key := range []string{"SDLC-1", "SDLC-3"} {
-		task, err := w.store.GetTaskByKey(ctx, w.store.DB(), key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		a, err := w.engine.SubmitArtifact(ctx, key, w.admin.Principal.ID, SubmitArtifactInput{
-			Kind: "analysis.brief", Title: "quasar " + key, Content: []byte("quasar"),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := w.store.ReplaceArtifactChunks(ctx, w.store.DB(), a.ID, pid, task.ID,
-			[]postgres.TextChunkInput{{Text: "quasar " + key, TextSHA: "sha-" + key}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	doc, _, err := w.engine.PutDocument(ctx, "SDLC", w.admin.Principal.ID, PutDocumentInput{
-		Kind: "guideline", Title: "quasar", Content: []byte("quasar"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.store.ReplaceDocumentChunks(ctx, w.store.DB(), doc.ID, pid,
-		[]postgres.TextChunkInput{{Text: "quasar rules", TextSHA: "doc"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	search := func(id Identity, repos []string) []postgres.SearchHit {
-		t.Helper()
-		bound, err := w.auth.SearchBound(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		res, err := w.engine.SearchContext(ctx, "SDLC", SearchInput{
-			Query: "quasar", Repositories: repos, TopK: 50, Bound: bound,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return res.Hits
-	}
-	summary := func(hits []postgres.SearchHit) (code []string, tasks []string, docs int) {
-		for _, h := range hits {
-			switch h.Scope {
-			case postgres.ScopeCode:
-				code = append(code, h.Repository)
-			case postgres.ScopeArtifacts:
-				tasks = append(tasks, h.TaskKey)
-			case postgres.ScopeDocuments:
-				docs++
-			}
-		}
-		return
-	}
-
-	// Личный токен — весь проект, как раньше.
-	codeAll, tasksAll, docsAll := summary(search(w.pool, nil))
-	if len(codeAll) != 3 || len(tasksAll) != 2 || docsAll != 1 {
-		t.Fatalf("личный токен: код %v, артефакты %v, документы %d", codeAll, tasksAll, docsAll)
-	}
-	// Токен задачи без repositories — область задачи.
-	code1, tasks1, docs1 := summary(search(tid, nil))
-	if len(code1) != 1 || code1[0] != "cadence-lab-tech/sdlc-pipeline-backend" ||
-		len(tasks1) != 1 || tasks1[0] != "SDLC-1" || docs1 != 1 {
-		t.Fatalf("токен задачи: код %v, артефакты %v, документы %d", code1, tasks1, docs1)
-	}
-	// Запрошенный репозиторий вне области отброшен, а не добавлен.
-	code2, _, _ := summary(search(tid, []string{"cadence-lab-tech/sdlc-pipeline-frontend"}))
-	if len(code2) != 0 {
-		t.Fatalf("репозиторий вне области в выдаче: %v", code2)
-	}
-}
+// Поиск токеном задачи (AC-4 CLAB-305) проверяют транспорты —
+// TestTaskTokenSearchOverREST и TestTaskTokenOverMCP: рамок у движка больше
+// нет, и токен до SearchContext не доходит.
 
 // Критерий 14: /auth/me токеном задачи — только проект токена, без команд.
 func TestTaskTokenMe(t *testing.T) {
@@ -574,7 +480,7 @@ func TestTaskTokenHeaderMode(t *testing.T) {
 	w.claim(t, w.pool, "SDLC-3")
 	_, tid := w.issue(t, w.pool, "SDLC-1")
 
-	if w.auth.Bound(tid) != nil || w.auth.SummaryOnly(tid) {
+	if w.auth.Bound(tid) != nil {
 		t.Fatal("в режиме заголовка токен задачи ограничен")
 	}
 	if err := w.auth.RequireOwnTaskKey(tid, "SDLC-3"); err != nil {

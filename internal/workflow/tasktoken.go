@@ -3,7 +3,7 @@
 // Аренда держится на принципале, а пул раннеров — один принципал на много
 // задач (решение 0025): его собственный токен работает с любой задачей,
 // которую держит пул. Саб-агенту этапа нужно меньше — его прогон, его
-// задача и то, что ей нужно прочитать. Токен задачи выпускает держатель
+// задача; читать он может весь свой проект. Токен задачи выпускает держатель
 // живой аренды; живёт он, пока жива аренда (проверка в TokenByHash), и гаснет
 // на release, протухании, перехвате и закрытии этапа.
 //
@@ -114,52 +114,26 @@ func (a *Auth) OwnRun(id Identity, taskKey string, runID *uuid.UUID) (*uuid.UUID
 	return &own, nil
 }
 
-// RequireReadable — чтение токеном задачи: своя задача, её дети, предки и
-// связанные через task_links (решение 0049 п. 5). Остальные задачи — 403.
+// RequireReadable — чтение токеном задачи: любая задача своего проекта
+// (решение 0065, пересмотр 0049 п. 5). Исполнителю нужен контекст вокруг —
+// соседи по эпику и репозиторию, прошлые выпуски, похожие баги, — а запись
+// это не открывает: её сужают RequireOwnTask, OwnRun, RequireWriteCircle и
+// RequireLink в самих действиях. Задача другого проекта — отказ: граница
+// проекта у токена задачи та же, что у Require.
 func (a *Auth) RequireReadable(ctx context.Context, id Identity, taskID uuid.UUID) error {
 	b := a.Bound(id)
 	if b == nil || b.TaskID == taskID {
 		return nil
 	}
-	circle, err := a.store.TaskReadCircle(ctx, a.store.DB(), b.TaskID)
+	task, err := a.store.GetTaskByID(ctx, a.store.DB(), taskID)
 	if err != nil {
 		return err
 	}
-	for _, t := range circle {
-		if t == taskID {
-			return nil
-		}
+	if id.Token.ProjectID != nil && *id.Token.ProjectID == task.ProjectID {
+		return nil
 	}
-	return apperr.Forbidden("токен задачи %s читает свою задачу, её детей, предков и связанные задачи; эта вне круга",
-		b.TaskKey).WithDetails(map[string]any{"task_key": b.TaskKey})
-}
-
-// SummaryOnly — списки задач токеном задачи отдаются сводкой: ключ,
-// заголовок, статус, тип, родитель, область, исполнитель. Описания и
-// артефакты задач вне круга чтения исполнителю ни к чему.
-func (a *Auth) SummaryOnly(id Identity) bool { return a.Bound(id) != nil }
-
-// SearchBound — рамки поиска токеном задачи: код только репозиториев
-// области задачи, артефакты только задач круга чтения. nil — без рамок.
-func (a *Auth) SearchBound(ctx context.Context, id Identity) (*SearchBound, error) {
-	b := a.Bound(id)
-	if b == nil {
-		return nil, nil
-	}
-	q := a.store.DB()
-	task, err := a.store.GetTaskByID(ctx, q, b.TaskID)
-	if err != nil {
-		return nil, err
-	}
-	circle, err := a.store.TaskReadCircle(ctx, q, b.TaskID)
-	if err != nil {
-		return nil, err
-	}
-	out := &SearchBound{Repositories: []string{}, TaskIDs: circle}
-	for _, r := range task.Repositories {
-		out.Repositories = append(out.Repositories, r.Owner+"/"+r.Name)
-	}
-	return out, nil
+	return apperr.Forbidden("токен привязан к другому проекту").
+		WithDetails(map[string]any{"task_key": b.TaskKey})
 }
 
 // ── выпуск ──────────────────────────────────────────────────────────────────
