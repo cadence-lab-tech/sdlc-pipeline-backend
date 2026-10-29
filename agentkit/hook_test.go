@@ -230,6 +230,7 @@ func TestHookHeartbeatWrapper(t *testing.T) {
 	for _, c := range []string{
 		"env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=/x/clab " + wrapped,
 		hookPrefix + "SDLC_PROJECT=CLAB clab heartbeat K --every 5m -- make test-integration",
+		hookPrefix + "clab heartbeat K --with-credentials -- clab attach K big.bin",
 		"cd w && " + hookPrefix + wrapped,
 	} {
 		if code, msg := runHook(t, script, c); code != 0 {
@@ -240,6 +241,7 @@ func TestHookHeartbeatWrapper(t *testing.T) {
 		wrapped,
 		"SDLC_PROJECT=CLAB " + wrapped,
 		"clab heartbeat K --every 5m",
+		"clab heartbeat K --with-credentials -- clab attach K big.bin",
 		"cd w && clab heartbeat K -- go test ./...",
 	} {
 		if code, msg := runHook(t, script, c); code != 2 || !strings.Contains(msg, "CLAB_CONFIG_DIR=") {

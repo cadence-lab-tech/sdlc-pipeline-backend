@@ -250,7 +250,11 @@ You have no project MCP server; input artifacts — `clab artifact <id>`.
 Temporary files go only into <run directory>/ (absolute path), nowhere else.
 The orchestrator holds the lease; run a command longer than the heartbeat
 interval (a full e2e, a long build) through the wrapper `clab heartbeat
-<key> -- <command>` with the same prefix. The token expired
+<key> -- <command>` with the same prefix: the command runs without clab
+credentials (no token, host, project or actor; an empty `CLAB_CONFIG_DIR`),
+so set the address and the project of the stack explicitly for it;
+`--with-credentials` hands the credentials over and is for a `clab` that must
+act with the task token. The token expired
 (`unauthenticated`: the task token has expired) — do not repeat the call and do
 not look for a workaround: put what is not submitted (artifact texts, PR
 links, cost figures, the intended transition) into <run directory>/ and
