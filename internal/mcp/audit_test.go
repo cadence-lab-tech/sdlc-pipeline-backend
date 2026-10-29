@@ -311,6 +311,76 @@ func TestToolAuditDetails(t *testing.T) {
 	}
 }
 
+// Учётные данные внутри ссылок не доходят до audit_log и по MCP (CLAB-226,
+// критерии 5, 9): ссылка с userinfo в repository, url документа с токеном,
+// те же ссылки внутри связки. Отказ тула пишется с теми же очищенными
+// параметрами, документ сохранён с исходной ссылкой.
+func TestToolAuditRedactsURLCredentials(t *testing.T) {
+	ctx := context.Background()
+	store, pool := testdb.Store(t)
+	log := testdb.Logger()
+	engine := workflow.NewEngine(store, log, workflow.Options{StrictGates: true})
+	auth := workflow.NewAuth(store, log, workflow.AuthToken)
+	srv := NewServer(log, store, engine, workflow.NewAuthoring(store, log, engine), auth, "test")
+	if err := auth.Bootstrap(ctx, "root", "bootstrap-token-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := auth.Authenticate(ctx, "bootstrap-token-0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := connectAs(t, srv, admin)
+
+	const (
+		repoURL = "https://alice:ghp_MCPMARK1@github.com/acme/app.git"
+		docURL  = "https://files.example.com/spec.pdf?access_token=MCPMARK2&v=2"
+	)
+	// Тул ждёт owner/name или ссылку без userinfo: ссылку с ним он отбивает,
+	// и запись об отказе тоже не должна нести токен.
+	_, _ = call("sdlc_add_repository", map[string]any{"repository": repoURL})
+	if out, isErr := call("sdlc_put_document", map[string]any{"kind": "guideline", "title": "Спека", "url": docURL}); isErr {
+		t.Fatalf("sdlc_put_document: %v", out)
+	}
+	var stored string
+	if err := pool.QueryRow(ctx, `SELECT url FROM project_documents WHERE title = 'Спека'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != docURL {
+		t.Fatalf("данные домена изменились: %q", stored)
+	}
+	_, _ = call("sdlc_import_bundle", map[string]any{"dry_run": true, "bundle": map[string]any{"version": 1,
+		"repositories": []any{map[string]any{"repository": "acme/app", "clone_url": "https://bob:MCPMARK3@github.com/acme/app.git"}},
+		"documents":    []any{map[string]any{"kind": "guideline", "title": "S3", "url": "https://b.s3.amazonaws.com/o?X-Amz-Credential=AKIAMCPMARK4&X-Amz-Signature=MCPMARK5"}},
+	}})
+
+	rows := auditRows(t, pool, "a.action IN ('sdlc_add_repository', 'sdlc_put_document', 'sdlc_import_bundle')")
+	if len(rows) != 3 {
+		t.Fatalf("записей %d, нужно три: %+v", len(rows), rows)
+	}
+	for _, r := range rows {
+		text := string(r.Params)
+		for _, marker := range []string{"ghp_MCPMARK1", "alice", "MCPMARK2", "MCPMARK3", "bob:", "AKIAMCPMARK4", "MCPMARK5"} {
+			if strings.Contains(text, marker) {
+				t.Fatalf("%s: в параметрах %q: %s", r.Action, marker, text)
+			}
+		}
+		var want []string
+		switch r.Action {
+		case "sdlc_add_repository":
+			want = []string{"https://[redacted]@github.com/acme/app.git"}
+		case "sdlc_put_document":
+			want = []string{"files.example.com/spec.pdf?access_token=[redacted]&v=2"}
+		case "sdlc_import_bundle":
+			want = []string{"https://[redacted]@github.com/acme/app.git", "o?X-Amz-Credential=[redacted]&X-Amz-Signature=[redacted]"}
+		}
+		for _, w := range want {
+			if !strings.Contains(text, w) {
+				t.Fatalf("%s: нет %q: %s", r.Action, w, text)
+			}
+		}
+	}
+}
+
 func firstContractKind(t *testing.T, claimed map[string]any) string {
 	t.Helper()
 	role, _ := claimed["role"].(map[string]any)

@@ -252,6 +252,82 @@ func TestRESTMutationsAreAudited(t *testing.T) {
 	}
 }
 
+// Учётные данные внутри ссылок не доходят до audit_log (CLAB-226, критерии
+// 9, 10): clone_url с userinfo, url документа с токеном в строке запроса,
+// ссылка в строке запроса самого вызова. Хост и путь в записи видны, набор
+// ключей params прежний, а ответы и данные домена — исходные ссылки.
+func TestRESTAuditRedactsURLCredentials(t *testing.T) {
+	f := newAuditFixture(t)
+	const (
+		cloneURL = "https://alice:ghp_RESTMARK1@github.com/acme/app.git"
+		docURL   = "https://files.example.com/spec.pdf?token=RESTMARK2&v=2"
+	)
+	rec := f.do("POST", "/v1/projects/SDLC/repositories", f.root,
+		map[string]any{"repository": "acme/app", "clone_url": cloneURL})
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("репозиторий: %d %s", rec.Code, rec.Body)
+	}
+	var repo struct {
+		CloneURL string `json:"clone_url"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &repo)
+	if repo.CloneURL != cloneURL {
+		t.Fatalf("ответ изменился: clone_url %q", repo.CloneURL)
+	}
+	rec = f.do("POST", "/v1/projects/SDLC/documents?from=https://bob:RESTMARK3@h.example.com/x", f.root,
+		map[string]any{"kind": "guideline", "title": "Спека", "url": docURL})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("документ: %d %s", rec.Code, rec.Body)
+	}
+	var doc struct {
+		Document struct {
+			URL string `json:"url"`
+		} `json:"document"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &doc)
+	if doc.Document.URL != docURL {
+		t.Fatalf("ответ изменился: url %q", doc.Document.URL)
+	}
+	var storedClone, storedURL string
+	if err := f.pool.QueryRow(context.Background(), `
+		SELECT r.clone_url, d.url FROM repositories r, project_documents d
+		WHERE r.name = 'app' AND d.title = 'Спека'`).Scan(&storedClone, &storedURL); err != nil {
+		t.Fatal(err)
+	}
+	if storedClone != cloneURL || storedURL != docURL {
+		t.Fatalf("данные домена изменились: %q %q", storedClone, storedURL)
+	}
+
+	repoRows := f.rows("a.action = 'POST /v1/projects/:projectKey/repositories'")
+	docRows := f.rows("a.action = 'POST /v1/projects/:projectKey/documents'")
+	if len(repoRows) != 1 || len(docRows) != 1 {
+		t.Fatalf("записей: репозиторий %d, документ %d", len(repoRows), len(docRows))
+	}
+	for _, r := range f.rows("true") {
+		for _, marker := range []string{"ghp_RESTMARK1", "alice", "RESTMARK2", "RESTMARK3", "bob:"} {
+			if strings.Contains(r.Params, marker) {
+				t.Fatalf("%s: в параметрах %q: %s", r.Action, marker, r.Params)
+			}
+		}
+	}
+	if !strings.Contains(repoRows[0].Params, "https://[redacted]@github.com/acme/app.git") {
+		t.Fatalf("хост и путь репозитория: %s", repoRows[0].Params)
+	}
+	if !strings.Contains(docRows[0].Params, "files.example.com/spec.pdf?token=[redacted]&v=2") ||
+		!strings.Contains(docRows[0].Params, "https://[redacted]@h.example.com/x") {
+		t.Fatalf("хост и путь документа: %s", docRows[0].Params)
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(docRows[0].Params), &params); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"path", "query", "body"} {
+		if _, ok := params[k]; !ok {
+			t.Fatalf("в params нет %q: %s", k, docRows[0].Params)
+		}
+	}
+}
+
 // Отказы видны (критерии 8, 9): 403 по уровню — с принципалом и токеном,
 // 401 по отозванному токену — со ссылкой на него и проектом из пути, и на
 // /v1, и на /mcp; запрос вовсе без токена не пишется.
