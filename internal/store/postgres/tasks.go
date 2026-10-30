@@ -710,6 +710,42 @@ func (s *Store) TaskTypes(ctx context.Context, q Querier, projectID uuid.UUID) (
 	return values, nil
 }
 
+// ChildFact — то, что карточка родителя знает о ребёнке сверх самой задачи:
+// категория статуса и ключи задач, которые его блокируют.
+type ChildFact struct {
+	Category  string
+	BlockedBy []string
+}
+
+// ChildFacts — категория статуса и входящие blocks каждого ребёнка одним
+// запросом на всех: число запросов карточки эпика не растёт с детьми.
+func (s *Store) ChildFacts(ctx context.Context, q Querier, parentID uuid.UUID) (map[uuid.UUID]ChildFact, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.id, ws.category,
+		       coalesce(array_agg(src.key ORDER BY src.seq) FILTER (WHERE src.id IS NOT NULL), '{}')
+		FROM tasks t
+		JOIN workflow_statuses ws ON ws.id = t.status_id
+		LEFT JOIN task_links l ON l.to_task_id = t.id AND l.rel = $2
+		LEFT JOIN tasks src ON src.id = l.from_task_id
+		WHERE t.parent_id = $1
+		GROUP BY t.id, ws.category`, parentID, domain.TaskLinkBlocks)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]ChildFact{}
+	for rows.Next() {
+		var id uuid.UUID
+		var f ChildFact
+		if err := rows.Scan(&id, &f.Category, &f.BlockedBy); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = f
+	}
+	return out, translate(rows.Err())
+}
+
 // ChildTasks — дочерние задачи, в порядке заведения. На них стоит гейт
 // dependencies_closed и по ним карточка эпика рисует дерево.
 func (s *Store) ChildTasks(ctx context.Context, q Querier, parentID uuid.UUID) ([]domain.Task, error) {
