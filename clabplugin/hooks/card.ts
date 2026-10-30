@@ -10,6 +10,7 @@ import type { CardData, CardGate, CardGates, CycleNode, GateMark } from '../type
 import { platesOf, returnsOf, seenOf, stageChipsOf } from './approve'
 import { childrenOf } from './children'
 import type { ApiChild } from './children'
+import { runStagesOf, stageTabs } from './artifact'
 import { HUMAN_APPROVAL } from './vocab'
 
 export type ApiStatus = {
@@ -52,6 +53,8 @@ export type ApiRun = {
   id?: string
   status_key?: string
   kind?: string
+  role_key?: string | null
+  entered_at?: string | null
   attempt?: number
   parent_run_id?: string | null
   claimed_by_handle?: string | null
@@ -229,6 +232,8 @@ export function cardOf(detail: TaskDetail, wf: Workflow, host: string | null): C
     workflowName: wf.name ?? null,
     workflowVersion: typeof wf.version === 'number' ? wf.version : null,
     nodes,
+    stages: stageTabs(detail, wf),
+    runStages: runStagesOf(detail),
     step,
     attempt: run?.attempt ?? 1,
     holder: live?.claimed_by_handle ?? null,

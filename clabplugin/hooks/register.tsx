@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Action, ApprovalsState, CardData, Connection, Outcome, Plate, Tab, TaskRow } from '../types'
+import type { Action, ApprovalsState, ArtifactView, CardData, Connection, ListRow, Outcome, Plate, RunRow, Segment, Tab, TaskRow, TasksData, TasksView } from '../types'
+import { chatText, clip, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
+import type { ApiArtifact, ApiAttachment, Selection, TaskFiles } from './artifact'
 import {
   approvalRowsOf,
   approveSteps,
@@ -17,6 +19,29 @@ import type { ApiApproval, Drift, Step } from './approve'
 import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
 import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
+import type { ApiList, ApiQueueItem, ApiWorkflowRow } from './tasks'
+import {
+  byUpdated,
+  countPath,
+  DEFAULT_VIEW,
+  EMPTY_DATA,
+  exactKey,
+  groupKids,
+  holders,
+  kidsPath,
+  KIDS_SHOWN,
+  LEGACY_LIMIT,
+  legacyList,
+  listPath,
+  matches,
+  mixedTypes,
+  PAGE,
+  QUEUE_LIMIT,
+  rowOf,
+  SEGMENTS,
+  typesOf,
+  UNASSIGNED,
+} from './tasks'
 import { cycleLine } from './term'
 import { cycleAlt, cycleSvg } from './svg'
 import { schemeOf, tintOf } from './theme'
@@ -66,11 +91,12 @@ const COMMAND = 'clab-plugin'
 // Значения сессии, которые читает панель. Учётных данных среди них нет.
 export const keysAtom = atom({ plugin: 'clab-plugin', key: 'keys' } as const, [] as string[], { shape: 'keys-1' })
 export const rowsAtom = atom({ plugin: 'clab-plugin', key: 'rows' } as const, {} as Record<string, TaskRow>, {
-  shape: 'rows-4',
+  shape: 'rows-5',
 })
 export const openAtom = atom({ plugin: 'clab-plugin', key: 'open' } as const, [] as string[], { shape: 'open-1' })
 export const describedAtom = atom({ plugin: 'clab-plugin', key: 'described' } as const, [] as string[], { shape: 'described-1' })
 export const themeAtom = atom({ plugin: 'clab-plugin', key: 'theme' } as const, '', { shape: 'theme-1' })
+export const viewAtom = atom({ plugin: 'clab-plugin', key: 'view' } as const, null as ArtifactView | null, { shape: 'view-1' })
 export const tabAtom = atom({ plugin: 'clab-plugin', key: 'tab' } as const, 'chat' as Tab, { shape: 'tab-1' })
 export const connectionAtom = atom(
   { plugin: 'clab-plugin', key: 'connection' } as const,
@@ -89,6 +115,12 @@ export const approvalsAtom = atom(
   { supported: null, canDecide: false, rows: [], truncated: false, error: null, loadedAt: null } as ApprovalsState,
   { shape: 'approvals-2' },
 )
+export const tasksViewAtom = atom({ plugin: 'clab-plugin', key: 'tasksView' } as const, DEFAULT_VIEW, {
+  shape: 'tasksView-1',
+})
+export const tasksDataAtom = atom({ plugin: 'clab-plugin', key: 'tasksData' } as const, EMPTY_DATA, {
+  shape: 'tasksData-1',
+})
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: 'Этот чат' },
@@ -142,20 +174,24 @@ async function token($: $T, s: Session): Promise<string> {
 
 // Запрос к /v1 личным токеном. На 401 токен перечитывается один раз (его мог
 // обновить clab auth login в другом терминале); второй 401 — просьба войти.
-async function api<T>($: $T, s: Session, path: string): Promise<T> {
+async function request($: $T, s: Session, path: string, accept = 'application/json'): Promise<string> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const auth = await token($, s)
     const res = await $.http.fetch(`${s.host}/v1${path}`, {
-      headers: { Authorization: `Bearer ${auth}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${auth}`, Accept: accept },
     })
     if (res.status === 401) {
       s.token = null
       continue
     }
     if (!res.ok) throw new ApiError(res.status, messageOf(res.status, res.text))
-    return JSON.parse(res.text) as T
+    return res.text
   }
   throw new ApiError(401, LOGIN_HINT)
+}
+
+async function api<T>($: $T, s: Session, path: string): Promise<T> {
+  return JSON.parse(await request($, s, path)) as T
 }
 
 // Запись личным токеном. 401 — запрос не дошёл до ручки: токен
@@ -371,6 +407,8 @@ async function expand($: $T, keys: string[]) {
 const toggle = (key: string) => (list: string[]) => (list.includes(key) ? list.filter(k => k !== key) : [...list, key])
 
 async function untrack($: $T, keys: string[]) {
+  await update($, viewAtom, v => (v && keys.includes(v.key) ? null : v))
+  for (const k of keys) sessionOf.current?.files.delete(k)
   await update($, keysAtom, list => list.filter(k => !keys.includes(k)))
   await update($, openAtom, list => list.filter(k => !keys.includes(k)))
   await update($, rowsAtom, rows => {
@@ -583,6 +621,7 @@ async function runCommand($: $T, s: Session, args: string): Promise<string> {
     text = now.length ? `Задачи чата: ${now.join(', ')}.` : 'Панель открыта; задач в этом чате пока нет.'
   }
   await update($, tabAtom, () => tab)
+  if (tab === 'tasks') void openTasks($, s).catch(() => undefined)
   await $.ui.open({ id: PANE, title: TITLE })
   if (tab === 'approvals') await loadApprovals($, s)
   return text
@@ -763,11 +802,200 @@ async function openAction($: $T, key: string, transition: string, gate: string) 
   await startAction($, plate.type === CHECKLIST ? 'checklist' : 'approve', key, plate)
 }
 
+// --- Вкладка «Задачи» ---------------------------------------------------------
+
+// Сколько держим прочитанную выборку, прежде чем перечитать при возврате на
+// вкладку.
+const TASKS_FRESH_MS = 10_000
+
+// Что перечитать: base — типы проекта и очередь, counts — счётчики сегментов.
+// Страница читается всегда.
+type TasksLoad = { base?: boolean; counts?: boolean }
+
+const rowsOfQueue = (s: Session, v: TasksView, holder: ReadonlyMap<string, string>): { rows: ListRow[]; total: number } => {
+  const items = byUpdated(
+    s.queue
+      .filter(it => it.claimable === true && it.task)
+      .map(it => it.task)
+      .filter(t => (!v.type || (typeof t.properties?.type === 'string' ? t.properties.type : '') === v.type))
+      .filter(t => (v.assignee === UNASSIGNED ? !t.assignee_handle : v.assignee ? t.assignee_handle === v.assignee : true))
+      .filter(t => matches(t, v.q)),
+  )
+  const page = items.slice(v.page * PAGE, (v.page + 1) * PAGE)
+  return { rows: page.map(t => rowOf(t, { category: t.status_category, holder: holder.get(t.key) ?? null })), total: items.length }
+}
+
+// Читает выборку по выбору человека и кладёт её в состояние. Устаревший ответ
+// (человек успел нажать другое) не пишется; ошибка не стирает прежний список.
+async function loadTasks($: $T, s: Session, what: TasksLoad = {}) {
+  const seq = ++s.tasksSeq
+  await s.ready
+  const fresh = () => seq === s.tasksSeq
+  if (!s.host || !s.project) {
+    await update($, tasksDataAtom, d => ({ ...d, loaded: true, error: s.host ? WORDS.noProject : `инстанс не задан — ${LOGIN_HINT}` }))
+    return
+  }
+  const v = await read($, tasksViewAtom)
+  const prev = await read($, tasksDataAtom)
+  const base = what.base === true || !prev.loaded
+  const project = `/projects/${encodeURIComponent(s.project)}`
+  try {
+    let types = prev.types
+    if (base) {
+      const [wfs, queue] = await Promise.all([
+        api<{ workflows?: ApiWorkflowRow[] }>($, s, `${project}/workflows`),
+        api<{ queue?: ApiQueueItem[] }>($, s, `${project}/queue?limit=${QUEUE_LIMIT}`),
+      ])
+      types = typesOf(wfs.workflows ?? [])
+      s.queue = queue.queue ?? []
+    }
+    const holder = holders(s.queue)
+    const counts = { ...prev.counts }
+    let rows: ListRow[] = []
+    let total = 0
+    let truncated = false
+    let approvals = false
+    let mode = s.listMode
+
+    const readPaged = async (): Promise<boolean> => {
+      // Страница, счётчики остальных сегментов и дети эпиков страницы.
+      const wanted = what.counts === true || base ? SEGMENTS.filter(x => x !== 'queue' && (v.q !== '' || x !== v.segment)) : []
+      const showsQueue = v.q === '' && v.segment === 'queue'
+      const [page, ...other] = await Promise.all([
+        showsQueue ? Promise.resolve(null) : api<ApiList>($, s, `${project}${listPath(v, PAGE, v.page * PAGE)}`),
+        ...(v.q === '' ? wanted.map(x => api<ApiList>($, s, `${project}${countPath(v, x)}`)) : []),
+      ])
+      if (page !== null && typeof page.total !== 'number') return false
+      if (v.q === '') wanted.forEach((x, i) => (counts[x] = other[i]?.total ?? null))
+      if (page === null) {
+        const q = rowsOfQueue(s, v, holder)
+        rows = q.rows
+        total = q.total
+      } else {
+        const tasks = page.tasks ?? []
+        if (v.q === '') counts[v.segment] = page.total ?? null
+        const parents = tasks.filter(t => t.child_counts && Object.keys(t.child_counts).length > 0).map(t => t.key)
+        const kids = parents.length ? groupKids((await api<ApiList>($, s, `${project}${kidsPath(parents)}`)).tasks ?? []) : new Map()
+        rows = tasks.map(t => rowOf(t, { category: t.status_category, holder: holder.get(t.key) ?? null, kids: kids.get(t.key) }))
+        total = page.total ?? tasks.length
+        approvals = tasks.some(t => typeof t.awaiting_approval === 'boolean')
+      }
+      counts.queue = rowsOfQueue(s, { ...v, q: '', page: 0 }, holder).total
+      return true
+    }
+
+    const readLegacy = async () => {
+      // Сервер без листания: выборка целиком и версии циклов по workflow_id.
+      if (s.legacy === null || base) {
+        s.legacy = (await api<ApiList>($, s, `${project}/tasks?limit=${LEGACY_LIMIT}`)).tasks ?? []
+      }
+      const all = s.legacy
+      const found = new Map<string, Workflow>()
+      await Promise.all(
+        [...new Set(all.map(t => String(t.workflow_id)))].map(async id => {
+          try {
+            found.set(id, await workflow($, s, id))
+          } catch {}
+        }),
+      )
+      if (v.segment === 'queue' && v.q === '') {
+        const q = rowsOfQueue(s, v, holder)
+        rows = q.rows
+        total = q.total
+      }
+      const res = legacyList(all, found, v, holder)
+      if (!(v.segment === 'queue' && v.q === '')) {
+        rows = res.rows
+        total = res.total
+      }
+      Object.assign(counts, res.counts, { queue: rowsOfQueue(s, { ...v, q: '', page: 0 }, holder).total })
+      truncated = all.length >= LEGACY_LIMIT
+    }
+
+    if (mode !== 'legacy') {
+      const ok = await readPaged()
+      if (ok) mode = s.listMode = 'paged'
+      else mode = s.listMode = 'legacy'
+    }
+    if (mode === 'legacy') await readLegacy()
+
+    if (!fresh()) return
+    s.tasksAt = await $.clock.now()
+    const seen = new Set<string>()
+    for (const r of rows) if (r.assignee) seen.add(r.assignee)
+    for (const it of s.queue) if (it.task?.assignee_handle) seen.add(it.task.assignee_handle)
+    if (v.assignee && v.assignee !== UNASSIGNED) seen.add(v.assignee)
+    await update($, tasksDataAtom, () => ({
+      loaded: true,
+      error: null,
+      mode,
+      types,
+      handles: [...seen].sort(),
+      counts,
+      rows,
+      total,
+      truncated,
+      approvals,
+    }))
+    await update($, connectionAtom, c => (c.error === LOGIN_HINT ? { ...c, error: null } : c))
+  } catch (err) {
+    if (!fresh()) return
+    const message = err instanceof Error ? err.message : String(err)
+    await update($, tasksDataAtom, d => ({ ...d, loaded: true, error: message }))
+    if (err instanceof ApiError && err.status === 401) await update($, connectionAtom, c => ({ ...c, error: LOGIN_HINT }))
+  }
+}
+
+// Открыта вкладка (кнопка или команда): выборка перечитывается, если она
+// старше нескольких секунд.
+async function openTasks($: $T, s: Session | null) {
+  if (!s) return
+  const data = await read($, tasksDataAtom)
+  if (data.loaded && (await $.clock.now()) - s.tasksAt < TASKS_FRESH_MS) return
+  await loadTasks($, s, { base: true, counts: true })
+}
+
+// Выбор человека: view меняется, страница читается заново; счётчики — когда
+// они зависят от выбора (тип, исполнитель).
+async function chooseTasks($: $T, patch: Partial<TasksView>, what: TasksLoad = {}) {
+  await update($, tasksViewAtom, v => ({ ...v, page: 0, more: [], ...patch }))
+  const s = sessionOf.current
+  if (s) await loadTasks($, s, what)
+}
+
+async function pageTasks($: $T, delta: number) {
+  await update($, tasksViewAtom, v => ({ ...v, page: Math.max(0, v.page + delta), more: [] }))
+  const s = sessionOf.current
+  if (s) await loadTasks($, s)
+}
+
+// Клик по строке: карточка раскрывается под строкой, ключ попадает во вкладку
+// «Этот чат». Повторный клик по открытой строке её сворачивает.
+async function openFromList($: $T, key: string) {
+  const s = sessionOf.current
+  if (!s) return
+  const keys = await read($, keysAtom)
+  const open = await read($, openAtom)
+  if (keys.includes(key) && open.includes(key)) {
+    await update($, openAtom, toggle(key))
+    return
+  }
+  await track($, s, [key])
+  await expand($, [key])
+}
+
+// Поиск: Enter. Ключ задачи целиком открывает её карточку сразу (UC-9.3).
+async function searchTasks($: $T, text: string) {
+  const q = text.trim()
+  await chooseTasks($, { q })
+  if (q && exactKey(q)) await openFromList($, q.toUpperCase())
+}
+
 // --- Карточка ------------------------------------------------------------------
 
 // Элементы поверхности. Svg есть везде, кроме терминала: там схема — строка.
-// Input и Select есть везде, кроме mobile.
-type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Svg?: any; Input?: any; Select?: any }
+// Input и Select есть везде, кроме mobile: там их вызывают с проверкой.
+type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Svg?: any; Input?: any; Select?: any }
 
 // Раскрыть карточку задачи из полосы над вводом или из строки ребёнка:
 // задача попадает в чат, строка раскрывается, панель открывается.
@@ -781,6 +1009,90 @@ async function openCard($: $T, key: string) {
 
 // Сессия для обработчиков нажатий, у которых нет своей ссылки на неё.
 const sessionOf: { current: Session | null } = { current: null }
+
+// --- Просмотр артефактов этапа --------------------------------------------------
+//
+// Только чтение: GET списка, содержимого и вложений личным токеном. Данные —
+// в памяти сессии мода (файлы и тексты), в состоянии — только выбор человека.
+// Состояние меняется после того, как данные выбранного пришли: при ошибке
+// остаётся прежнее показанное, а ошибка — строкой под ним.
+
+async function loadFiles($: $T, s: Session, key: string) {
+  const [a, f] = await Promise.all([
+    api<{ artifacts?: ApiArtifact[] | null }>($, s, `/tasks/${enc(key)}/artifacts?include_superseded=true`),
+    api<{ attachments?: ApiAttachment[] | null }>($, s, `/tasks/${enc(key)}/attachments`),
+  ])
+  s.files.set(key, { artifacts: a.artifacts ?? [], attachments: f.attachments ?? [] } satisfies TaskFiles)
+}
+
+async function loadContent($: $T, s: Session, art: ApiArtifact) {
+  if (s.content.has(art.id)) return
+  s.content.set(art.id, await request($, s, `/artifacts/${enc(art.id)}/content`, '*/*'))
+}
+
+const patchView = (key: string, p: Partial<ArtifactView>) => (v: ArtifactView | null) =>
+  v && v.key === key ? { ...v, ...p, rev: v.rev + 1 } : v
+
+// Показать выбор: сначала данные, потом состояние. reload — перечитать список
+// (открытие просмотра), иначе список из памяти и версия без запроса, если её
+// текст уже получен.
+async function showView($: $T, s: Session, key: string, sel: Selection, reload = false) {
+  await update($, viewAtom, patchView(key, { busy: true }))
+  try {
+    if (reload || !s.files.has(key)) await loadFiles($, s, key)
+    const card = (await read($, rowsAtom))[key]?.card
+    if (!card) throw new Error('карточка задачи ещё не загружена')
+    const r = resolve(card, s.files.get(key), sel)
+    if (r.version && shownOf(r.version.art) !== 'file') await loadContent($, s, r.version.art)
+    await update(
+      $,
+      viewAtom,
+      patchView(key, {
+        stage: r.stage?.key ?? null,
+        kind: r.chip?.kind ?? null,
+        version: r.version && !r.version.current ? r.version.art.id : null,
+        error: null,
+        busy: false,
+      }),
+    )
+  } catch (err) {
+    await update($, viewAtom, patchView(key, { error: err instanceof Error ? err.message : String(err), busy: false }))
+  }
+}
+
+// Открыть просмотр из карточки: этап (null — по умолчанию) и панель.
+async function openView($: $T, key: string, stage: string | null) {
+  const s = sessionOf.current
+  if (!s) return
+  await update($, viewAtom, () => ({ key, stage, kind: null, version: null, error: null, busy: true, rev: 0 }))
+  await update($, tabAtom, () => 'chat' as Tab)
+  await $.ui.open({ id: PANE, title: TITLE })
+  await showView($, s, key, { stage, kind: null, version: null }, true)
+}
+
+// Выбор вкладки, чипа или версии. Выбор выше по иерархии сбрасывает ниже.
+async function choose($: $T, key: string, pick: Partial<Selection>) {
+  const s = sessionOf.current
+  const v = await read($, viewAtom)
+  if (!s || !v || v.key !== key) return
+  const sel: Selection = { stage: v.stage, kind: v.kind, version: v.version, ...pick }
+  await showView($, s, key, sel)
+}
+
+async function closeView($: $T) {
+  await update($, viewAtom, () => null)
+}
+
+// «В чат»: заголовок и полный текст — в поле ввода. Ход не начинается и в
+// разговор плагин ничего не пишет: отправляет человек.
+async function toChat($: $T, key: string, art: ApiArtifact, text: string) {
+  await $.prompt.fill({ text: chatText(key, art.kind, art.version, text), mode: 'insert' })
+}
+
+async function copyText($: $T, text: string, surface: string) {
+  const done = await $.ui.copy({ text, surface: surface as never })
+  $.ui.toast(done.isCopied ? WORDS.copied : WORDS.notCopied)
+}
 
 const MARK_COLOR = { ok: 'success', skip: undefined, open: undefined, approval: 'warning', fail: 'error' } as const
 const MARK_GLYPH = { ok: GLYPH.ok, skip: GLYPH.ok, open: GLYPH.open, approval: GLYPH.approval, fail: GLYPH.fail } as const
@@ -868,6 +1180,20 @@ function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
       </Box>
     )
 
+  const stages =
+    c.stages.length === 0 ? null : (
+      <Box flexDirection="column">
+        <Text bold>{WORDS.stages}</Text>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {c.stages.map(st => (
+            <Button key={`stage-open-${c.key}-${st.key}`} onPress={() => void openView($, c.key, st.key)}>
+              {st.attempts > 1 ? `${st.name} ×${st.attempts}` : st.name}
+            </Button>
+          ))}
+        </Box>
+      </Box>
+    )
+
   const footer = (
     <Box flexDirection="row" gap={2} flexWrap="wrap">
       {c.description ? (
@@ -905,8 +1231,222 @@ function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
       {decideTree($, els, c, o.decide)}
       {kids}
       {files}
+      {stages}
       {footer}
       {o.described && c.description ? <Markdown text={c.description} /> : null}
+    </Box>
+  )
+}
+
+const runLine = (r: RunRow) => [r.role, r.holder, [whenRange(r.from, r.to), r.running ? WORDS.running : null].filter(Boolean).join(' · ') || null].filter(Boolean).join(' · ')
+
+function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
+  const { Box, Text, Button, Link, Markdown, Code, Select } = els
+  const s = sessionOf.current
+  const c = row.card as CardData
+  const files = s?.files.get(v.key)
+  const r = resolve(c, files, v)
+  const art = r.version?.art
+  const shown = art ? shownOf(art) : null
+  const text = art ? s?.content.get(art.id) : undefined
+  const cut = text !== undefined ? clip(text) : null
+
+  const head = (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1}>
+        <Button key="view-back" plain onPress={() => void closeView($)}>
+          {`${GLYPH.prev} ${c.key}`}
+        </Button>
+        {r.stage ? (
+          <Text bold wrap="truncate-end">
+            {GLYPH.crumb} {r.stage.name}
+          </Text>
+        ) : null}
+      </Box>
+      <Button key="view-close" plain dimColor onPress={() => void closeView($)}>
+        {GLYPH.close}
+      </Button>
+    </Box>
+  )
+
+  const tabs = (
+    <Box flexDirection="row" gap={1} flexWrap="wrap">
+      {c.stages.map(st => (
+        <Button
+          key={`stage-${st.key}`}
+          variant={st.key === r.stage?.key ? 'primary' : 'secondary'}
+          onPress={() => void choose($, v.key, { stage: st.key, kind: null, version: null })}>
+          {st.attempts > 1 ? `${st.name} ×${st.attempts}` : st.name}
+        </Button>
+      ))}
+    </Box>
+  )
+
+  const runs = r.stage ? (
+    <Box flexDirection="column">
+      {r.stage.runs.map(run => (
+        <Box flexDirection="column" key={`run-${run.id}`}>
+          <Text wrap="wrap" dimColor>
+            {WORDS.run} {run.attempt} · {runLine(run)}
+          </Text>
+          {run.back ? (
+            <Text wrap="wrap">
+              <Text color="error">{GLYPH.back} </Text>
+              {WORDS.returnedFrom} {run.back.fromName}
+              {run.back.reason ? `: «${run.back.reason}»` : ''}
+            </Text>
+          ) : null}
+          {run.reviews.map(rv => (
+            <Text key={`review-${rv.id}`} wrap="wrap" dimColor>
+              {GLYPH.nested} {gateWord('agent_review')} · {runLine(rv)}
+            </Text>
+          ))}
+        </Box>
+      ))}
+    </Box>
+  ) : null
+
+  const chips =
+    r.chips.length === 0 ? (
+      <Text dimColor>{files ? WORDS.noArtifacts : WORDS.loading}</Text>
+    ) : (
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {r.chips.map(ch => (
+          <Button
+            key={`kind-${ch.kind}`}
+            variant={ch.kind === r.chip?.kind ? 'primary' : 'secondary'}
+            onPress={() => void choose($, v.key, { kind: ch.kind, version: null })}>
+            {ch.title}
+          </Button>
+        ))}
+      </Box>
+    )
+
+  // Прямой ссылки на содержимое нет: браузер не приложит токен. Скачивание — строка для
+  // терминала, а ссылка ведёт в карточку задачи в веб-интерфейсе (ниже, у вложений и у артефакта).
+  const download = (id: string) => (
+    <Box flexDirection="column">
+      <Text dimColor wrap="wrap">
+        {WORDS.download} {WORDS.viaCli}: clab artifact {id} -o ./
+      </Text>
+    </Box>
+  )
+
+  let body = null
+  if (r.chip && art) {
+    const versions = r.chip.versions
+    const picker =
+      versions.length > 1 ? (
+        <Select
+          key="version"
+          options={[...versions].reverse().map(x => ({ value: x.art.id, label: `v${x.art.version ?? 1}${x.current ? ` · ${WORDS.currentVersion}` : ''}` }))}
+          value={art.id}
+          onSelect={(id: string) => void choose($, v.key, { version: id })}
+        />
+      ) : (
+        <Text dimColor>v{art.version ?? 1}</Text>
+      )
+    let content = null
+    if (shown === 'file') {
+      content = (
+        <Box flexDirection="column">
+          <Text dimColor wrap="wrap">
+            {[typeLabel(art.media_type ?? undefined, art.file_name ?? undefined), sizeOf(typeof art.size_bytes === 'number' ? art.size_bytes : null), art.file_name].filter(Boolean).join(' · ')}
+            {isMarkup(art) ? ` · ${WORDS.download}, ${WORDS.noInline}` : ''}
+          </Text>
+          {download(art.id)}
+        </Box>
+      )
+    } else if (cut) {
+      content = (
+        <Box flexDirection="column">
+          {shown === 'markdown' ? <Markdown text={cut.text} /> : <Code source={cut.text} language={languageOf(art)} format={shown === 'diff' ? 'diff' : undefined} />}
+          {/* Срез и без скрытых строк: одна длинная строка режется по знакам (UC-1, 4a). */}
+          {cut.text !== text ? (
+            <Box flexDirection="row" gap={2} flexWrap="wrap">
+              {cut.hidden > 0 ? (
+                <Text dimColor>
+                  {GLYPH.more} {WORDS.more} {cut.hidden} {WORDS.lines}
+                </Text>
+              ) : null}
+              {c.url ? <Link href={c.url} label={`${WORDS.openFull} ${GLYPH.link}`} /> : null}
+            </Box>
+          ) : null}
+        </Box>
+      )
+    } else {
+      content = <Text dimColor>{v.busy ? WORDS.loading : ''}</Text>
+    }
+    body = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text bold wrap="wrap">
+              {art.title ?? art.kind}
+            </Text>
+            <Text dimColor wrap="truncate-end">
+              {art.kind}
+            </Text>
+          </Box>
+          {picker}
+        </Box>
+        {content}
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {text !== undefined ? (
+            <Button key="to-chat" variant="primary" onPress={() => void toChat($, c.key, art, text)}>
+              {WORDS.toChat}
+            </Button>
+          ) : null}
+          {text !== undefined ? (
+            <Button key="copy" variant="secondary" onPress={e => void copyText($, text, e.surface)}>
+              {WORDS.copy}
+            </Button>
+          ) : null}
+          {c.url ? <Link href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null}
+        </Box>
+      </Box>
+    )
+  }
+
+  const attachments = (files?.attachments ?? []).length === 0 ? null : (
+    <Box flexDirection="column">
+      <Text bold>{WORDS.attachments}</Text>
+      {(files?.attachments ?? []).map(a => (
+        <Box flexDirection="column" key={`att-${a.id}`}>
+          <Text wrap="wrap">
+            <Text dimColor>{GLYPH.file} </Text>
+            {a.file_name ?? a.title}
+          </Text>
+          <Text dimColor wrap="wrap">
+            {[
+              typeLabel(a.media_type, a.file_name),
+              sizeOf(typeof a.size_bytes === 'number' ? a.size_bytes : null),
+              a.added_by,
+              isMarkup({ media_type: a.media_type, file_name: a.file_name }) ? `${WORDS.download}, ${WORDS.noInline}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+          {download(a.id)}
+        </Box>
+      ))}
+      {c.url ? <Link key="att-open" href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" gap={1} key={`view-${c.key}`}>
+      {head}
+      {tabs}
+      {runs}
+      {chips}
+      {body}
+      {v.error ? (
+        <Text color="error" wrap="wrap">
+          {WORDS.notLoaded}: {v.error}
+        </Text>
+      ) : null}
+      {attachments}
     </Box>
   )
 }
@@ -1016,6 +1556,54 @@ function block(els: Els, key: string, tone: Tone | null, scheme: Scheme, childre
   )
 }
 
+// --- Тело вкладки «Задачи» -------------------------------------------------------
+
+const SEGMENT_LABEL: Record<Segment, string> = {
+  work: WORDS.segWork,
+  queue: WORDS.segQueue,
+  backlog: WORDS.segBacklog,
+  done: WORDS.segDone,
+}
+
+type TasksCtx = {
+  surface: string
+  view: TasksView
+  data: TasksData
+  rows: Record<string, TaskRow>
+  keys: string[]
+  open: string[]
+  described: string[]
+  scheme: ReturnType<typeof schemeOf>
+  now: number
+  // Решения по гейтам (326): открытое действие, итоги и выбор цифр в терминале
+  // — те же, что в карточке в «Этом чате».
+  action: Action | null
+  outcomes: Record<string, Outcome>
+  principal: string | null
+  hotkeys: { used: boolean }
+}
+
+function listBar(els: Els, p: ListRow['nested'] & object) {
+  const { Box, Text } = els
+  const total = p.progress.total
+  if (total === 0) return null
+  const cells = (n: number) => Math.round((n / total) * BAR)
+  const done = cells(p.progress.done)
+  const waiting = cells(p.progress.waiting)
+  const active = cells(p.progress.active)
+  const rest = Math.max(0, BAR - done - waiting - active)
+  return (
+    <Box flexDirection="column" paddingLeft={2}>
+      <Text>
+        <Text color="success">{GLYPH.bar.repeat(done)}</Text>
+        <Text color="warning">{GLYPH.bar.repeat(waiting)}</Text>
+        <Text color="claude">{GLYPH.bar.repeat(active)}</Text>
+        <Text dimColor>{GLYPH.barEmpty.repeat(rest)}</Text>
+      </Text>
+    </Box>
+  )
+}
+
 // Заголовок на заливке — цветом текста темы; без заливки — цветом тона.
 const headColor = (scheme: Scheme, tone: Tone) => (tintOf(scheme, tone) ? undefined : tone)
 
@@ -1026,6 +1614,104 @@ function decideTree($: $T, els: Els, c: CardData, d: Decide) {
     <Box flexDirection="column" gap={1} key={`plates-${c.key}`}>
       {c.plates.map(p => plateTree($, els, c, p, d))}
       {d.outcome ? outcomeTree(els, c, d.outcome, d) : null}
+    </Box>
+  )
+}
+
+function listRowTree($: $T, els: Els, r: ListRow, c: TasksCtx, mixed: boolean) {
+  const { Box, Text, Button } = els
+  const isOpen = c.open.includes(r.key) && !!c.rows[r.key]?.card
+  const dim = r.state === 'backlog' || r.state === 'cancelled'
+  const n = r.nested
+  const expanded = c.view.more.includes(r.key)
+  const kids = n ? (expanded ? n.kids : n.kids.slice(0, KIDS_SHOWN)) : []
+  const hidden = n ? n.all - KIDS_SHOWN : 0
+  const meta = [
+    r.awaiting ? `${GLYPH.approval} ${WORDS.awaiting} · ${r.statusName}` : r.statusName,
+    ago(r.updatedAt, c.now),
+    r.holder ? `${WORDS.holder} ${r.holder}` : null,
+  ].filter(Boolean)
+  const stored = c.rows[r.key]
+  return (
+    <Box flexDirection="column" key={`lrow-${r.key}`}>
+      <Button key={`task-${r.key}`} plain onPress={() => void openFromList($, r.key)}>
+        <Text color={CHILD_DOT[r.state]} dimColor={dim}>
+          {n ? '◈' : dim ? GLYPH.open : GLYPH.current}{' '}
+        </Text>
+        <Text dimColor>{r.key} </Text>
+        <Text bold={isOpen || !!n}>{r.title}</Text>
+        {mixed && r.type ? <Text dimColor> · {r.type}</Text> : ''}
+        {n ? (
+          <Text dimColor>
+            {' · '}
+            {n.progress.done} {WORDS.of} {n.progress.total}
+          </Text>
+        ) : (
+          ''
+        )}
+      </Button>
+      <Box paddingLeft={2}>
+        <Text color={r.awaiting ? 'warning' : undefined} dimColor={!r.awaiting} wrap="truncate-end">
+          {meta.join(' · ')}
+        </Text>
+      </Box>
+      {n ? listBar(els, n) : null}
+      {n
+        ? kids.map(k => (
+            <Box key={`lkid-${r.key}-${k.key}`} paddingLeft={2}>
+              <Button key={`kid-${r.key}-${k.key}`} plain onPress={() => void openFromList($, k.key)}>
+                <Text color={CHILD_DOT[k.state]} dimColor={k.state === 'backlog' || k.state === 'cancelled'}>
+                  {k.state === 'backlog' || k.state === 'cancelled' ? GLYPH.open : GLYPH.current}{' '}
+                </Text>
+                <Text dimColor>{k.key} </Text>
+                <Text strikethrough={k.state === 'cancelled'}>{k.title}</Text>
+                <Text color={k.awaiting ? 'warning' : undefined} dimColor={!k.awaiting}>
+                  {' · '}
+                  {k.awaiting ? `${GLYPH.approval} ` : ''}
+                  {k.statusName}
+                </Text>
+              </Button>
+            </Box>
+          ))
+        : null}
+      {n && hidden > 0 ? (
+        <Box paddingLeft={2}>
+          <Button
+            key={`more-${r.key}`}
+            plain
+            dimColor
+            onPress={() => void update($, tasksViewAtom, v => ({ ...v, more: toggle(r.key)(v.more) }))}>
+            {expanded ? WORDS.fewer : `… ${WORDS.moreKids} ${hidden}`}
+          </Button>
+        </Box>
+      ) : null}
+      {n?.partial && expanded ? (
+        <Box paddingLeft={2}>
+          <Text dimColor>{WORDS.partialKids}</Text>
+        </Box>
+      ) : null}
+      {stored?.error ? (
+        <Box paddingLeft={2}>
+          <Text color="error">{stored.error}</Text>
+        </Box>
+      ) : null}
+      {isOpen && stored?.card
+        ? cardTree($, els, c.surface, stored.card, {
+            scheme: c.scheme,
+            now: c.now,
+            described: c.described.includes(r.key),
+            decide: {
+              surface: c.surface,
+              canDecide: stored.canDecide,
+              action: c.action,
+              outcome: c.outcomes[r.key],
+              principal: c.principal,
+              hotkeys: c.hotkeys,
+              scheme: c.scheme,
+              now: c.now,
+            },
+          })
+        : null}
     </Box>
   )
 }
@@ -1333,6 +2019,117 @@ function outcomeTree(els: Els, c: CardData, o: Outcome, d: Decide) {
   )
 }
 
+function tasksBody($: $T, els: Els, c: TasksCtx) {
+  const { Box, Text, Button, Input, Select } = els
+  const { view, data } = c
+  const searching = view.q.trim() !== ''
+  const filtered = view.type !== '' || view.assignee !== '' || searching
+  const mixed = mixedTypes(data.rows)
+
+  const typeOptions = [{ value: '', label: WORDS.allTypes }, ...data.types.map(t => ({ value: t, label: t }))]
+  const assigneeOptions = [
+    { value: '', label: WORDS.allAssignees },
+    { value: UNASSIGNED, label: WORDS.unassigned },
+    ...data.handles.map(h => ({ value: h, label: h })),
+  ]
+  const cycle = (opts: { value: string }[], now: string) => opts[(opts.findIndex(o => o.value === now) + 1) % opts.length]?.value ?? ''
+
+  const search = Input ? (
+    <Input key="tasks-search" placeholder={WORDS.searchHint} value={view.q} submitLabel={WORDS.searchSubmit} onSubmit={(t: string) => void searchTasks($, t)} />
+  ) : null
+
+  const pick = (key: string, opts: { value: string; label: string }[], value: string, set: (v: string) => void) =>
+    Select ? (
+      <Select key={key} options={opts} value={value} onSelect={(v: string) => set(v)} />
+    ) : (
+      <Button key={key} plain onPress={() => set(cycle(opts, value))}>
+        {opts.find(o => o.value === value)?.label ?? value}
+      </Button>
+    )
+
+  const filters = (
+    <Box flexDirection="column" gap={1}>
+      {search}
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {data.types.length > 0
+          ? pick('tasks-type', typeOptions, view.type, v => void chooseTasks($, { type: v }, { counts: true }))
+          : null}
+        {pick('tasks-assignee', assigneeOptions, view.assignee, v => void chooseTasks($, { assignee: v }, { counts: true }))}
+      </Box>
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {SEGMENTS.map(id => {
+          const active = !searching && view.segment === id
+          const n = data.counts[id]
+          return (
+            <Button
+              key={`seg-${id}`}
+              variant={active ? 'primary' : 'secondary'}
+              onPress={() => void chooseTasks($, { segment: id, q: '' })}>
+              {SEGMENT_LABEL[id]}
+              {n !== null ? ` ${n}` : ''}
+            </Button>
+          )
+        })}
+      </Box>
+    </Box>
+  )
+
+  const from = data.total === 0 ? 0 : view.page * PAGE + 1
+  const to = Math.min(data.total, (view.page + 1) * PAGE)
+  const last = to >= data.total
+  const caption = [
+    data.total > 0 ? `${WORDS.shown} ${from}–${to} ${WORDS.of} ${data.total}` : null,
+    searching ? (data.mode === 'legacy' ? WORDS.loadedOnly : WORDS.projectSearch) : null,
+    data.truncated ? `${WORDS.firstN} 500` : null,
+    WORDS.sortedBy,
+  ].filter(Boolean)
+
+  let body
+  if (!data.loaded) {
+    body = <Text dimColor>{WORDS.loading}</Text>
+  } else if (data.rows.length === 0) {
+    body = (
+      <Box flexDirection="column">
+        <Text dimColor>{view.segment === 'queue' && !filtered && !data.error ? WORDS.queueEmpty : WORDS.nothingFound}</Text>
+        {filtered ? (
+          <Button key="tasks-reset" plain onPress={() => void chooseTasks($, { type: '', assignee: '', q: '' }, { counts: true })}>
+            {WORDS.resetFilters}
+          </Button>
+        ) : null}
+      </Box>
+    )
+  } else {
+    body = (
+      <Box flexDirection="column" gap={1}>
+        {data.rows.map(r => listRowTree($, els, r, c, mixed))}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {filters}
+      {body}
+      {data.error ? <Text color="error">{data.error}</Text> : null}
+      {data.loaded ? (
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {view.page > 0 ? (
+            <Button key="tasks-prev" plain onPress={() => void pageTasks($, -1)}>
+              ‹ {WORDS.prev}
+            </Button>
+          ) : null}
+          <Text dimColor>{caption.join(' · ')}</Text>
+          {!last ? (
+            <Button key="tasks-next" plain onPress={() => void pageTasks($, 1)}>
+              {WORDS.next} ›
+            </Button>
+          ) : null}
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
 // --- Модуль -------------------------------------------------------------------
 
 export const register: Register = (on, options) => {
@@ -1458,6 +2255,7 @@ export const register: Register = (on, options) => {
     const conn = await read($, connectionAtom)
     const open = await read($, openAtom)
     const described = await read($, describedAtom)
+    const view = await read($, viewAtom)
     const scheme = schemeOf(await read($, themeAtom))
     const now = await $.clock.now()
     const example = `${conn.project ?? 'КЛЮЧ'}-12`
@@ -1474,7 +2272,10 @@ export const register: Register = (on, options) => {
           <Button
             key={`tab-${t.id}`}
             variant={t.id === tab ? 'primary' : 'secondary'}
-            onPress={() => void update($, tabAtom, () => t.id)}>
+            onPress={() => {
+              void update($, tabAtom, () => t.id)
+              if (t.id === 'tasks') void openTasks($, sessionOf.current).catch(() => undefined)
+            }}>
             {t.id === 'approvals' && waitingMe > 0 ? `${t.label} ${waitingMe}` : t.label}
           </Button>
         ))}
@@ -1533,15 +2334,6 @@ export const register: Register = (on, options) => {
           })}
         </Box>
       )
-
-    // Вкладки «Ждут меня» и «Задачи» в каркасе — оболочка: содержимое
-    // приходит следующими версиями плагина.
-    const later = (what: string) => (
-      <Box flexDirection="column">
-        <Text dimColor>{what}</Text>
-        <Text dimColor>Раздел появится в следующей версии плагина; пока — /clab-plugin {example}.</Text>
-      </Box>
-    )
 
     // «Ждут меня»: ровно ответ серверной выборки. Действие из
     // строки раскрывает карточку задачи с тем же подтверждением.
@@ -1607,7 +2399,29 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    const body = tab === 'chat' ? chat : tab === 'approvals' ? approvals : later('Здесь будет список задач проекта.')
+    const viewRow = view ? rows[view.key] : undefined
+    const body =
+      tab === 'chat'
+        ? view && viewRow?.card
+          ? viewTree($, els, viewRow, view)
+          : chat
+        : tab === 'approvals'
+          ? approvals
+          : tasksBody($, els, {
+              surface: e.surface,
+              view: await read($, tasksViewAtom),
+              data: await read($, tasksDataAtom),
+              rows,
+              keys,
+              open,
+              described,
+              scheme,
+              now,
+              action,
+              outcomes,
+              principal,
+              hotkeys,
+            })
 
     const where = [
       conn.host ?? `инстанс не задан — ${LOGIN_HINT}`,

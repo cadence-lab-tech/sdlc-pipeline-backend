@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -155,6 +156,11 @@ func (e *Engine) awaitsApproval(ctx context.Context, q postgres.Querier, task do
 	}
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
 	if err != nil {
+		// Без прогона на статусе нечего апрувить: задача не ждёт решения, а
+		// список задач не падает из-за одной такой строки (CLAB-327).
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	stageArtifacts, taskArtifacts, err := e.artifacts(ctx, q, task, run)

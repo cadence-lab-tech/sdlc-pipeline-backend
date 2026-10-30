@@ -35,14 +35,89 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 
 type ListTasksFilter struct {
 	StatusKey string
-	// Ключ родительской задачи: дети эпика. Пусто — фильтра нет.
+	// Ключ родительской задачи: дети эпика. Через запятую — дети нескольких
+	// сразу (одним запросом на страницу эпиков). Пусто — фильтра нет.
 	ParentKey string
 	// Тип задачи. Пусто — все типы: доска показывает и эпики, и задачи.
 	Type string
 	// Ссылка на тикет основного трекера: «КЛЮЧ» в любой системе или
 	// «система:КЛЮЧ». Регистр ключа не важен. Пусто — фильтра нет.
 	External string
-	Limit    int
+	// Поиск по части ключа и по словам заголовка, без учёта регистра (CLAB-327).
+	// Пусто — фильтра нет.
+	Query string
+	// Только задачи без родителя. Дети эпика в такой выборке не повторяются
+	// отдельными строками — они под своим эпиком.
+	TopLevel bool
+	// Поля статуса из версии цикла задачи — данные цикла, а не ключи: по ним
+	// клиент делит список на «в работе», «бэклог» и «готово», не зная названий
+	// этапов. nil — фильтра нет.
+	Terminal *bool
+	HasRole  *bool
+	// «В работе» по данным: статус не конечный и либо у него есть роль, либо
+	// у задачи есть дети в работе или готовые (категории active, waiting,
+	// done). Так эпик, чей статус ролей не имеет, но дети уже идут, попадает в
+	// «В работе», а в «Бэклоге» остаются неначатые. false — все остальные,
+	// включая конечные: «Бэклог» — это terminal=false вместе с in_work=false.
+	// nil — фильтра нет.
+	InWork *bool
+	// Категории статуса (backlog, active, waiting, done, cancelled); пусто —
+	// любые.
+	Categories []string
+	// Исполнитель по хэндлу адресного назначения; Unassigned — задачи без
+	// исполнителя. Оба пусто — фильтра нет.
+	Assignee   string
+	Unassigned bool
+	// "updated" — недавно обновлённые первыми; пусто — порядок цикла: позиция
+	// статуса, затем номер.
+	Order  string
+	Limit  int
+	Offset int
+}
+
+// TaskListOrderUpdated — порядок списка «обновлены недавно».
+const TaskListOrderUpdated = "updated"
+
+// listTasksWhere — условие выборки списка, общее для страницы и счёта:
+// `total` обязан считать ровно то, что листается. Параметры $1…$15.
+const listTasksWhere = `
+		WHERE t.project_id = $1
+		  AND ($2 = '' OR ws.key = $2)
+		  AND ($3 = '' OR parent.key = ANY(string_to_array($3, ',')))
+		  AND ($4 = '' OR coalesce(t.properties->>'type', $5) = $4)
+		  AND ($6 = '' OR EXISTS (
+		        SELECT 1
+		        FROM jsonb_each(CASE WHEN jsonb_typeof(t.external_ref) = 'object'
+		                             THEN t.external_ref ELSE '{}'::jsonb END) e
+		        WHERE jsonb_typeof(e.value) = 'object'
+		          AND lower(e.value->>'key') = lower($6)
+		          AND ($7 = '' OR e.key = $7)))
+		  AND ($8 = '' OR strpos(lower(t.key), lower($8)) > 0
+		                OR strpos(lower(t.title), lower($8)) > 0)
+		  AND (NOT $9 OR t.parent_id IS NULL)
+		  AND ($10::boolean IS NULL OR ws.is_terminal = $10)
+		  AND ($11::boolean IS NULL OR $11 = EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ws.id))
+		  AND (cardinality($12::text[]) = 0 OR ws.category = ANY($12))
+		  AND ($13 = '' OR assignee.handle = $13)
+		  AND (NOT $14 OR t.assignee_id IS NULL)
+		  AND ($15::boolean IS NULL OR $15 = (NOT ws.is_terminal AND (
+		        EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ws.id)
+		        OR EXISTS (SELECT 1 FROM tasks kid JOIN workflow_statuses kws ON kws.id = kid.status_id
+		                   WHERE kid.parent_id = t.id AND kws.category IN ('active', 'waiting', 'done')))))`
+
+func listTasksArgs(projectID uuid.UUID, f ListTasksFilter) []any {
+	// Поиск по ссылке идёт без индекса: он всегда внутри проекта, где задач
+	// сотни, а не миллионы. Записи чужой формы (legacy_epic_key из 000011 —
+	// строка, а не объект) отсеивает jsonb_typeof; то же правило в Go —
+	// domain.ExternalRefMatches. Поиск по ключу и заголовку устроен так же:
+	// strpos, а не LIKE — «%» и «_» в запросе человека остаются буквами.
+	extSystem, extKey := domain.ParseExternalQuery(f.External)
+	cats := f.Categories
+	if cats == nil {
+		cats = []string{}
+	}
+	return []any{projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType,
+		extKey, extSystem, f.Query, f.TopLevel, f.Terminal, f.HasRole, cats, f.Assignee, f.Unassigned, f.InWork}
 }
 
 func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
@@ -50,26 +125,15 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	// Поиск по ссылке идёт без индекса: он всегда внутри проекта, где задач
-	// сотни, а не миллионы. Записи чужой формы (legacy_epic_key из 000011 —
-	// строка, а не объект) отсеивает jsonb_typeof; то же правило в Go —
-	// domain.ExternalRefMatches.
-	extSystem, extKey := domain.ParseExternalQuery(f.External)
-	rows, err := q.Query(ctx, taskSelect+`
-		WHERE t.project_id = $1
-		  AND ($2 = '' OR ws.key = $2)
-		  AND ($3 = '' OR parent.key = $3)
-		  AND ($4 = '' OR coalesce(t.properties->>'type', $5) = $4)
-		  AND ($7 = '' OR EXISTS (
-		        SELECT 1
-		        FROM jsonb_each(CASE WHEN jsonb_typeof(t.external_ref) = 'object'
-		                             THEN t.external_ref ELSE '{}'::jsonb END) e
-		        WHERE jsonb_typeof(e.value) = 'object'
-		          AND lower(e.value->>'key') = lower($7)
-		          AND ($8 = '' OR e.key = $8)))
-		ORDER BY ws.position, t.seq
-		LIMIT $6`, projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType, limit,
-		extKey, extSystem)
+	offset := max(f.Offset, 0)
+	order := `ws.position, t.seq`
+	if f.Order == TaskListOrderUpdated {
+		order = `t.updated_at DESC, t.seq DESC`
+	}
+	args := append(listTasksArgs(projectID, f), limit, offset)
+	rows, err := q.Query(ctx, taskSelect+listTasksWhere+`
+		ORDER BY `+order+`
+		LIMIT $16 OFFSET $17`, args...)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -93,6 +157,105 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 		}
 	}
 	return tasks, nil
+}
+
+// CountTasks — сколько задач в выборке списка без учёта limit и offset.
+func (s *Store) CountTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `
+		SELECT count(*)
+		FROM tasks t
+		JOIN workflow_statuses ws ON ws.id = t.status_id
+		LEFT JOIN tasks parent ON parent.id = t.parent_id
+		LEFT JOIN principals assignee ON assignee.id = t.assignee_id`+listTasksWhere,
+		listTasksArgs(projectID, f)...).Scan(&n)
+	return n, translate(err)
+}
+
+// ListTaskItems — страница списка для клиентов, которым нужны категория
+// статуса и счёт детей: задачи, `total` выборки и два дополнительных запроса
+// на всю страницу (не на каждую задачу).
+func (s *Store) ListTaskItems(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.TaskListItem, int, error) {
+	tasks, err := s.ListTasks(ctx, q, projectID, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.CountTasks(ctx, q, projectID, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := make([]uuid.UUID, len(tasks))
+	for i, t := range tasks {
+		ids[i] = t.ID
+	}
+	categories, err := s.statusCategories(ctx, q, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	counts, err := s.childCounts(ctx, q, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	items := make([]domain.TaskListItem, len(tasks))
+	for i, t := range tasks {
+		items[i] = domain.TaskListItem{Task: t, StatusCategory: categories[t.ID], ChildCounts: counts[t.ID]}
+	}
+	return items, total, nil
+}
+
+func (s *Store) statusCategories(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT t.id, ws.category
+		FROM tasks t JOIN workflow_statuses ws ON ws.id = t.status_id
+		WHERE t.id = ANY($1)`, ids)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var category string
+		if err := rows.Scan(&id, &category); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = category
+	}
+	return out, translate(rows.Err())
+}
+
+// childCounts — дети каждой задачи страницы по категории их статуса. У задачи
+// без детей записи нет.
+func (s *Store) childCounts(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]map[string]int, error) {
+	out := map[uuid.UUID]map[string]int{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT t.parent_id, ws.category, count(*)
+		FROM tasks t JOIN workflow_statuses ws ON ws.id = t.status_id
+		WHERE t.parent_id = ANY($1)
+		GROUP BY t.parent_id, ws.category`, ids)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var category string
+		var n int
+		if err := rows.Scan(&id, &category, &n); err != nil {
+			return nil, translate(err)
+		}
+		if out[id] == nil {
+			out[id] = map[string]int{}
+		}
+		out[id][category] = n
+	}
+	return out, translate(rows.Err())
 }
 
 // GetTaskByKey ищет задачу по человекочитаемому ключу SDLC-42. Ключ уникален

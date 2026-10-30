@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -163,6 +164,14 @@ func (s *Server) getWorkflow(c *gin.Context) {
 
 // ── задачи ──────────────────────────────────────────────────────────────────
 
+// listTasks — список задач проекта. Без новых параметров отвечает как раньше
+// (до 200 задач в порядке цикла, потолок 500): так его читают веб-интерфейс
+// и команда clab tasks. Плагину Claude (CLAB-327) добавлено листание — offset
+// вместе с limit, поиск q по ключу и заголовку, order=updated, top_level и
+// исполнитель (assignee, unassigned) и поля статуса из версии цикла
+// (terminal, has_role, in_work, category); в ответе —
+// total выборки, у элементов — status_category и child_counts. Всё
+// добавочное: прежние поля и их значения те же.
 func (s *Server) listTasks(c *gin.Context) {
 	ctx, q := c.Request.Context(), s.store.DB()
 
@@ -172,13 +181,48 @@ func (s *Server) listTasks(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	tasks, err := s.store.ListTasks(ctx, q, project.ID, postgres.ListTasksFilter{
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	f := postgres.ListTasksFilter{
 		StatusKey: c.Query("status"),
 		ParentKey: c.Query("parent"),
 		Type:      c.Query("type"),
 		External:  c.Query("external"),
+		Query:     strings.TrimSpace(c.Query("q")),
+		Assignee:  c.Query("assignee"),
 		Limit:     limit,
-	})
+		Offset:    max(offset, 0),
+	}
+	switch order := c.Query("order"); order {
+	case "":
+	case postgres.TaskListOrderUpdated:
+		f.Order = order
+	default:
+		badRequest(c, s.log, fmt.Errorf("order: неизвестный порядок %q, есть %q", order, postgres.TaskListOrderUpdated))
+		return
+	}
+	if f.TopLevel, err = queryBool(c, "top_level"); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	if f.Unassigned, err = queryBool(c, "unassigned"); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	for name, dst := range map[string]**bool{"terminal": &f.Terminal, "has_role": &f.HasRole, "in_work": &f.InWork} {
+		if raw := c.Query(name); raw != "" {
+			v, err := strconv.ParseBool(raw)
+			if err != nil {
+				badRequest(c, s.log, fmt.Errorf("%s: нужно true или false, пришло %q", name, raw))
+				return
+			}
+			*dst = &v
+		}
+	}
+	if raw := c.Query("category"); raw != "" {
+		f.Categories = strings.Split(raw, ",")
+	}
+
+	items, total, err := s.store.ListTaskItems(ctx, q, project.ID, f)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -186,24 +230,42 @@ func (s *Server) listTasks(c *gin.Context) {
 	// «Ждёт апрува» у каждой строки (CLAB-326): то же правило, что у детей
 	// карточки; гейты считаются только у задач в работе с апрувом на
 	// переходе вперёд.
+	tasks := make([]domain.Task, len(items))
+	for i, it := range items {
+		tasks[i] = it.Task
+	}
 	awaiting, err := s.engine.TasksAwaitingApproval(ctx, q, tasks)
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	items := make([]taskListItem, 0, len(tasks))
-	for _, t := range tasks {
-		items = append(items, taskListItem{Task: t, AwaitingApproval: awaiting[t.ID]})
+	out := make([]taskListItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, taskListItem{TaskListItem: it, AwaitingApproval: awaiting[it.ID]})
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": items})
+	c.JSON(http.StatusOK, gin.H{"tasks": out, "total": total})
 }
 
-// taskListItem — элемент списка задач: задача и признак «ждёт апрува» за её
-// полями. Task встроен, JSON плоский: клиент прошлой версии читает элемент
-// как раньше.
+// taskListItem — элемент списка задач: элемент списка (CLAB-327) и признак
+// «ждёт апрува» (CLAB-326) за её полями. Вложенная структура встроена, JSON
+// плоский: клиент прошлой версии читает элемент как раньше, новое поле — в
+// конце.
 type taskListItem struct {
-	domain.Task
+	domain.TaskListItem
 	AwaitingApproval bool `json:"awaiting_approval"`
+}
+
+// queryBool — необязательный логический параметр запроса; пусто — false.
+func queryBool(c *gin.Context, name string) (bool, error) {
+	raw := c.Query(name)
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s: нужно true или false, пришло %q", name, raw)
+	}
+	return v, nil
 }
 
 type createTaskRequest struct {

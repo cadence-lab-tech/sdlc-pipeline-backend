@@ -101,6 +101,38 @@ export type ApprovalsState = {
   loadedAt: number | null
 }
 
+// Прогон этапа в строке вкладки: попытка, роль и исполнитель из прогона,
+// время начала и конца (ISO), возврат, из которого прогон начат, и
+// вложенные прогоны перепроверки под ним.
+export type RunRow = {
+  id: string
+  attempt: number
+  role: string | null
+  holder: string | null
+  from: string | null
+  to: string | null
+  running: boolean
+  back: { fromName: string; reason: string | null } | null
+  reviews: RunRow[]
+}
+
+// Вкладка этапа: статус версии цикла задачи, на котором были прогоны.
+// attempts — прогоны верхнего уровня.
+export type StageTab = { key: string; name: string; attempts: number; runs: RunRow[] }
+
+// Что открыто в панели вместо списка: артефакты этапа задачи. stage, kind и
+// version — выбор человека (version — id артефакта, null — текущая версия);
+// null — по умолчанию. rev меняется, когда в памяти мода появились данные.
+export type ArtifactView = {
+  key: string
+  stage: string | null
+  kind: string | null
+  version: string | null
+  error: string | null
+  busy: boolean
+  rev: number
+}
+
 export type CardArtifact = { title: string; version: number | null; stage: string | null; at: string | null }
 
 export type CardAttachment = { name: string; size: number | null; at: string | null }
@@ -142,6 +174,10 @@ export type CardData = {
   workflowName: string | null
   workflowVersion: number | null
   nodes: CycleNode[]
+  // Вкладки этапов: статусы с ролью, на которых были прогоны, по порядку цикла.
+  stages: StageTab[]
+  // Прогон (любой, и перепроверка) → статус, на котором он шёл.
+  runStages: Record<string, string>
   // Номер текущего узла среди узлов схемы (с 1); 0 — статуса задачи на схеме нет.
   step: number
   attempt: number
@@ -181,6 +217,52 @@ export type TaskRow = {
 
 export type Tab = 'chat' | 'approvals' | 'tasks'
 
+// Вкладка «Задачи» (CLAB-327). Сегменты делит данные цикла: «в работе» — не
+// конечные статусы с ролью, «можно забрать» — очередь проекта, «бэклог» — не
+// конечные без роли, «готово» — конечные категории done.
+export type Segment = 'work' | 'queue' | 'backlog' | 'done'
+
+// Выбор человека на вкладке: сегмент, тип (из циклов проекта), исполнитель
+// ('' — любой, '-' — без исполнителя), поиск, страница с нуля и эпики, у
+// которых раскрыты все дети. Токена здесь нет.
+export type TasksView = { segment: Segment; type: string; assignee: string; q: string; page: number; more: string[] }
+
+export type ListKid = { key: string; title: string; statusName: string; state: ChildState; awaiting: boolean }
+
+// Строка списка. nested есть у задачи с детьми: полоса по категориям детей и
+// первые дети; all — все дети, включая отменённых; partial — не все дети
+// загружены.
+export type ListRow = {
+  key: string
+  title: string
+  type: string | null
+  statusName: string
+  state: ChildState
+  awaiting: boolean
+  holder: string | null
+  assignee: string | null
+  updatedAt: string | null
+  nested: { progress: ChildProgress; kids: ListKid[]; all: number; partial: boolean } | null
+}
+
+// Что вкладка знает о выборке. mode: paged — сервер листает, legacy — сервер
+// прошлого выпуска (выборка целиком, сегменты по версиям циклов), null — ещё
+// не спрашивали. counts: null — счёт неизвестен. truncated — выборка прошлого
+// сервера обрезана лимитом.
+export type TasksData = {
+  loaded: boolean
+  error: string | null
+  mode: 'paged' | 'legacy' | null
+  types: string[]
+  handles: string[]
+  counts: Record<Segment, number | null>
+  rows: ListRow[]
+  total: number
+  truncated: boolean
+  // Есть ли у сервера признак «ждёт апрува» (его вводит CLAB-326).
+  approvals: boolean
+}
+
 // Что мод знает об инстансе: адрес и проект (clab whoami или настройки
 // плагина), версия сервера из /v1/instance и есть ли у него ручка событий
 // проекта (null — ещё не спрашивали). error — почему данные не обновляются.
@@ -208,6 +290,10 @@ declare module 'claude-code' {
       action: Shaped<Action | null>
       outcomes: Shaped<Record<string, Outcome>>
       approvals: Shaped<ApprovalsState>
+      tasksView: Shaped<TasksView>
+      tasksData: Shaped<TasksData>
+      // Открытый просмотр артефактов этапа; null — панель показывает список.
+      view: Shaped<ArtifactView | null>
     }
   }
 }
