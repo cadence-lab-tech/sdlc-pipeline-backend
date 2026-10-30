@@ -415,9 +415,14 @@ test('вложения: имя, тип, размер, автор и ссылка
   expect(names).toEqual(['⌗ mockups.html', '⌗ flow.svg', '⌗ shot.png'])
   const meta = (await ui.findAll({ type: 'Text', text: /· user-/ })).map(t => t.text)
   expect(meta).toEqual(['HTML · 12 КБ · user-a · скачать, не открывать inline', 'SVG · 3 КБ · user-b · скачать, не открывать inline', 'PNG · 568 КБ · user-a'])
-  // Каждому — своя ссылка «скачать»; плагин её не выполняет.
-  const links = await ui.findAll({ type: 'Link', text: /^скачать/ })
-  expect(links.map(l => l.props.href)).toEqual([ID.html, ID.svg, ID.png].map(id => `${HOST}/v1/artifacts/${id}/content`))
+  // Прямой ссылки на содержимое нет: браузер не приложит токен. Скачать — строка для терминала
+  // с id каждого вложения, а ссылка ведёт в карточку задачи в веб-интерфейсе.
+  expect(await ui.findAll({ type: 'Link', text: /^скачать/ })).toHaveLength(0)
+  const hrefs = (await ui.findAll({ type: 'Link' })).map(l => String(l.props.href))
+  expect(hrefs.filter(h => h.includes('/content'))).toEqual([])
+  expect(hrefs).toContain(`${HOST}/p/NOVA/tasks/NOVA-4`)
+  const cli = (await ui.findAll({ type: 'Text', text: /^скачать с токеном: clab artifact / })).map(t => t.text)
+  for (const id of [ID.html, ID.svg, ID.png]) expect(cli).toContain(`скачать с токеном: clab artifact ${id} -o ./`)
   for (const id of [ID.html, ID.svg, ID.png]) expect(countOf(j.urls, id)).toBe(0)
   // Ни Svg, ни картинки, ни разметки вложений в дереве.
   expect(await ui.find({ type: 'Svg' })).toBeUndefined()

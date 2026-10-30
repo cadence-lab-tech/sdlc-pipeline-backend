@@ -205,8 +205,6 @@ export function shownOf(a: ApiArtifact): Shown {
 
 export const languageOf = (a: ApiArtifact) => (a.format === 'json' || a.format === 'yaml' ? a.format : undefined)
 
-export const contentPath = (id: string) => `/v1/artifacts/${encodeURIComponent(id)}/content`
-
 function utf8(s: string): number {
   let n = 0
   for (const ch of s) {

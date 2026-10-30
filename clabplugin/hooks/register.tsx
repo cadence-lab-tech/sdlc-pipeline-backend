@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ArtifactView, CardData, Connection, RunRow, Tab, TaskRow } from '../types'
-import { chatText, clip, contentPath, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
+import { chatText, clip, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
 import type { ApiArtifact, ApiAttachment, Selection, TaskFiles } from './artifact'
 import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
 import type { TaskDetail, Workflow } from './card'
@@ -826,9 +826,10 @@ function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
       </Box>
     )
 
-  const download = (id: string, path: string) => (
+  // Прямой ссылки на содержимое нет: браузер не приложит токен. Скачивание — строка для
+  // терминала, а ссылка ведёт в карточку задачи в веб-интерфейсе (ниже, у вложений и у артефакта).
+  const download = (id: string) => (
     <Box flexDirection="column">
-      {s?.host ? <Link href={`${s.host}${path}`} label={`${WORDS.download} ${GLYPH.down}`} /> : null}
       <Text dimColor wrap="wrap">
         {WORDS.download} {WORDS.viaCli}: clab artifact {id} -o ./
       </Text>
@@ -857,7 +858,7 @@ function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
             {[typeLabel(art.media_type ?? undefined, art.file_name ?? undefined), sizeOf(typeof art.size_bytes === 'number' ? art.size_bytes : null), art.file_name].filter(Boolean).join(' · ')}
             {isMarkup(art) ? ` · ${WORDS.download}, ${WORDS.noInline}` : ''}
           </Text>
-          {download(art.id, contentPath(art.id))}
+          {download(art.id)}
         </Box>
       )
     } else if (cut) {
@@ -927,9 +928,10 @@ function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
               .filter(Boolean)
               .join(' · ')}
           </Text>
-          {download(a.id, a.content_path ?? contentPath(a.id))}
+          {download(a.id)}
         </Box>
       ))}
+      {c.url ? <Link key="att-open" href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null}
     </Box>
   )
 
