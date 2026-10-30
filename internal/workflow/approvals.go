@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -166,6 +167,12 @@ func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task dom
 	}
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
 	if err != nil {
+		// Без прогона на статусе нечего решать: задача пропускается, а
+		// выборка не падает из-за одной такой строки (как awaitsApproval в
+		// children.go, CLAB-327).
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return nil, nil
+		}
 		return nil, err
 	}
 	stageArtifacts, taskArtifacts, err := e.artifacts(ctx, q, task, run)

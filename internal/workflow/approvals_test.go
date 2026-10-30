@@ -332,6 +332,37 @@ func TestApprovalsTwoCycles(t *testing.T) {
 	}
 }
 
+// Задача с переходом вперёд, но без прогона на текущем статусе, не роняет
+// выборку: её пропускают, соседние ждущие остаются (как awaitsApproval в
+// children.go, CLAB-327).
+func TestApprovalsSkipsTaskWithoutRun(t *testing.T) {
+	w := newApprovalsWorld(t)
+	ready := w.task("nova", "Сдана", "start")
+	w.submit(ready, "analysis.brief")
+	orphan := w.task("nova", "Без прогона", "start")
+	w.submit(orphan, "analysis.brief")
+	task, err := w.store.GetTaskByKey(w.ctx, w.store.DB(), orphan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.store.DB().Exec(w.ctx, `DELETE FROM stage_runs WHERE task_id = $1 AND status_id = $2`, task.ID, task.StatusID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.store.CurrentStageRun(w.ctx, w.store.DB(), task.ID, task.StatusID); apperr.As(err).Code != apperr.CodeNotFound {
+		t.Fatalf("прогон не снят: %v", err)
+	}
+
+	want := []string{ready + " analysis_done/human_approval"}
+	if got := w.list(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("выборка:\n%v\nwant\n%v", got, want)
+	}
+	// Пропущенная задача не попадает и в признак обрезки.
+	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 1)
+	if err != nil || got.Truncated || len(got.Approvals) != 1 {
+		t.Fatalf("предел 1 без обрезки: %+v %v", got, err)
+	}
+}
+
 func contains(list []string, s string) bool {
 	for _, x := range list {
 		if x == s {
