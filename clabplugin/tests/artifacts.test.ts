@@ -364,6 +364,18 @@ test('артефакт в 300 строк: 60 строк в Markdown, «ещё 24
   await ui.unmount()
 })
 
+test('одна длинная строка больше 8 КБ: срез по знакам, ссылка «открыть полностью» есть, строк «ещё» нет', async ($, on) => {
+  const one = 'я'.repeat(10_000)
+  const { ui } = await opened(on, $, { routes: server(p => (p === `/artifacts/${ID.long}/content` ? { status: 200, text: one } : undefined)) })
+  await ui.press({ key: 'kind-dev.code_review' })
+  const md = String((await ui.find({ type: 'Markdown' }))?.text)
+  expect(new TextEncoder().encode(md).length).toBeLessThanOrEqual(MAX_BYTES)
+  expect(md.length).toBeLessThan(one.length)
+  expect(await ui.find({ type: 'Text', text: /ещё/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Link', text: /^Открыть полностью/ })).toBeDefined()
+  await ui.unmount()
+})
+
 // --- AC-9.1, AC-9.2: «В чат» и «Копировать» --------------------------------------------
 
 test('«В чат»: заголовок и полный текст в поле ввода; ни хода, ни строки в разговор, ни запроса', async ($, on) => {

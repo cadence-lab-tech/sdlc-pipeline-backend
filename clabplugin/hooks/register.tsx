@@ -865,11 +865,14 @@ function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
       content = (
         <Box flexDirection="column">
           {shown === 'markdown' ? <Markdown text={cut.text} /> : <Code source={cut.text} language={languageOf(art)} format={shown === 'diff' ? 'diff' : undefined} />}
-          {cut.hidden > 0 ? (
+          {/* Срез и без скрытых строк: одна длинная строка режется по знакам (UC-1, 4a). */}
+          {cut.text !== text ? (
             <Box flexDirection="row" gap={2} flexWrap="wrap">
-              <Text dimColor>
-                {GLYPH.more} {WORDS.more} {cut.hidden} {WORDS.lines}
-              </Text>
+              {cut.hidden > 0 ? (
+                <Text dimColor>
+                  {GLYPH.more} {WORDS.more} {cut.hidden} {WORDS.lines}
+                </Text>
+              ) : null}
               {c.url ? <Link href={c.url} label={`${WORDS.openFull} ${GLYPH.link}`} /> : null}
             </Box>
           ) : null}
