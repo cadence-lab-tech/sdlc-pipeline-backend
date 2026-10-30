@@ -758,9 +758,12 @@ export const register: Register = (on, options) => {
     const input = e as unknown as Record<string, unknown>
     const tool = String(e.tool)
     if (s) void beforeTool($, s, tool, input).catch(() => undefined)
-    const ran = await next(e)
-    if (s) void afterTool($, s, tool, input).catch(() => undefined)
-    return ran
+    try {
+      return await next(e)
+    } finally {
+      // И после упавшего вызова: иначе задача осталась бы «своей» навсегда.
+      if (s) void afterTool($, s, tool, input).catch(() => undefined)
+    }
   }).catch(($, e, next) => next(e))
 
   // Тема поменялась в /config — палитра схемы перерисовывается без
