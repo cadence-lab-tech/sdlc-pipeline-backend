@@ -407,8 +407,8 @@ func TestTransitionPrintsSkips(t *testing.T) {
 		}
 		return out
 	}
-	// Поле from читается из from_stage_run, как до задачи (CLAB-330 отдельно).
-	base := `"task":{"key":"CLAB-1","status_key":"development"},"from_stage_run":{"status_key":"analysis"},"blocked":false,"gates":[]`
+	// Прежний статус — previous_run, как отдаёт REST; разбор имён — TestTransitionFromRunName.
+	base := `"task":{"key":"CLAB-1","status_key":"development"},"previous_run":{"status_key":"analysis"},"blocked":false,"gates":[]`
 	if out := run(`{` + base + `,"skips":["design","docs"]}`); out != "CLAB-1: analysis → development\nпропущено: design, docs\n" {
 		t.Fatalf("с пропуском: %q", out)
 	}
@@ -421,6 +421,37 @@ func TestTransitionPrintsSkips(t *testing.T) {
 	blocked := `{"task":{"key":"CLAB-1","status_key":"analysis"},"blocked":true,"skips":["design"],"gates":[]}`
 	if out := run(blocked); strings.Contains(out, "пропущено") {
 		t.Fatalf("заблокированный: %q", out)
+	}
+}
+
+// CLAB-330: прежний статус берётся из previous_run (имя REST), а from_stage_run
+// читается запасным вариантом; ни одного поля — прочерк без ошибки.
+func TestTransitionFromRunName(t *testing.T) {
+	withJSON(t, false)
+	task := `"task":{"key":"CLAB-1","status_key":"development"},"blocked":false,"gates":[]`
+	cases := []struct {
+		name, reply, want string
+	}{
+		{"только previous_run", `{` + task + `,"previous_run":{"status_key":"analysis"}}`, "CLAB-1: analysis → development\n"},
+		{"только from_stage_run", `{` + task + `,"from_stage_run":{"status_key":"analysis"}}`, "CLAB-1: analysis → development\n"},
+		{"оба: берётся previous_run", `{` + task + `,"previous_run":{"status_key":"analysis"},"from_stage_run":{"status_key":"planning"}}`, "CLAB-1: analysis → development\n"},
+		{"previous_run пуст: берётся from_stage_run", `{` + task + `,"previous_run":{"status_key":""},"from_stage_run":{"status_key":"analysis"}}`, "CLAB-1: analysis → development\n"},
+		{"ни одного: прочерк", `{` + task + `}`, "CLAB-1: — → development\n"},
+		{"с пропуском по previous_run", `{` + task + `,"previous_run":{"status_key":"analysis"},"skips":["design","docs"]}`, "CLAB-1: analysis → development\nпропущено: design, docs\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newInviteClient(t, http.StatusOK, tc.reply)
+			out, _, err := capture(t, func() error {
+				return cmdTransition(context.Background(), c, []string{"CLAB-1", "--to", "analysis_done"})
+			})
+			if err != nil || rec.path != "/v1/tasks/CLAB-1/transitions/analysis_done" {
+				t.Fatalf("%v %s", err, rec.path)
+			}
+			if out != tc.want {
+				t.Fatalf("вывод %q, нужен %q", out, tc.want)
+			}
+		})
 	}
 }
 
