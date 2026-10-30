@@ -4,6 +4,7 @@
 
 import type { TaskFiles } from './artifact'
 import type { Workflow } from './card'
+import type { ApiListTask, ApiQueueItem } from './tasks'
 
 export type Options = { host: string; project: string; clab: string }
 
@@ -80,6 +81,14 @@ export type Session = {
   // Ключ → до какого времени изменения задачи — свои (без тоста).
   quiet: Map<string, number>
   ready: Promise<void>
+  // Вкладка «Задачи»: номер последней загрузки (устаревший ответ не пишется),
+  // что умеет сервер (null — не спрашивали), очередь и выборка прошлого
+  // сервера, время последней полной загрузки.
+  tasksSeq: number
+  listMode: 'paged' | 'legacy' | null
+  queue: ApiQueueItem[]
+  legacy: ApiListTask[] | null
+  tasksAt: number
 }
 
 export function newSession(opts: Options): Session {
@@ -101,6 +110,11 @@ export function newSession(opts: Options): Session {
     polledAt: new Map(),
     quiet: new Map(),
     ready: Promise.resolve(),
+    tasksSeq: 0,
+    listMode: null,
+    queue: [],
+    legacy: null,
+    tasksAt: 0,
   }
 }
 

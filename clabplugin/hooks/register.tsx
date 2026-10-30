@@ -1,12 +1,35 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ArtifactView, CardData, Connection, RunRow, Tab, TaskRow } from '../types'
+import type { ArtifactView, CardData, Connection, ListRow, RunRow, Segment, Tab, TaskRow, TasksData, TasksView } from '../types'
 import { chatText, clip, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
 import type { ApiArtifact, ApiAttachment, Selection, TaskFiles } from './artifact'
 import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
 import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
+import type { ApiList, ApiQueueItem, ApiWorkflowRow } from './tasks'
+import {
+  byUpdated,
+  countPath,
+  DEFAULT_VIEW,
+  EMPTY_DATA,
+  exactKey,
+  groupKids,
+  holders,
+  kidsPath,
+  KIDS_SHOWN,
+  LEGACY_LIMIT,
+  legacyList,
+  listPath,
+  matches,
+  mixedTypes,
+  PAGE,
+  QUEUE_LIMIT,
+  rowOf,
+  SEGMENTS,
+  typesOf,
+  UNASSIGNED,
+} from './tasks'
 import { cycleLine } from './term'
 import { cycleAlt, cycleSvg } from './svg'
 import { schemeOf } from './theme'
@@ -63,6 +86,13 @@ export const connectionAtom = atom(
   { host: null, project: null, serverVersion: null, events: null, error: null } as Connection,
   { shape: 'connection-1' },
 )
+
+export const tasksViewAtom = atom({ plugin: 'clab-plugin', key: 'tasksView' } as const, DEFAULT_VIEW, {
+  shape: 'tasksView-1',
+})
+export const tasksDataAtom = atom({ plugin: 'clab-plugin', key: 'tasksData' } as const, EMPTY_DATA, {
+  shape: 'tasksData-1',
+})
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: 'Этот чат' },
@@ -469,6 +499,7 @@ async function runCommand($: $T, s: Session, args: string): Promise<string> {
     text = now.length ? `Задачи чата: ${now.join(', ')}.` : 'Панель открыта; задач в этом чате пока нет.'
   }
   await update($, tabAtom, () => tab)
+  if (tab === 'tasks') void openTasks($, s).catch(() => undefined)
   await $.ui.open({ id: PANE, title: TITLE })
   return text
 }
@@ -495,10 +526,199 @@ async function onPrompt($: $T, s: Session, text: string) {
   await track($, s, promptKeys(text, s.project, COMMAND))
 }
 
+// --- Вкладка «Задачи» ---------------------------------------------------------
+
+// Сколько держим прочитанную выборку, прежде чем перечитать при возврате на
+// вкладку.
+const TASKS_FRESH_MS = 10_000
+
+// Что перечитать: base — типы проекта и очередь, counts — счётчики сегментов.
+// Страница читается всегда.
+type TasksLoad = { base?: boolean; counts?: boolean }
+
+const rowsOfQueue = (s: Session, v: TasksView, holder: ReadonlyMap<string, string>): { rows: ListRow[]; total: number } => {
+  const items = byUpdated(
+    s.queue
+      .filter(it => it.claimable === true && it.task)
+      .map(it => it.task)
+      .filter(t => (!v.type || (typeof t.properties?.type === 'string' ? t.properties.type : '') === v.type))
+      .filter(t => (v.assignee === UNASSIGNED ? !t.assignee_handle : v.assignee ? t.assignee_handle === v.assignee : true))
+      .filter(t => matches(t, v.q)),
+  )
+  const page = items.slice(v.page * PAGE, (v.page + 1) * PAGE)
+  return { rows: page.map(t => rowOf(t, { category: t.status_category, holder: holder.get(t.key) ?? null })), total: items.length }
+}
+
+// Читает выборку по выбору человека и кладёт её в состояние. Устаревший ответ
+// (человек успел нажать другое) не пишется; ошибка не стирает прежний список.
+async function loadTasks($: $T, s: Session, what: TasksLoad = {}) {
+  const seq = ++s.tasksSeq
+  await s.ready
+  const fresh = () => seq === s.tasksSeq
+  if (!s.host || !s.project) {
+    await update($, tasksDataAtom, d => ({ ...d, loaded: true, error: s.host ? WORDS.noProject : `инстанс не задан — ${LOGIN_HINT}` }))
+    return
+  }
+  const v = await read($, tasksViewAtom)
+  const prev = await read($, tasksDataAtom)
+  const base = what.base === true || !prev.loaded
+  const project = `/projects/${encodeURIComponent(s.project)}`
+  try {
+    let types = prev.types
+    if (base) {
+      const [wfs, queue] = await Promise.all([
+        api<{ workflows?: ApiWorkflowRow[] }>($, s, `${project}/workflows`),
+        api<{ queue?: ApiQueueItem[] }>($, s, `${project}/queue?limit=${QUEUE_LIMIT}`),
+      ])
+      types = typesOf(wfs.workflows ?? [])
+      s.queue = queue.queue ?? []
+    }
+    const holder = holders(s.queue)
+    const counts = { ...prev.counts }
+    let rows: ListRow[] = []
+    let total = 0
+    let truncated = false
+    let approvals = false
+    let mode = s.listMode
+
+    const readPaged = async (): Promise<boolean> => {
+      // Страница, счётчики остальных сегментов и дети эпиков страницы.
+      const wanted = what.counts === true || base ? SEGMENTS.filter(x => x !== 'queue' && (v.q !== '' || x !== v.segment)) : []
+      const showsQueue = v.q === '' && v.segment === 'queue'
+      const [page, ...other] = await Promise.all([
+        showsQueue ? Promise.resolve(null) : api<ApiList>($, s, `${project}${listPath(v, PAGE, v.page * PAGE)}`),
+        ...(v.q === '' ? wanted.map(x => api<ApiList>($, s, `${project}${countPath(v, x)}`)) : []),
+      ])
+      if (page !== null && typeof page.total !== 'number') return false
+      if (v.q === '') wanted.forEach((x, i) => (counts[x] = other[i]?.total ?? null))
+      if (page === null) {
+        const q = rowsOfQueue(s, v, holder)
+        rows = q.rows
+        total = q.total
+      } else {
+        const tasks = page.tasks ?? []
+        if (v.q === '') counts[v.segment] = page.total ?? null
+        const parents = tasks.filter(t => t.child_counts && Object.keys(t.child_counts).length > 0).map(t => t.key)
+        const kids = parents.length ? groupKids((await api<ApiList>($, s, `${project}${kidsPath(parents)}`)).tasks ?? []) : new Map()
+        rows = tasks.map(t => rowOf(t, { category: t.status_category, holder: holder.get(t.key) ?? null, kids: kids.get(t.key) }))
+        total = page.total ?? tasks.length
+        approvals = tasks.some(t => typeof t.awaiting_approval === 'boolean')
+      }
+      counts.queue = rowsOfQueue(s, { ...v, q: '', page: 0 }, holder).total
+      return true
+    }
+
+    const readLegacy = async () => {
+      // Сервер без листания: выборка целиком и версии циклов по workflow_id.
+      if (s.legacy === null || base) {
+        s.legacy = (await api<ApiList>($, s, `${project}/tasks?limit=${LEGACY_LIMIT}`)).tasks ?? []
+      }
+      const all = s.legacy
+      const found = new Map<string, Workflow>()
+      await Promise.all(
+        [...new Set(all.map(t => String(t.workflow_id)))].map(async id => {
+          try {
+            found.set(id, await workflow($, s, id))
+          } catch {}
+        }),
+      )
+      if (v.segment === 'queue' && v.q === '') {
+        const q = rowsOfQueue(s, v, holder)
+        rows = q.rows
+        total = q.total
+      }
+      const res = legacyList(all, found, v, holder)
+      if (!(v.segment === 'queue' && v.q === '')) {
+        rows = res.rows
+        total = res.total
+      }
+      Object.assign(counts, res.counts, { queue: rowsOfQueue(s, { ...v, q: '', page: 0 }, holder).total })
+      truncated = all.length >= LEGACY_LIMIT
+    }
+
+    if (mode !== 'legacy') {
+      const ok = await readPaged()
+      if (ok) mode = s.listMode = 'paged'
+      else mode = s.listMode = 'legacy'
+    }
+    if (mode === 'legacy') await readLegacy()
+
+    if (!fresh()) return
+    s.tasksAt = await $.clock.now()
+    const seen = new Set<string>()
+    for (const r of rows) if (r.assignee) seen.add(r.assignee)
+    for (const it of s.queue) if (it.task?.assignee_handle) seen.add(it.task.assignee_handle)
+    if (v.assignee && v.assignee !== UNASSIGNED) seen.add(v.assignee)
+    await update($, tasksDataAtom, () => ({
+      loaded: true,
+      error: null,
+      mode,
+      types,
+      handles: [...seen].sort(),
+      counts,
+      rows,
+      total,
+      truncated,
+      approvals,
+    }))
+    await update($, connectionAtom, c => (c.error === LOGIN_HINT ? { ...c, error: null } : c))
+  } catch (err) {
+    if (!fresh()) return
+    const message = err instanceof Error ? err.message : String(err)
+    await update($, tasksDataAtom, d => ({ ...d, loaded: true, error: message }))
+    if (err instanceof ApiError && err.status === 401) await update($, connectionAtom, c => ({ ...c, error: LOGIN_HINT }))
+  }
+}
+
+// Открыта вкладка (кнопка или команда): выборка перечитывается, если она
+// старше нескольких секунд.
+async function openTasks($: $T, s: Session | null) {
+  if (!s) return
+  const data = await read($, tasksDataAtom)
+  if (data.loaded && (await $.clock.now()) - s.tasksAt < TASKS_FRESH_MS) return
+  await loadTasks($, s, { base: true, counts: true })
+}
+
+// Выбор человека: view меняется, страница читается заново; счётчики — когда
+// они зависят от выбора (тип, исполнитель).
+async function chooseTasks($: $T, patch: Partial<TasksView>, what: TasksLoad = {}) {
+  await update($, tasksViewAtom, v => ({ ...v, page: 0, more: [], ...patch }))
+  const s = sessionOf.current
+  if (s) await loadTasks($, s, what)
+}
+
+async function pageTasks($: $T, delta: number) {
+  await update($, tasksViewAtom, v => ({ ...v, page: Math.max(0, v.page + delta), more: [] }))
+  const s = sessionOf.current
+  if (s) await loadTasks($, s)
+}
+
+// Клик по строке: карточка раскрывается под строкой, ключ попадает во вкладку
+// «Этот чат». Повторный клик по открытой строке её сворачивает.
+async function openFromList($: $T, key: string) {
+  const s = sessionOf.current
+  if (!s) return
+  const keys = await read($, keysAtom)
+  const open = await read($, openAtom)
+  if (keys.includes(key) && open.includes(key)) {
+    await update($, openAtom, toggle(key))
+    return
+  }
+  await track($, s, [key])
+  await expand($, [key])
+}
+
+// Поиск: Enter. Ключ задачи целиком открывает её карточку сразу (UC-9.3).
+async function searchTasks($: $T, text: string) {
+  const q = text.trim()
+  await chooseTasks($, { q })
+  if (q && exactKey(q)) await openFromList($, q.toUpperCase())
+}
+
 // --- Карточка ------------------------------------------------------------------
 
 // Элементы поверхности. Svg есть везде, кроме терминала: там схема — строка.
-type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Select: any; Svg?: any }
+type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Select: any; Svg?: any; Input?: any }
 
 // Раскрыть карточку задачи из полосы над вводом или из строки ребёнка:
 // задача попадает в чат, строка раскрывается, панель открывается.
@@ -1026,6 +1246,243 @@ function childrenTree($: $T, els: Els, ch: NonNullable<CardData['children']>) {
   )
 }
 
+// --- Тело вкладки «Задачи» -------------------------------------------------------
+
+const SEGMENT_LABEL: Record<Segment, string> = {
+  work: WORDS.segWork,
+  queue: WORDS.segQueue,
+  backlog: WORDS.segBacklog,
+  done: WORDS.segDone,
+}
+
+type TasksCtx = {
+  surface: string
+  view: TasksView
+  data: TasksData
+  rows: Record<string, TaskRow>
+  keys: string[]
+  open: string[]
+  described: string[]
+  scheme: ReturnType<typeof schemeOf>
+  now: number
+}
+
+function listBar(els: Els, p: ListRow['nested'] & object) {
+  const { Box, Text } = els
+  const total = p.progress.total
+  if (total === 0) return null
+  const cells = (n: number) => Math.round((n / total) * BAR)
+  const done = cells(p.progress.done)
+  const waiting = cells(p.progress.waiting)
+  const active = cells(p.progress.active)
+  const rest = Math.max(0, BAR - done - waiting - active)
+  return (
+    <Box flexDirection="column" paddingLeft={2}>
+      <Text>
+        <Text color="success">{GLYPH.bar.repeat(done)}</Text>
+        <Text color="warning">{GLYPH.bar.repeat(waiting)}</Text>
+        <Text color="claude">{GLYPH.bar.repeat(active)}</Text>
+        <Text dimColor>{GLYPH.barEmpty.repeat(rest)}</Text>
+      </Text>
+    </Box>
+  )
+}
+
+function listRowTree($: $T, els: Els, r: ListRow, c: TasksCtx, mixed: boolean) {
+  const { Box, Text, Button } = els
+  const isOpen = c.open.includes(r.key) && !!c.rows[r.key]?.card
+  const dim = r.state === 'backlog' || r.state === 'cancelled'
+  const n = r.nested
+  const expanded = c.view.more.includes(r.key)
+  const kids = n ? (expanded ? n.kids : n.kids.slice(0, KIDS_SHOWN)) : []
+  const hidden = n ? n.all - KIDS_SHOWN : 0
+  const meta = [
+    r.awaiting ? `${GLYPH.approval} ${WORDS.awaiting} · ${r.statusName}` : r.statusName,
+    ago(r.updatedAt, c.now),
+    r.holder ? `${WORDS.holder} ${r.holder}` : null,
+  ].filter(Boolean)
+  const stored = c.rows[r.key]
+  return (
+    <Box flexDirection="column" key={`lrow-${r.key}`}>
+      <Button key={`task-${r.key}`} plain onPress={() => void openFromList($, r.key)}>
+        <Text color={CHILD_DOT[r.state]} dimColor={dim}>
+          {n ? '◈' : dim ? GLYPH.open : GLYPH.current}{' '}
+        </Text>
+        <Text dimColor>{r.key} </Text>
+        <Text bold={isOpen || !!n}>{r.title}</Text>
+        {mixed && r.type ? <Text dimColor> · {r.type}</Text> : ''}
+        {n ? (
+          <Text dimColor>
+            {' · '}
+            {n.progress.done} {WORDS.of} {n.progress.total}
+          </Text>
+        ) : (
+          ''
+        )}
+      </Button>
+      <Box paddingLeft={2}>
+        <Text color={r.awaiting ? 'warning' : undefined} dimColor={!r.awaiting} wrap="truncate-end">
+          {meta.join(' · ')}
+        </Text>
+      </Box>
+      {n ? listBar(els, n) : null}
+      {n
+        ? kids.map(k => (
+            <Box key={`lkid-${r.key}-${k.key}`} paddingLeft={2}>
+              <Button key={`kid-${r.key}-${k.key}`} plain onPress={() => void openFromList($, k.key)}>
+                <Text color={CHILD_DOT[k.state]} dimColor={k.state === 'backlog' || k.state === 'cancelled'}>
+                  {k.state === 'backlog' || k.state === 'cancelled' ? GLYPH.open : GLYPH.current}{' '}
+                </Text>
+                <Text dimColor>{k.key} </Text>
+                <Text strikethrough={k.state === 'cancelled'}>{k.title}</Text>
+                <Text color={k.awaiting ? 'warning' : undefined} dimColor={!k.awaiting}>
+                  {' · '}
+                  {k.awaiting ? `${GLYPH.approval} ` : ''}
+                  {k.statusName}
+                </Text>
+              </Button>
+            </Box>
+          ))
+        : null}
+      {n && hidden > 0 ? (
+        <Box paddingLeft={2}>
+          <Button
+            key={`more-${r.key}`}
+            plain
+            dimColor
+            onPress={() => void update($, tasksViewAtom, v => ({ ...v, more: toggle(r.key)(v.more) }))}>
+            {expanded ? WORDS.fewer : `… ${WORDS.moreKids} ${hidden}`}
+          </Button>
+        </Box>
+      ) : null}
+      {n?.partial && expanded ? (
+        <Box paddingLeft={2}>
+          <Text dimColor>{WORDS.partialKids}</Text>
+        </Box>
+      ) : null}
+      {stored?.error ? (
+        <Box paddingLeft={2}>
+          <Text color="error">{stored.error}</Text>
+        </Box>
+      ) : null}
+      {isOpen && stored?.card
+        ? cardTree($, els, c.surface, stored.card, { scheme: c.scheme, now: c.now, described: c.described.includes(r.key) })
+        : null}
+    </Box>
+  )
+}
+
+function tasksBody($: $T, els: Els, c: TasksCtx) {
+  const { Box, Text, Button, Input, Select } = els
+  const { view, data } = c
+  const searching = view.q.trim() !== ''
+  const filtered = view.type !== '' || view.assignee !== '' || searching
+  const mixed = mixedTypes(data.rows)
+
+  const typeOptions = [{ value: '', label: WORDS.allTypes }, ...data.types.map(t => ({ value: t, label: t }))]
+  const assigneeOptions = [
+    { value: '', label: WORDS.allAssignees },
+    { value: UNASSIGNED, label: WORDS.unassigned },
+    ...data.handles.map(h => ({ value: h, label: h })),
+  ]
+  const cycle = (opts: { value: string }[], now: string) => opts[(opts.findIndex(o => o.value === now) + 1) % opts.length]?.value ?? ''
+
+  const search = Input ? (
+    <Input key="tasks-search" placeholder={WORDS.searchHint} value={view.q} submitLabel={WORDS.searchSubmit} onSubmit={(t: string) => void searchTasks($, t)} />
+  ) : null
+
+  const pick = (key: string, opts: { value: string; label: string }[], value: string, set: (v: string) => void) =>
+    Select ? (
+      <Select key={key} options={opts} value={value} onSelect={(v: string) => set(v)} />
+    ) : (
+      <Button key={key} plain onPress={() => set(cycle(opts, value))}>
+        {opts.find(o => o.value === value)?.label ?? value}
+      </Button>
+    )
+
+  const filters = (
+    <Box flexDirection="column" gap={1}>
+      {search}
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {data.types.length > 0
+          ? pick('tasks-type', typeOptions, view.type, v => void chooseTasks($, { type: v }, { counts: true }))
+          : null}
+        {pick('tasks-assignee', assigneeOptions, view.assignee, v => void chooseTasks($, { assignee: v }, { counts: true }))}
+      </Box>
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {SEGMENTS.map(id => {
+          const active = !searching && view.segment === id
+          const n = data.counts[id]
+          return (
+            <Button
+              key={`seg-${id}`}
+              variant={active ? 'primary' : 'secondary'}
+              onPress={() => void chooseTasks($, { segment: id, q: '' })}>
+              {SEGMENT_LABEL[id]}
+              {n !== null ? ` ${n}` : ''}
+            </Button>
+          )
+        })}
+      </Box>
+    </Box>
+  )
+
+  const from = data.total === 0 ? 0 : view.page * PAGE + 1
+  const to = Math.min(data.total, (view.page + 1) * PAGE)
+  const last = to >= data.total
+  const caption = [
+    data.total > 0 ? `${WORDS.shown} ${from}–${to} ${WORDS.of} ${data.total}` : null,
+    searching ? (data.mode === 'legacy' ? WORDS.loadedOnly : WORDS.projectSearch) : null,
+    data.truncated ? `${WORDS.firstN} 500` : null,
+    WORDS.sortedBy,
+  ].filter(Boolean)
+
+  let body
+  if (!data.loaded) {
+    body = <Text dimColor>{WORDS.loading}</Text>
+  } else if (data.rows.length === 0) {
+    body = (
+      <Box flexDirection="column">
+        <Text dimColor>{view.segment === 'queue' && !filtered && !data.error ? WORDS.queueEmpty : WORDS.nothingFound}</Text>
+        {filtered ? (
+          <Button key="tasks-reset" plain onPress={() => void chooseTasks($, { type: '', assignee: '', q: '' }, { counts: true })}>
+            {WORDS.resetFilters}
+          </Button>
+        ) : null}
+      </Box>
+    )
+  } else {
+    body = (
+      <Box flexDirection="column" gap={1}>
+        {data.rows.map(r => listRowTree($, els, r, c, mixed))}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {filters}
+      {body}
+      {data.error ? <Text color="error">{data.error}</Text> : null}
+      {data.loaded ? (
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {view.page > 0 ? (
+            <Button key="tasks-prev" plain onPress={() => void pageTasks($, -1)}>
+              ‹ {WORDS.prev}
+            </Button>
+          ) : null}
+          <Text dimColor>{caption.join(' · ')}</Text>
+          {!last ? (
+            <Button key="tasks-next" plain onPress={() => void pageTasks($, 1)}>
+              {WORDS.next} ›
+            </Button>
+          ) : null}
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
 // --- Модуль -------------------------------------------------------------------
 
 export const register: Register = (on, options) => {
@@ -1144,7 +1601,10 @@ export const register: Register = (on, options) => {
           <Button
             key={`tab-${t.id}`}
             variant={t.id === tab ? 'primary' : 'secondary'}
-            onPress={() => void update($, tabAtom, () => t.id)}>
+            onPress={() => {
+              void update($, tabAtom, () => t.id)
+              if (t.id === 'tasks') void openTasks($, sessionOf.current).catch(() => undefined)
+            }}>
             {t.label}
           </Button>
         ))}
@@ -1216,7 +1676,17 @@ export const register: Register = (on, options) => {
           : chat
         : tab === 'approvals'
           ? later('Здесь будут задачи, которые ждут вашего решения.')
-          : later('Здесь будет список задач проекта.')
+          : tasksBody($, els, {
+              surface: e.surface,
+              view: await read($, tasksViewAtom),
+              data: await read($, tasksDataAtom),
+              rows,
+              keys,
+              open,
+              described,
+              scheme,
+              now,
+            })
 
     const where = [
       conn.host ?? `инстанс не задан — ${LOGIN_HINT}`,
