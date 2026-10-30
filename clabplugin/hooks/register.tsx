@@ -1,9 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ArtifactView, CardData, Connection, ListRow, RunRow, Segment, Tab, TaskRow, TasksData, TasksView } from '../types'
+import type { Action, ApprovalsState, ArtifactView, CardData, Connection, ListRow, Outcome, Plate, RunRow, Segment, Tab, TaskRow, TasksData, TasksView } from '../types'
 import { chatText, clip, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
 import type { ApiArtifact, ApiAttachment, Selection, TaskFiles } from './artifact'
+import {
+  approvalRowsOf,
+  approveSteps,
+  canDecideAt,
+  checklistStep,
+  driftOf,
+  holdsOf,
+  requiredChecked,
+  returnSteps,
+  returnsOf,
+} from './approve'
+import type { ApiApproval, Drift, Step } from './approve'
 import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
 import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
@@ -32,8 +44,9 @@ import {
 } from './tasks'
 import { cycleLine } from './term'
 import { cycleAlt, cycleSvg } from './svg'
-import { schemeOf } from './theme'
-import { GLYPH, gateWord, WORDS } from './vocab'
+import { schemeOf, tintOf } from './theme'
+import type { Scheme, Tone } from './theme'
+import { CHECKLIST, GLYPH, gateWord, HUMAN_APPROVAL, WORDS } from './vocab'
 import {
   ApiError,
   AUTH_RETRY_MS,
@@ -49,6 +62,8 @@ import {
   optionsOf,
   POLL_MS,
   QUIET_MS,
+  reasonOf,
+  STAGE_CHANGED,
   whoamiOf,
 } from './model'
 import type { EventsPage, Options, Session } from './model'
@@ -57,10 +72,12 @@ import type { EventsPage, Options, Session } from './model'
 // задач в чате, строка задачи с подписью статуса из её версии цикла, вкладки
 // панели, команда /clab-plugin, строка статуса и слой данных под ними.
 //
-// Мод ничего не меняет ни в задачах, ни в разговоре: хуки prompt.submit и
-// tool.call только смотрят, тулов модели нет, в сессию он не пишет. Смысла
-// этапов он не знает — подписи берёт из цикла задачи, ключи ловит по
-// префиксу проекта из данных.
+// В разговор мод не пишет: хуки prompt.submit и tool.call только смотрят,
+// тулов модели нет, в сессию он ничего не добавляет. Задачу он меняет только
+// по нажатию человека во втором шаге подтверждения: решение по
+// гейту и переход личным токеном, REST-ручками сервера. Смысла этапов он не
+// знает — подписи берёт из цикла задачи, ключи ловит по префиксу проекта из
+// данных.
 //
 // Всё, что зовёт $, — в этом файле: движок прослеживает $ только внутри
 // одного модуля. Чистые части — model.ts и keys.ts.
@@ -74,7 +91,7 @@ const COMMAND = 'clab-plugin'
 // Значения сессии, которые читает панель. Учётных данных среди них нет.
 export const keysAtom = atom({ plugin: 'clab-plugin', key: 'keys' } as const, [] as string[], { shape: 'keys-1' })
 export const rowsAtom = atom({ plugin: 'clab-plugin', key: 'rows' } as const, {} as Record<string, TaskRow>, {
-  shape: 'rows-3',
+  shape: 'rows-5',
 })
 export const openAtom = atom({ plugin: 'clab-plugin', key: 'open' } as const, [] as string[], { shape: 'open-1' })
 export const describedAtom = atom({ plugin: 'clab-plugin', key: 'described' } as const, [] as string[], { shape: 'described-1' })
@@ -87,6 +104,17 @@ export const connectionAtom = atom(
   { shape: 'connection-1' },
 )
 
+// Решения по гейтам: одно открытое действие на сессию, итоги
+// последних действий по задачам и выборка «Ждут меня».
+export const actionAtom = atom({ plugin: 'clab-plugin', key: 'action' } as const, null as Action | null, { shape: 'action-1' })
+export const outcomesAtom = atom({ plugin: 'clab-plugin', key: 'outcomes' } as const, {} as Record<string, Outcome>, {
+  shape: 'outcomes-1',
+})
+export const approvalsAtom = atom(
+  { plugin: 'clab-plugin', key: 'approvals' } as const,
+  { supported: null, canDecide: false, rows: [], truncated: false, error: null, loadedAt: null } as ApprovalsState,
+  { shape: 'approvals-2' },
+)
 export const tasksViewAtom = atom({ plugin: 'clab-plugin', key: 'tasksView' } as const, DEFAULT_VIEW, {
   shape: 'tasksView-1',
 })
@@ -120,7 +148,7 @@ async function runClab($: $T, s: Session, args: string[]) {
 // Хост и проект: clab whoami --json в каталоге сессии, иначе настройки
 // плагина. Один хост на сессию.
 async function resolveSession($: $T, s: Session) {
-  let found: { host: string | null; project: string | null } = { host: null, project: null }
+  let found: { host: string | null; project: string | null; principal?: string | null } = { host: null, project: null }
   try {
     const res = await runClab($, s, ['whoami', '--json'])
     if (res.exitCode === 0) found = whoamiOf(res.stdout)
@@ -129,6 +157,7 @@ async function resolveSession($: $T, s: Session) {
   }
   s.host = found.host ?? (s.opts.host || null)
   s.project = found.project ?? (s.opts.project || null)
+  s.principal = 'principal' in found ? (found.principal as string | null) : null
 }
 
 async function token($: $T, s: Session): Promise<string> {
@@ -165,6 +194,43 @@ async function api<T>($: $T, s: Session, path: string): Promise<T> {
   return JSON.parse(await request($, s, path)) as T
 }
 
+// Запись личным токеном. 401 — запрос не дошёл до ручки: токен
+// перечитывается и запрос повторяется один раз, второй 401 — просьба войти.
+// Любой другой отказ и сетевая ошибка не повторяются: запись не идемпотентна,
+// и после неё карточка перечитывается и показывает, что вышло на самом деле.
+async function post<T>($: $T, s: Session, path: string, body: unknown): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const auth = await token($, s)
+    const res = await $.http.fetch(`${s.host}/v1${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (res.status === 401) {
+      s.token = null
+      continue
+    }
+    if (!res.ok) throw new ApiError(res.status, messageOf(res.status, res.text), reasonOf(res.text))
+    return (res.text ? JSON.parse(res.text) : {}) as T
+  }
+  throw new ApiError(401, LOGIN_HINT)
+}
+
+// Уровень вызывающего в проекте (access.level в GET /projects/:key) — раз
+// на проект за сессию. Не прочитался — null: кнопки есть, а отказ сервера
+// (403) карточка покажет.
+function levelOf($: $T, s: Session, project: string): Promise<string | null> {
+  let p = s.levels.get(project)
+  if (!p) {
+    p = api<{ access?: { level?: unknown } | null }>($, s, `/projects/${encodeURIComponent(project)}`).then(
+      r => (typeof r.access?.level === 'string' ? r.access.level : null),
+      () => null,
+    )
+    s.levels.set(project, p)
+  }
+  return p
+}
+
 // Версия цикла иммутабельна (решение 0016): за сессию каждая читается один
 // раз, и две задачи одной версии делят один запрос.
 function workflow($: $T, s: Session, id: string): Promise<Workflow> {
@@ -199,11 +265,16 @@ async function loadRow($: $T, s: Session, key: string): Promise<TaskRow> {
   const detail = await api<TaskDetail>($, s, `/tasks/${encodeURIComponent(key)}`)
   const wf = await workflow($, s, detail.task.workflow_id)
   const card = cardOf(detail, wf, s.host)
+  // Уровень нужен, только когда есть что решать: у задачи без плашек запроса
+  // проекта нет.
+  const project = detail.task.project_key || (detail.task.key || key).replace(/-\d+$/, '')
+  const canDecide = card.plates.length > 0 ? canDecideAt(await levelOf($, s, project)) : false
   return {
     key: detail.task.key || key,
     title: detail.task.title,
     statusName: card.statusName,
     awaiting: card.awaiting,
+    canDecide,
     error: null,
     fetchedAt: await $.clock.now(),
     card,
@@ -251,7 +322,7 @@ async function refresh($: $T, s: Session, keys: string[], reason: Reason = 'own'
     for (const { key, row, error } of loaded) {
       if (!tracked.includes(key)) continue
       const prev = next[key]
-      next[key] = row ?? (prev ? { ...prev, error } : { key, title: '', statusName: '', awaiting: false, error, fetchedAt: now, card: null })
+      next[key] = row ?? (prev ? { ...prev, error } : { key, title: '', statusName: '', awaiting: false, canDecide: false, error, fetchedAt: now, card: null })
     }
     return next
   })
@@ -267,14 +338,53 @@ async function refresh($: $T, s: Session, keys: string[], reason: Reason = 'own'
   if (authFailed) throw new ApiError(401, LOGIN_HINT)
 }
 
+// Строка статуса: задачи чата и сколько ждут решения. Есть выборка «Ждут
+// меня» — число из неё (то же, что в заголовке вкладки), иначе — задачи чата,
+// ждущие апрува.
 async function showStatus($: $T) {
   const keys = await read($, keysAtom)
-  if (keys.length === 0) return $.ui.status(undefined)
-  const conn = await read($, connectionAtom)
+  const appr = await read($, approvalsAtom)
   const rows = await read($, rowsAtom)
-  const waiting = keys.filter(k => rows[k]?.awaiting).length
-  const approvals = waiting > 0 ? ` · ${GLYPH.approval} ${waiting} ${WORDS.approval}` : ''
-  $.ui.status(`Clab: ${keys.length} ${WORDS.inChat}${approvals}${conn.error ? ` · ${conn.error}` : ''}`)
+  const waiting = appr.supported && appr.canDecide ? appr.rows.length : keys.filter(k => rows[k]?.awaiting).length
+  if (keys.length === 0 && waiting === 0) return $.ui.status(undefined)
+  const conn = await read($, connectionAtom)
+  const bits = [
+    keys.length > 0 ? `${keys.length} ${WORDS.inChat}` : null,
+    waiting > 0 ? `${GLYPH.approval} ${waiting} ${WORDS.approval}` : null,
+    conn.error,
+  ].filter(Boolean)
+  $.ui.status(`Clab: ${bits.join(' · ')}`)
+}
+
+// «Ждут меня» с сервера. 404 — сервер старше выборки: вкладка скрыта, больше
+// не спрашиваем. Ошибка не стирает прошлый список.
+async function loadApprovals($: $T, s: Session) {
+  if (!s.host || !s.project) return
+  if ((await read($, approvalsAtom)).supported === false) return
+  try {
+    const r = await api<{ approvals?: ApiApproval[]; can_decide?: unknown; truncated?: unknown }>(
+      $,
+      s,
+      `/projects/${encodeURIComponent(s.project)}/approvals`,
+    )
+    const loadedAt = await $.clock.now()
+    await update($, approvalsAtom, () => ({
+      supported: true,
+      canDecide: r.can_decide === true,
+      rows: approvalRowsOf(r.approvals),
+      truncated: r.truncated === true,
+      error: null,
+      loadedAt,
+    }))
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      await update($, approvalsAtom, a => ({ ...a, supported: false, rows: [], error: null }))
+    } else {
+      const message = err instanceof Error ? err.message : String(err)
+      await update($, approvalsAtom, a => ({ ...a, error: message }))
+    }
+  }
+  await showStatus($)
 }
 
 async function track($: $T, s: Session, found: string[]) {
@@ -368,7 +478,14 @@ async function tick($: $T, s: Session) {
 // цикл спит, пока его не разбудят.
 async function cycle($: $T, s: Session): Promise<number | null> {
   const keys = await read($, keysAtom)
-  if (keys.length === 0 || !s.host) return null
+  if (!s.host) return null
+  if (keys.length === 0) {
+    // Задач в чате нет — «Ждут меня» всё равно обновляются раз в 30 с, пока
+    // у сервера есть выборка.
+    if (!s.project || (await read($, approvalsAtom)).supported === false) return null
+    await loadApprovals($, s)
+    return (await read($, approvalsAtom)).supported === false ? null : POLL_MS
+  }
   const prefix = s.project ? `${s.project}-` : null
   const own = prefix ? keys.filter(k => k.startsWith(prefix)) : []
   const started = await $.clock.now()
@@ -381,6 +498,7 @@ async function cycle($: $T, s: Session): Promise<number | null> {
       return at === undefined || started - at >= POLL_MS
     })
     await refresh($, s, due, 'external')
+    await loadApprovals($, s)
     return POLL_MS
   }
 
@@ -396,6 +514,7 @@ async function cycle($: $T, s: Session): Promise<number | null> {
       await update($, connectionAtom, c => ({ ...c, events: false }))
     }
     await refresh($, s, keys, 'external')
+    await loadApprovals($, s)
     return s.events === false ? POLL_MS : MIN_GAP_MS
   }
 
@@ -416,6 +535,9 @@ async function cycle($: $T, s: Session): Promise<number | null> {
     return at === undefined || end - at >= POLL_MS
   })
   await refresh($, s, [...now.filter(k => hit.has(k)), ...parents, ...stale], 'external')
+  // Любое событие проекта может закрыть или открыть чей-то гейт: выборка
+  // перечитывается целиком, она одна на проект.
+  if ((page.events ?? []).length > 0) await loadApprovals($, s)
   return Math.max(0, MIN_GAP_MS - (end - started))
 }
 
@@ -501,6 +623,7 @@ async function runCommand($: $T, s: Session, args: string): Promise<string> {
   await update($, tabAtom, () => tab)
   if (tab === 'tasks') void openTasks($, s).catch(() => undefined)
   await $.ui.open({ id: PANE, title: TITLE })
+  if (tab === 'approvals') await loadApprovals($, s)
   return text
 }
 
@@ -524,6 +647,159 @@ async function beforeTool($: $T, s: Session, tool: string, input: Record<string,
 async function onPrompt($: $T, s: Session, text: string) {
   await s.ready
   await track($, s, promptKeys(text, s.project, COMMAND))
+}
+
+// --- Решения по гейтам -----------------------------------------------
+//
+// Каждое действие — два нажатия: первое открывает подтверждение или форму и
+// ничего не пишет, второе перечитывает задачу и пишет. В разговор не пишется
+// ничего: ждущий агент узнаёт исход по событиям сервера (решение 0067, п. 4).
+
+const enc = encodeURIComponent
+const cap = (w: string) => w.charAt(0).toUpperCase() + w.slice(1)
+
+const plateOf = (row: TaskRow | undefined, a: { transition: string; gate: string }): Plate | null =>
+  row?.card?.plates.find(p => p.transition === a.transition && p.gate === a.gate) ?? null
+
+async function startAction($: $T, mode: Action['mode'], key: string, plate: Plate) {
+  const card = (await read($, rowsAtom))[key]?.card
+  if (!card) return
+  // Новое действие закрывает прежнее: подтверждение одно на сессию.
+  await update($, actionAtom, () => ({
+    key,
+    mode,
+    transition: plate.transition,
+    gate: plate.gate,
+    seen: card.seen,
+    target: card.returns.find(o => !o.held)?.transition ?? card.returns[0]?.transition ?? null,
+    reason: '',
+    checked: plate.items.filter(i => i.checked).map(i => i.id),
+  }))
+  await update($, outcomesAtom, all => {
+    const next = { ...all }
+    delete next[key]
+    return next
+  })
+}
+
+const cancelAction = ($: $T) => update($, actionAtom, () => null)
+const setReason = ($: $T, reason: string) => update($, actionAtom, a => (a ? { ...a, reason } : a))
+const setTarget = ($: $T, target: string) => update($, actionAtom, a => (a ? { ...a, target } : a))
+const toggleItem = ($: $T, id: string) => update($, actionAtom, a => (a ? { ...a, checked: toggle(id)(a.checked) } : a))
+
+const setOutcome = ($: $T, key: string, o: Outcome) => update($, outcomesAtom, all => ({ ...all, [key]: o }))
+
+function staleOutcome(drift: Exclude<Drift, 'same'>): Outcome {
+  return drift === 'moved'
+    ? { tone: 'warning', text: `${WORDS.notWritten}: ${WORDS.moved}`, journal: false, artifacts: false }
+    : { tone: 'warning', text: `${WORDS.notWritten}: ${WORDS.changed} — ${WORDS.lookAgain}`, journal: false, artifacts: true }
+}
+
+function failureOf(err: unknown): Outcome {
+  if (err instanceof ApiError && err.status === 409 && err.reason === STAGE_CHANGED) return staleOutcome('changed')
+  if (err instanceof ApiError) {
+    return { tone: 'error', text: err.status === 401 ? LOGIN_HINT : `${WORDS.notWritten}: ${err.message}`, journal: false, artifacts: false }
+  }
+  const message = err instanceof Error ? err.message : String(err)
+  return { tone: 'error', text: `нет связи с инстансом: ${message}`, journal: false, artifacts: false }
+}
+
+const write = <T,>($: $T, s: Session, step: Step) => post<T>($, s, step.path, step.body)
+
+// Общий ход записи: закрыть подтверждение, перечитать задачу, сверить с тем,
+// что человек видел, и только тогда писать. Пока запись идёт, второе нажатие
+// ничего не делает. После — карточка и «Ждут меня» перечитываются в любом
+// случае: что бы ни случилось с сетью, человек видит состояние сервера.
+async function perform($: $T, act: (s: Session, a: Action, plate: Plate, fresh: TaskDetail) => Promise<void>) {
+  const s = sessionOf.current
+  const a = await read($, actionAtom)
+  if (!s || !a || s.writing) return
+  s.writing = true
+  await update($, actionAtom, () => null)
+  const key = a.key
+  // Изменения задачи от своего действия — без тоста «извне».
+  s.quiet.set(key, Number.MAX_SAFE_INTEGER)
+  try {
+    const plate = plateOf((await read($, rowsAtom))[key], a)
+    if (!plate) return
+    const fresh = await api<TaskDetail>($, s, `/tasks/${enc(key)}`)
+    const drift = driftOf(a.seen, fresh)
+    if (drift !== 'same') {
+      await setOutcome($, key, staleOutcome(drift))
+      return
+    }
+    await act(s, a, plate, fresh)
+  } catch (err) {
+    await setOutcome($, key, failureOf(err))
+    if (err instanceof ApiError && err.status === 403) $.ui.toast(`${key} · ${err.message}`)
+  } finally {
+    s.writing = false
+    s.quiet.set(key, (await $.clock.now()) + QUIET_MS)
+    await refresh($, s, [key], 'own').catch(() => undefined)
+    await loadApprovals($, s).catch(() => undefined)
+  }
+}
+
+// «Да, апрув»: решение passed, затем переход — только если после решения он
+// allowed (min_approvals, другой гейт). Иначе апрув остаётся записанным, а
+// карточка говорит, что держит переход.
+const confirmApprove = ($: $T) =>
+  perform($, async (s, a, plate) => {
+    const steps = approveSteps(a.key, plate, a.seen)
+    await write($, s, steps.decision)
+    const after = await api<TaskDetail>($, s, `/tasks/${enc(a.key)}`)
+    const t = (after.transitions ?? []).find(x => x.key === plate.transition)
+    if (!t?.allowed) {
+      await setOutcome($, a.key, { tone: 'warning', text: [WORDS.recorded, holdsOf(t)].filter(Boolean).join(' · '), journal: true, artifacts: false })
+      return
+    }
+    const res = await write<{ task?: { status_name?: string } }>($, s, steps.transition)
+    const to = res.task?.status_name || plate.toName
+    await setOutcome($, a.key, { tone: 'ok', text: `${cap(WORDS.approved)} · ${a.key} ${GLYPH.arrow} ${to}`, journal: true, artifacts: false })
+    $.ui.toast(`${a.key} · ${WORDS.approved} ${GLYPH.arrow} ${to}`)
+  })
+
+// «Вернуть»: артефакты, которых требуют гейты возврата (вид — из версии
+// цикла), затем failed с причиной по гейту плашки, затем переход-возврат с
+// комментарием. Атомарности нет: упавший шаг оставляет сделанное, карточка
+// это показывает, возврат можно повторить.
+const confirmReturn = ($: $T) =>
+  perform($, async (s, a, plate, fresh) => {
+    const wf = await workflow($, s, fresh.task.workflow_id)
+    const option = returnsOf(fresh, wf).find(o => o.transition === a.target)
+    if (!option || option.held || !a.reason.trim()) {
+      const why = option?.held ? `: ${WORDS.holds} ${option.held}` : ''
+      await setOutcome($, a.key, { tone: 'error', text: `${WORDS.notWritten}${why}`, journal: false, artifacts: false })
+      return
+    }
+    let seen = a.seen.artifact
+    for (const step of returnSteps(a.key, plate, option, a.reason, a.seen)) {
+      if (step.kind === 'decision') step.body.seen_artifact_id = seen
+      const res = await write<{ id?: string }>($, s, step)
+      if (step.kind === 'artifact' && typeof res.id === 'string') seen = res.id
+    }
+    await setOutcome($, a.key, { tone: 'ok', text: `${a.key} ${WORDS.returned} ${GLYPH.arrow} ${option.toName}`, journal: true, artifacts: false })
+    $.ui.toast(`${a.key} · ${WORDS.returned} ${GLYPH.arrow} ${option.toName}`)
+  })
+
+// Чек-лист: «Отметить пройденным» — passed с пунктами, «Не пройден» — failed
+// с причиной. Переход чек-лист не делает.
+const confirmChecklist = ($: $T, pass: boolean) =>
+  perform($, async (s, a, plate) => {
+    if (pass ? !requiredChecked(plate.items, a.checked) : !a.reason.trim()) return
+    await write($, s, checklistStep(a.key, plate, a.seen, pass ? { checked: a.checked } : { reason: a.reason }))
+    const text = pass ? `${plate.gateName} ${GLYPH.ok} ${WORDS.checkedOff}` : `${plate.gateName} ${GLYPH.fail} ${WORDS.notPassed}`
+    await setOutcome($, a.key, { tone: pass ? 'ok' : 'warning', text, journal: true, artifacts: false })
+  })
+
+// Действие из полосы над вводом или из «Ждут меня»: карточка задачи
+// раскрывается в «Этом чате», и в ней открывается то же подтверждение.
+async function openAction($: $T, key: string, transition: string, gate: string) {
+  await openCard($, key)
+  const row = (await read($, rowsAtom))[key]
+  const plate = plateOf(row, { transition, gate })
+  if (!plate || !row?.canDecide) return
+  await startAction($, plate.type === CHECKLIST ? 'checklist' : 'approve', key, plate)
 }
 
 // --- Вкладка «Задачи» ---------------------------------------------------------
@@ -718,7 +994,8 @@ async function searchTasks($: $T, text: string) {
 // --- Карточка ------------------------------------------------------------------
 
 // Элементы поверхности. Svg есть везде, кроме терминала: там схема — строка.
-type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Select: any; Svg?: any; Input?: any }
+// Input и Select есть везде, кроме mobile: там их вызывают с проверкой.
+type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Svg?: any; Input?: any; Select?: any }
 
 // Раскрыть карточку задачи из полосы над вводом или из строки ребёнка:
 // задача попадает в чат, строка раскрывается, панель открывается.
@@ -739,8 +1016,6 @@ const sessionOf: { current: Session | null } = { current: null }
 // в памяти сессии мода (файлы и тексты), в состоянии — только выбор человека.
 // Состояние меняется после того, как данные выбранного пришли: при ошибке
 // остаётся прежнее показанное, а ошибка — строкой под ним.
-
-const enc = encodeURIComponent
 
 async function loadFiles($: $T, s: Session, key: string) {
   const [a, f] = await Promise.all([
@@ -823,7 +1098,7 @@ const MARK_COLOR = { ok: 'success', skip: undefined, open: undefined, approval: 
 const MARK_GLYPH = { ok: GLYPH.ok, skip: GLYPH.ok, open: GLYPH.open, approval: GLYPH.approval, fail: GLYPH.fail } as const
 const CHILD_DOT = { done: 'success', waiting: 'warning', active: 'claude', backlog: undefined, cancelled: undefined } as const
 
-type CardOpts = { scheme: ReturnType<typeof schemeOf>; now: number; described: boolean }
+type CardOpts = { scheme: ReturnType<typeof schemeOf>; now: number; described: boolean; decide: Decide }
 
 function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
   const { Box, Text, Button, Link, Markdown, Svg } = els
@@ -953,6 +1228,7 @@ function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
         ) : null}
       </Box>
       {gates}
+      {decideTree($, els, c, o.decide)}
       {kids}
       {files}
       {stages}
@@ -1246,6 +1522,40 @@ function childrenTree($: $T, els: Els, ch: NonNullable<CardData['children']>) {
   )
 }
 
+// Плашки «ждёт вашего решения» в карточке, формы действий и итог последнего
+// действия. Кнопок нет у участника ниже maintainer; на mobile нет
+// полей ввода — вместо действий ссылка в веб-интерфейс.
+//
+// Каждое состояние — блок (макет 04): плашка и подтверждение — заливка
+// warning, отклонённое и «Решение не записано» — error, «записан, но переход
+// держит» — нейтральная, формы и итог апрува — рамка. Заливка — свой цвет под
+// явную тему Claude (tintOf); при теме auto её нет, и блок держит рамка цвета
+// тона.
+type Decide = {
+  surface: string
+  canDecide: boolean
+  action: Action | null
+  outcome: Outcome | undefined
+  principal: string | null
+  // Цифры 1 и 2 в терминале — у первой плашки панели: две одинаковые
+  // цифры перебивали бы друг друга.
+  hotkeys: { used: boolean }
+  scheme: Scheme
+  now: number
+}
+
+// Блок состояния: рамка всегда, заливка — по тону и явной теме.
+function block(els: Els, key: string, tone: Tone | null, scheme: Scheme, children: unknown) {
+  const { Box } = els
+  const fill = tone ? tintOf(scheme, tone) : undefined
+  const edge = tone && tone !== 'neutral' ? tone : undefined
+  return (
+    <Box key={key} flexDirection="column" borderStyle="round" borderColor={edge} borderDimColor={!edge} backgroundColor={fill} paddingX={1}>
+      {children}
+    </Box>
+  )
+}
+
 // --- Тело вкладки «Задачи» -------------------------------------------------------
 
 const SEGMENT_LABEL: Record<Segment, string> = {
@@ -1265,6 +1575,12 @@ type TasksCtx = {
   described: string[]
   scheme: ReturnType<typeof schemeOf>
   now: number
+  // Решения по гейтам (326): открытое действие, итоги и выбор цифр в терминале
+  // — те же, что в карточке в «Этом чате».
+  action: Action | null
+  outcomes: Record<string, Outcome>
+  principal: string | null
+  hotkeys: { used: boolean }
 }
 
 function listBar(els: Els, p: ListRow['nested'] & object) {
@@ -1284,6 +1600,20 @@ function listBar(els: Els, p: ListRow['nested'] & object) {
         <Text color="claude">{GLYPH.bar.repeat(active)}</Text>
         <Text dimColor>{GLYPH.barEmpty.repeat(rest)}</Text>
       </Text>
+    </Box>
+  )
+}
+
+// Заголовок на заливке — цветом текста темы; без заливки — цветом тона.
+const headColor = (scheme: Scheme, tone: Tone) => (tintOf(scheme, tone) ? undefined : tone)
+
+function decideTree($: $T, els: Els, c: CardData, d: Decide) {
+  const { Box } = els
+  if (c.plates.length === 0 && !d.outcome) return null
+  return (
+    <Box flexDirection="column" gap={1} key={`plates-${c.key}`}>
+      {c.plates.map(p => plateTree($, els, c, p, d))}
+      {d.outcome ? outcomeTree(els, c, d.outcome, d) : null}
     </Box>
   )
 }
@@ -1366,9 +1696,326 @@ function listRowTree($: $T, els: Els, r: ListRow, c: TasksCtx, mixed: boolean) {
         </Box>
       ) : null}
       {isOpen && stored?.card
-        ? cardTree($, els, c.surface, stored.card, { scheme: c.scheme, now: c.now, described: c.described.includes(r.key) })
+        ? cardTree($, els, c.surface, stored.card, {
+            scheme: c.scheme,
+            now: c.now,
+            described: c.described.includes(r.key),
+            decide: {
+              surface: c.surface,
+              canDecide: stored.canDecide,
+              action: c.action,
+              outcome: c.outcomes[r.key],
+              principal: c.principal,
+              hotkeys: c.hotkeys,
+              scheme: c.scheme,
+              now: c.now,
+            },
+          })
         : null}
     </Box>
+  )
+}
+
+function plateTree($: $T, els: Els, c: CardData, p: Plate, d: Decide) {
+  const { Box, Text, Button, Link } = els
+  const id = `${c.key}-${p.transition}-${p.gate}`
+  const open = d.action && d.action.key === c.key && d.action.transition === p.transition && d.action.gate === p.gate ? d.action : null
+  const mobile = d.surface === 'mobile' || !els.Input || !els.Select
+  const hot = d.surface === 'terminal' && !d.hotkeys.used
+  if (hot && d.canDecide && !mobile) d.hotkeys.used = true
+
+  // Второе состояние того же блока: подтверждение, форма возврата или
+  // чек-листа стоят на месте плашки.
+  if (d.canDecide && open && !mobile) {
+    if (open.mode === 'approve') return confirmTree($, els, c, p, d, hot)
+    if (open.mode === 'return') return returnTree($, els, c, open, d)
+    return checklistTree($, els, c, p, open, d)
+  }
+
+  const checklist = p.type === CHECKLIST
+  const failed = p.state === 'failed'
+  const tone: Tone | null = failed ? 'error' : checklist ? null : 'warning'
+  const age = p.state === 'pending' ? ago(p.since, d.now) : null
+
+  let actions = null
+  if (mobile) {
+    actions = c.url ? <Link key={`plate-lab-${id}`} href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null
+  } else if (d.canDecide) {
+    actions =
+      p.type === HUMAN_APPROVAL ? (
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button key={`approve-${id}`} variant="primary" hotkey={hot ? '1' : undefined} onPress={() => void startAction($, 'approve', c.key, p)}>
+            {WORDS.approve}
+          </Button>
+          {c.returns.length > 0 ? (
+            <Button key={`return-${id}`} hotkey={hot ? '2' : undefined} onPress={() => void startAction($, 'return', c.key, p)}>
+              {WORDS.returnWithReason}
+            </Button>
+          ) : null}
+        </Box>
+      ) : (
+        <Box flexDirection="row" gap={1}>
+          <Button key={`mark-${id}`} variant="primary" hotkey={hot ? '1' : undefined} onPress={() => void startAction($, 'checklist', c.key, p)}>
+            {WORDS.mark}
+          </Button>
+        </Box>
+      )
+  }
+
+  const head = failed ? (
+    <Text color={headColor(d.scheme, 'error') ?? undefined} bold wrap="wrap">
+      {GLYPH.fail} {WORDS.rejected} · {p.gateName}
+      {p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  ) : checklist ? (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Text bold wrap="wrap">
+        {GLYPH.open} {p.gateName}
+      </Text>
+      <Text dimColor>{gateWord(p.type)}</Text>
+    </Box>
+  ) : (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text color={headColor(d.scheme, 'warning')} bold wrap="wrap">
+          {cap(WORDS.awaitingYou)} · {p.gateName}
+        </Text>
+      </Box>
+      {age ? <Text dimColor>{age}</Text> : null}
+    </Box>
+  )
+
+  const where = checklist ? (
+    <Text dimColor wrap="wrap">
+      {WORDS.beforeTransition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      {p.state === 'pending' && p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  ) : (
+    <Text dimColor wrap="wrap">
+      {WORDS.transition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      {p.state === 'pending' && p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  )
+
+  const others =
+    p.others.length > 0 && !failed ? (
+      <Text dimColor wrap="wrap">
+        {WORDS.othersPassed}: {p.others.map(o => `${o} ${GLYPH.ok}`).join(' · ')}
+      </Text>
+    ) : null
+
+  // Чипы — артефакты этапа по виду; до просмотра в самом плагине ведут в
+  // карточку веб-интерфейса.
+  const chips =
+    c.stageChips.length > 0 ? (
+      <Box flexDirection="row" gap={2} flexWrap="wrap">
+        {c.stageChips.map(a =>
+          c.url ? (
+            <Link key={`chip-${id}-${a.kind}`} href={c.url} label={`${a.title} ${GLYPH.chip}`} />
+          ) : (
+            <Text key={`chip-${id}-${a.kind}`} dimColor>
+              {a.title}
+            </Text>
+          ),
+        )}
+      </Box>
+    ) : null
+
+  return block(
+    els,
+    `plate-${id}`,
+    tone,
+    d.scheme,
+    <Box flexDirection="column">
+      {head}
+      {where}
+      {others}
+      {chips}
+      {actions}
+    </Box>,
+  )
+}
+
+function confirmTree($: $T, els: Els, c: CardData, p: Plate, d: Decide, hot: boolean) {
+  const { Box, Text, Button } = els
+  const who = d.principal ? ` (${d.principal})` : ''
+  return block(
+    els,
+    `confirm-${c.key}`,
+    'warning',
+    d.scheme,
+    <Box flexDirection="column">
+      <Text color={headColor(d.scheme, 'warning')} bold wrap="wrap">
+        {WORDS.confirmApprove} {c.key} {WORDS.andMoveTo} {p.toName}?
+      </Text>
+      <Text dimColor wrap="wrap">
+        {WORDS.gate} «{p.gateName}» · {WORDS.transitionLower} «{p.transitionName}». {WORDS.writtenAs}
+        {who}. {WORDS.agentLearns}
+      </Text>
+      <Box flexDirection="row" gap={1}>
+        <Button key={`yes-${c.key}`} variant="primary" autoFocus hotkey={hot ? '1' : undefined} onPress={() => void confirmApprove($)}>
+          {WORDS.yesApprove} <Text dimColor>{GLYPH.enter}</Text>
+        </Button>
+        <Button key={`cancel-${c.key}`} hotkey={hot ? '2' : undefined} onPress={() => void cancelAction($)}>
+          {WORDS.cancel}
+        </Button>
+      </Box>
+    </Box>,
+  )
+}
+
+function returnTree($: $T, els: Els, c: CardData, a: Action, d: Decide) {
+  const { Box, Text, Button, Input, Select } = els
+  const option = c.returns.find(o => o.transition === a.target) ?? null
+  const ready = !!option && !option.held && a.reason.trim() !== ''
+  return block(
+    els,
+    `return-form-${c.key}`,
+    null,
+    d.scheme,
+    <Box flexDirection="column">
+      <Text bold>
+        {WORDS.returnTitle} {c.key}
+      </Text>
+      <Select
+        key={`target-${c.key}`}
+        label={WORDS.whereHint}
+        options={c.returns.map(o => ({ value: o.transition, label: `${o.name} ${GLYPH.arrow} ${o.toName}` }))}
+        value={a.target ?? undefined}
+        onSelect={(v: string) => void setTarget($, v)}
+      />
+      <Input
+        key={`reason-${c.key}`}
+        label={WORDS.reasonHint}
+        placeholder={WORDS.reason}
+        value={a.reason}
+        autoFocus
+        onInput={(v: string) => void setReason($, v)}
+        onSubmit={(v: string) => void setReason($, v)}
+      />
+      {option && option.kinds.length > 0 ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.withReturn} {option.kinds.map(k => `«${k}»`).join(', ')} {WORDS.withReturnTail}
+        </Text>
+      ) : null}
+      {option?.held ? (
+        <Text color="error" wrap="wrap">
+          {cap(WORDS.holds)}: {option.held}
+        </Text>
+      ) : null}
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {ready ? (
+          <Button key={`do-return-${c.key}`} variant="primary" onPress={() => void confirmReturn($)}>
+            {WORDS.doReturn}
+          </Button>
+        ) : (
+          <Text dimColor>{WORDS.doReturn}</Text>
+        )}
+        <Button key={`cancel-${c.key}`} onPress={() => void cancelAction($)}>
+          {WORDS.cancel}
+        </Button>
+        <Text dimColor>{WORDS.returnPlan}</Text>
+      </Box>
+    </Box>,
+  )
+}
+
+function checklistTree($: $T, els: Els, c: CardData, p: Plate, a: Action, d: Decide) {
+  const { Box, Text, Button, Input } = els
+  const canPass = requiredChecked(p.items, a.checked)
+  const canFail = a.reason.trim() !== ''
+  return block(
+    els,
+    `checklist-${c.key}`,
+    null,
+    d.scheme,
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text bold wrap="wrap">
+          <Text dimColor>{c.key} </Text>
+          {p.gateName}
+        </Text>
+        <Text dimColor>{gateWord(p.type)}</Text>
+      </Box>
+      <Text dimColor wrap="wrap">
+        {WORDS.beforeTransition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      </Text>
+      {p.items.map(it => (
+        <Button key={`item-${c.key}-${it.id}`} plain onPress={() => void toggleItem($, it.id)}>
+          {a.checked.includes(it.id) ? GLYPH.boxChecked : GLYPH.box} {it.text}
+        </Button>
+      ))}
+      <Input
+        key={`reason-${c.key}`}
+        label={WORDS.reason}
+        placeholder={WORDS.reason}
+        value={a.reason}
+        onInput={(v: string) => void setReason($, v)}
+        onSubmit={(v: string) => void setReason($, v)}
+      />
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {canPass ? (
+          <Button key={`pass-${c.key}`} variant="primary" onPress={() => void confirmChecklist($, true)}>
+            {WORDS.markPassed}
+          </Button>
+        ) : (
+          <Text dimColor>{WORDS.markPassed}</Text>
+        )}
+        {canFail ? (
+          <Button key={`fail-${c.key}`} onPress={() => void confirmChecklist($, false)}>
+            {WORDS.notPassed}
+          </Button>
+        ) : (
+          <Text dimColor>{WORDS.notPassed}</Text>
+        )}
+        <Button key={`cancel-${c.key}`} onPress={() => void cancelAction($)}>
+          {WORDS.cancel}
+        </Button>
+      </Box>
+      {canPass ? null : <Text dimColor>{WORDS.checkRequired}</Text>}
+      <Text dimColor wrap="wrap">
+        {WORDS.notPassedHint}
+      </Text>
+    </Box>,
+  )
+}
+
+const TONE = { ok: 'success', warning: 'warning', error: 'error' } as const
+
+// Итог: апрув поставлен — рамка; записан, но переход держит — нейтральная
+// заливка; не записано — заливка error.
+function outcomeTree(els: Els, c: CardData, o: Outcome, d: Decide) {
+  const { Box, Text, Link } = els
+  const tone: Tone | null = o.tone === 'error' ? 'error' : o.tone === 'warning' ? (o.artifacts ? 'error' : 'neutral') : null
+  const color = tone && tintOf(d.scheme, tone) ? undefined : TONE[o.tone]
+  return block(
+    els,
+    `outcome-${c.key}`,
+    tone,
+    d.scheme,
+    <Box flexDirection="column">
+      <Text color={color ?? TONE[o.tone]} bold={o.artifacts} wrap="wrap">
+        {o.text}
+      </Text>
+      {o.artifacts ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.staleHint}
+        </Text>
+      ) : null}
+      {o.journal && o.tone === 'warning' && o.text.startsWith(WORDS.recorded) ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.heldHint}
+        </Text>
+      ) : null}
+      {o.journal ? (
+        <Box flexDirection="row" flexWrap="wrap">
+          <Text dimColor>{WORDS.underYourName} · </Text>
+          {c.url ? <Link key={`journal-${c.key}`} href={c.url} label={`${WORDS.journal} ${GLYPH.link}`} /> : <Text dimColor>{WORDS.journal}</Text>}
+          <Text dimColor>. {WORDS.silentChat}</Text>
+        </Box>
+      ) : null}
+      {o.artifacts && c.url ? <Link key={`artifacts-${c.key}`} href={c.url} label={`${WORDS.viewArtifacts} ${GLYPH.link}`} /> : null}
+    </Box>,
   )
 }
 
@@ -1565,8 +2212,21 @@ export const register: Register = (on, options) => {
     if (!key || !row) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const gate = row.card?.approvalGate
+    // Макет 06: полоса — рамка и заливка warning; в терминале — без рамки,
+    // полоса там в одну строку.
+    const framed = e.surface !== 'terminal'
+    const scheme = schemeOf(await read($, themeAtom))
+    // «Апрув» в полосе — только у того, кто вправе решать, и не на mobile:
+    // нажатие раскрывает карточку с тем же подтверждением.
+    const plate = row.canDecide && e.surface !== 'mobile' ? row.card?.plates.find(p => p.type === HUMAN_APPROVAL && p.state === 'pending') : undefined
     return (
-      <Box flexDirection="row" gap={1}>
+      <Box
+        flexDirection="row"
+        gap={1}
+        borderStyle={framed ? 'round' : undefined}
+        borderColor={framed ? 'warning' : undefined}
+        backgroundColor={framed ? tintOf(scheme, 'warning') : undefined}
+        paddingX={framed ? 1 : 0}>
         <Text color="warning">{GLYPH.approval}</Text>
         <Box flexGrow={1} flexShrink={1}>
           <Text wrap="truncate-end">
@@ -1577,13 +2237,18 @@ export const register: Register = (on, options) => {
         <Button key="band-open" onPress={() => void openCard($, key)}>
           {WORDS.open}
         </Button>
+        {plate ? (
+          <Button key="band-approve" variant="primary" onPress={() => void openAction($, key, plate.transition, plate.gate)}>
+            {WORDS.approve}
+          </Button>
+        ) : null}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e) as unknown as Els
-    const { Box, Text, Button } = els
+    const { Box, Text, Button, Link } = els
     const tab = await read($, tabAtom)
     const keys = await read($, keysAtom)
     const rows = await read($, rowsAtom)
@@ -1594,10 +2259,16 @@ export const register: Register = (on, options) => {
     const scheme = schemeOf(await read($, themeAtom))
     const now = await $.clock.now()
     const example = `${conn.project ?? 'КЛЮЧ'}-12`
+    const action = await read($, actionAtom)
+    const outcomes = await read($, outcomesAtom)
+    const appr = await read($, approvalsAtom)
+    const hotkeys = { used: false }
+    const principal = sessionOf.current?.principal ?? null
+    const waitingMe = appr.supported && appr.canDecide ? appr.rows.length : 0
 
     const tabs = (
       <Box flexDirection="row" gap={1} flexWrap="wrap">
-        {TABS.map(t => (
+        {TABS.filter(t => t.id !== 'approvals' || appr.supported !== false).map(t => (
           <Button
             key={`tab-${t.id}`}
             variant={t.id === tab ? 'primary' : 'secondary'}
@@ -1605,7 +2276,7 @@ export const register: Register = (on, options) => {
               void update($, tabAtom, () => t.id)
               if (t.id === 'tasks') void openTasks($, sessionOf.current).catch(() => undefined)
             }}>
-            {t.label}
+            {t.id === 'approvals' && waitingMe > 0 ? `${t.label} ${waitingMe}` : t.label}
           </Button>
         ))}
       </Box>
@@ -1651,7 +2322,12 @@ export const register: Register = (on, options) => {
                 ) : null}
                 {row?.error ? <Text color="error">Не обновилось: {row.error}</Text> : null}
                 {isOpen && row?.card
-                  ? cardTree($, els, e.surface, row.card, { scheme, now, described: described.includes(key) })
+                  ? cardTree($, els, e.surface, row.card, {
+                      scheme,
+                      now,
+                      described: described.includes(key),
+                      decide: { surface: e.surface, canDecide: row.canDecide, action, outcome: outcomes[key], principal, hotkeys, scheme, now },
+                    })
                   : null}
               </Box>
             )
@@ -1659,14 +2335,69 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    // Вкладки «Ждут меня» и «Задачи» в каркасе — оболочка: содержимое
-    // приходит следующими версиями плагина.
-    const later = (what: string) => (
-      <Box flexDirection="column">
-        <Text dimColor>{what}</Text>
-        <Text dimColor>Раздел появится в следующей версии плагина; пока — /clab-plugin {example}.</Text>
-      </Box>
-    )
+    // «Ждут меня»: ровно ответ серверной выборки. Действие из
+    // строки раскрывает карточку задачи с тем же подтверждением.
+    const projectUrl = conn.host && conn.project ? `${conn.host}/p/${encodeURIComponent(conn.project)}` : null
+    // Подвал «Ждут меня»: чем и когда выборка перечитана последний раз.
+    const loaded = appr.loadedAt !== null ? ago(new Date(appr.loadedAt).toISOString(), now) : null
+    const updated = loaded ? `${conn.events === true ? WORDS.updatedByEvent : WORDS.updatedByPoll} · ${loaded}` : null
+    const approvals =
+      appr.supported === false ? (
+        <Text dimColor>{WORDS.olderServerApprovals}</Text>
+      ) : appr.supported === null ? (
+        <Text dimColor>{WORDS.loadingApprovals}</Text>
+      ) : !appr.canDecide ? (
+        <Text dimColor>
+          {WORDS.awaitingMe}: {WORDS.needMaintainer}
+        </Text>
+      ) : appr.rows.length === 0 ? (
+        <Text dimColor>{WORDS.nothingAwaits}</Text>
+      ) : (
+        <Box flexDirection="column" gap={1}>
+          <Text dimColor wrap="wrap">
+            {WORDS.approvalsIntro}
+          </Text>
+          {appr.rows.map(r => {
+            const id = `${r.key}-${r.transition}-${r.gate}`
+            const checklist = r.type === CHECKLIST
+            return (
+              <Box key={`appr-${id}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+                <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="truncate-end">
+                      <Text color="warning">{GLYPH.current} </Text>
+                      <Text dimColor>{r.key} </Text>
+                      {r.title}
+                    </Text>
+                  </Box>
+                  {keys.includes(r.key) ? <Text color="claude">{WORDS.inThisChat}</Text> : null}
+                </Box>
+                <Text wrap="wrap">
+                  <Text color="warning" backgroundColor={tintOf(scheme, 'warning')}>
+                    {checklist ? GLYPH.open : GLYPH.approval} {r.gateName}
+                  </Text>
+                  <Text dimColor>
+                    {' '}
+                    {r.transitionName} {GLYPH.arrow} {r.toName}
+                  </Text>
+                </Text>
+                <Box flexDirection="row" gap={1}>
+                  {e.surface !== 'mobile' ? (
+                    <Button key={`appr-act-${id}`} variant="primary" onPress={() => void openAction($, r.key, r.transition, r.gate)}>
+                      {checklist ? WORDS.mark : WORDS.approve}
+                    </Button>
+                  ) : null}
+                  <Button key={`appr-open-${id}`} onPress={() => void openCard($, r.key)}>
+                    {WORDS.open}
+                  </Button>
+                </Box>
+              </Box>
+            )
+          })}
+          {appr.truncated && projectUrl ? <Link key="appr-more" href={projectUrl} label={`${WORDS.more}… ${GLYPH.link}`} /> : null}
+          {updated ? <Text dimColor>{updated}</Text> : null}
+        </Box>
+      )
 
     const viewRow = view ? rows[view.key] : undefined
     const body =
@@ -1675,7 +2406,7 @@ export const register: Register = (on, options) => {
           ? viewTree($, els, viewRow, view)
           : chat
         : tab === 'approvals'
-          ? later('Здесь будут задачи, которые ждут вашего решения.')
+          ? approvals
           : tasksBody($, els, {
               surface: e.surface,
               view: await read($, tasksViewAtom),
@@ -1686,6 +2417,10 @@ export const register: Register = (on, options) => {
               described,
               scheme,
               now,
+              action,
+              outcomes,
+              principal,
+              hotkeys,
             })
 
     const where = [
@@ -1702,6 +2437,7 @@ export const register: Register = (on, options) => {
         {tabs}
         {body}
         {conn.error ? <Text color="error">{conn.error}</Text> : null}
+        {appr.error && tab === 'approvals' ? <Text color="error">{appr.error}</Text> : null}
         <Text dimColor>{where}</Text>
       </Box>
     )

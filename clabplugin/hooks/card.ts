@@ -7,6 +7,7 @@
 // сравнивает: узлы, подписи и порядок приходят из версии цикла.
 
 import type { CardData, CardGate, CardGates, CycleNode, GateMark } from '../types'
+import { platesOf, returnsOf, seenOf, stageChipsOf } from './approve'
 import { childrenOf } from './children'
 import type { ApiChild } from './children'
 import { runStagesOf, stageTabs } from './artifact'
@@ -24,11 +25,29 @@ export type ApiStatus = {
   roles?: unknown[] | null
 }
 
-export type Workflow = { id: string; name?: string; version?: number; statuses: ApiStatus[] }
+export type Workflow = { id: string; name?: string; version?: number; statuses: ApiStatus[]; transitions?: unknown[] | null }
 
-export type ApiGate = { gate_key?: string; gate_name?: string; type?: string; status?: string; blocking?: boolean; reason?: string | null }
+export type ApiGate = {
+  gate_key?: string
+  gate_name?: string
+  type?: string
+  status?: string
+  blocking?: boolean
+  reason?: string | null
+  details?: Record<string, unknown> | null
+}
 
-export type ApiTransition = { key?: string; name?: string; kind?: string; to_status?: string; gates?: ApiGate[] }
+export type ApiTransition = {
+  key?: string
+  name?: string
+  kind?: string
+  to_status?: string
+  // Где встанет задача с её выбором этапов; null — переход недоступен.
+  lands_in?: string | null
+  unavailable?: string
+  allowed?: boolean
+  gates?: ApiGate[]
+}
 
 export type ApiRun = {
   id?: string
@@ -61,7 +80,7 @@ export type TaskDetail = {
   }
   stage_runs?: ApiRun[] | null
   transitions?: ApiTransition[] | null
-  artifacts?: { title?: string; kind?: string; version?: number; stage_run_id?: string | null; created_at?: string }[] | null
+  artifacts?: { id?: string; title?: string; kind?: string; version?: number; stage_run_id?: string | null; created_at?: string }[] | null
   attachments?: { title?: string; file_name?: string; size_bytes?: number; added_at?: string }[] | null
   children?: ApiChild[] | null
   usage?: { cost_usd?: number | null } | null
@@ -244,6 +263,10 @@ export function cardOf(detail: TaskDetail, wf: Workflow, host: string | null): C
     description: t.description ? String(t.description) : null,
     children: (detail.children ?? []).length > 0 ? childrenOf(detail.children ?? []) : null,
     url: host ? `${host}/p/${encodeURIComponent(project)}/tasks/${encodeURIComponent(t.key)}` : null,
+    plates: platesOf(detail, wf),
+    returns: returnsOf(detail, wf),
+    seen: seenOf(detail),
+    stageChips: stageChipsOf(detail),
   }
 }
 

@@ -71,9 +71,11 @@ test('панель: пустое состояние, три вкладки, ко
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /В этом чате задач пока нет/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /\/clab-plugin ACME-12/ })).toBeDefined()
-    for (const label of ['Этот чат', 'Ждут меня', 'Задачи']) {
+    for (const label of ['Этот чат', 'Задачи']) {
       expect(await ui.find({ type: 'Button', text: label })).toBeDefined()
     }
+    // У сервера мира нет выборки «Ждут меня» (404): вкладка скрыта (CLAB-326).
+    expect(await ui.find({ type: 'Button', text: 'Ждут меня' })).toBeUndefined()
     await ui.unmount()
   }
   expect(j.statuses.filter(s => s !== undefined)).toHaveLength(0)
@@ -90,8 +92,6 @@ test('панель: пустое состояние, три вкладки, ко
     expect(await ui.find({ type: 'Text', text: /сервер v9\.9\.9/ })).toBeDefined()
     await ui.press({ key: 'tab-tasks' })
     expect(await ui.find({ type: 'Button', text: /В работе/ })).toBeDefined()
-    await ui.press({ key: 'tab-approvals' })
-    expect(await ui.find({ type: 'Text', text: /ждут вашего решения/ })).toBeDefined()
     await ui.press({ key: 'tab-chat' })
     expect(await ui.find({ type: 'Text', text: /ACME-1 Первая/ })).toBeDefined()
     await ui.unmount()
@@ -101,9 +101,10 @@ test('панель: пустое состояние, три вкладки, ко
   const onDesktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await onDesktop.find({ type: 'Button', text: /В работе/ })).toBeDefined()
   await onDesktop.unmount()
+  // Командой вкладку открыть можно и без выборки: она говорит, почему пусто.
   await run($, 'approvals')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /ждут вашего решения/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /сервер старше: «Ждут меня»/ })).toBeDefined()
   await ui.unmount()
 
   await run($, 'remove ACME-1')

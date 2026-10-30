@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -414,6 +415,15 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 // перепроверок, stage_time_limit) не закрывает, даже если держатель аренды —
 // человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
+	return e.DecideGateSeen(ctx, taskKey, transitionKey, gateKey, actor, bound, status, details, nil)
+}
+
+// DecideGateSeen — DecideGate с условием сверки (CLAB-326): seen — id
+// последнего артефакта текущего этапа, который видел решающий, "" — «на
+// этапе артефактов не было». Последний артефакт этапа под блокировкой задачи
+// другой — 409 conflict, решение не пишется: человек решал бы о том, чего не
+// видел (решение 0042). nil — условия нет, поведение прежнее.
+func (e *Engine) DecideGateSeen(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage, seen *string) (GateOutcome, error) {
 	var out GateOutcome
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -476,6 +486,11 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 		if err := enteredVia(task, run, transition, *gate); err != nil {
 			return err
 		}
+		if seen != nil {
+			if err := e.checkSeen(ctx, tx, task, run, *seen); err != nil {
+				return err
+			}
+		}
 
 		if err := e.store.RecordGateResult(ctx, tx, run.ID, gate.ID, transition.ID,
 			status, json.RawMessage(details), &actor); err != nil {
@@ -500,6 +515,41 @@ func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey
 	})
 
 	return out, err
+}
+
+// SeenConflict — код ошибки сверки: на этапе есть артефакт новее того, что
+// видел решающий. По нему клиент отличает «результат изменился» от прочих 409.
+const SeenConflict = "stage_result_changed"
+
+// checkSeen сверяет последний артефакт текущего этапа с тем, что видел
+// решающий. Последний — по времени сдачи среди актуальных артефактов прогона,
+// тот же набор, по которому human_approval считает свежесть апрувов.
+func (e *Engine) checkSeen(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun, seen string) error {
+	stage, _, err := e.artifacts(ctx, q, task, run)
+	if err != nil {
+		return err
+	}
+	latest := ""
+	var at time.Time
+	for _, a := range stage {
+		if latest == "" || a.CreatedAt.After(at) {
+			latest, at = a.ID.String(), a.CreatedAt
+		}
+	}
+	if latest == strings.ToLower(strings.TrimSpace(seen)) {
+		return nil
+	}
+	return apperr.Conflict("результат этапа изменился: последний артефакт этапа %s, а решение принято по %s — посмотрите заново",
+		orNone(latest), orNone(seen)).WithDetails(map[string]any{
+		"reason": SeenConflict, "latest_artifact_id": latest, "seen_artifact_id": seen,
+	})
+}
+
+func orNone(id string) string {
+	if id == "" {
+		return "«нет артефактов»"
+	}
+	return id
 }
 
 // humanGate — как человек решает гейт, который решает только он.

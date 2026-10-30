@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
@@ -64,7 +65,7 @@ func (e *Engine) ChildCards(ctx context.Context, q postgres.Querier, parentID uu
 	if err != nil {
 		return nil, err
 	}
-	graphs := map[uuid.UUID]cycleGraph{}
+	probe := e.newApprovalProbe()
 	out := make([]domain.ChildTask, 0, len(kids))
 	for _, kid := range kids {
 		f := facts[kid.ID]
@@ -72,21 +73,73 @@ func (e *Engine) ChildCards(ctx context.Context, q postgres.Querier, parentID uu
 		if card.BlockedBy == nil {
 			card.BlockedBy = []string{}
 		}
-		if f.Category == "active" || f.Category == "waiting" {
-			g, ok := graphs[kid.WorkflowID]
-			if !ok {
-				if g, err = e.cycleGraph(ctx, q, kid.WorkflowID); err != nil {
-					return nil, err
-				}
-				graphs[kid.WorkflowID] = g
-			}
-			if card.AwaitingApproval, err = e.awaitsApproval(ctx, q, kid, g); err != nil {
-				return nil, err
-			}
+		if card.AwaitingApproval, err = probe.awaiting(ctx, q, kid, f.Category); err != nil {
+			return nil, err
 		}
 		out = append(out, card)
 	}
 	return out, nil
+}
+
+// TasksAwaitingApproval — признак «ждёт апрува» для строк списка задач
+// проекта (CLAB-326): то же правило и та же функция, что у детей в карточке
+// родителя, поэтому признак списка, children[] и карточки совпадают.
+// Категория статуса берётся из графа версии цикла, который нужен правилу и
+// так: лишнего запроса на задачу нет. Ключ ответа — задачи, которые ждут.
+func (e *Engine) TasksAwaitingApproval(ctx context.Context, q postgres.Querier, tasks []domain.Task) (map[uuid.UUID]bool, error) {
+	probe := e.newApprovalProbe()
+	out := map[uuid.UUID]bool{}
+	for _, t := range tasks {
+		g, err := probe.graph(ctx, q, t.WorkflowID)
+		if err != nil {
+			return nil, err
+		}
+		awaiting, err := probe.awaiting(ctx, q, t, g.byID[t.StatusID].Category)
+		if err != nil {
+			return nil, err
+		}
+		if awaiting {
+			out[t.ID] = true
+		}
+	}
+	return out, nil
+}
+
+// approvalProbe — общая часть детей карточки и списка задач: графы версий
+// цикла читаются один раз на версию, гейты вычисляются только у задач в
+// работе.
+type approvalProbe struct {
+	e      *Engine
+	graphs map[uuid.UUID]cycleGraph
+}
+
+func (e *Engine) newApprovalProbe() *approvalProbe {
+	return &approvalProbe{e: e, graphs: map[uuid.UUID]cycleGraph{}}
+}
+
+func (p *approvalProbe) graph(ctx context.Context, q postgres.Querier, workflowID uuid.UUID) (cycleGraph, error) {
+	if g, ok := p.graphs[workflowID]; ok {
+		return g, nil
+	}
+	g, err := p.e.cycleGraph(ctx, q, workflowID)
+	if err != nil {
+		return cycleGraph{}, err
+	}
+	p.graphs[workflowID] = g
+	return g, nil
+}
+
+// awaiting — «ждёт апрува» задачи в категории статуса category: апрув
+// грозит только задаче в работе (active, waiting).
+func (p *approvalProbe) awaiting(ctx context.Context, q postgres.Querier, task domain.Task, category string) (bool, error) {
+	if category != "active" && category != "waiting" {
+		return false, nil
+	}
+	g, err := p.graph(ctx, q, task.WorkflowID)
+	if err != nil {
+		return false, err
+	}
+	return p.e.awaitsApproval(ctx, q, task, g)
 }
 
 // awaitsApproval — то же, что TransitionsAwaitApproval(Preview(task)), но
@@ -103,6 +156,11 @@ func (e *Engine) awaitsApproval(ctx context.Context, q postgres.Querier, task do
 	}
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
 	if err != nil {
+		// Без прогона на статусе нечего апрувить: задача не ждёт решения, а
+		// список задач не падает из-за одной такой строки (CLAB-327).
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	stageArtifacts, taskArtifacts, err := e.artifacts(ctx, q, task, run)

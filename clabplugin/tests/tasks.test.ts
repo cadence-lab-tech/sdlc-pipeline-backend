@@ -520,8 +520,10 @@ for (const [name, make] of [['14 задач', nova], ['214 задач', bigNova]
     const w = world(on, { whoami: who('NOVA'), now: NOW, routes: routes(sv, 'NOVA') })
     const ui = await openTab($, w.clock)
     await ui.unmount()
-    // /instance — сведения о сервере при старте сессии, не вкладка.
-    const tab = (sv.hits ?? []).filter(h => h !== '/instance')
+    // /instance — сведения о сервере при старте сессии, не вкладка; фоновая
+    // выборка «Ждут меня» при старте — тоже не открытие вкладки (решение
+    // человека 2026-10-30).
+    const tab = (sv.hits ?? []).filter(h => h !== '/instance' && !h.endsWith('/approvals'))
     opened.push(tab.length)
     expect(tab.length).toBeLessThanOrEqual(6)
   })

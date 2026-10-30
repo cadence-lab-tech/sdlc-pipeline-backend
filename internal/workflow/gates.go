@@ -155,6 +155,24 @@ func (e *Engine) evalChecklist(_ context.Context, _ postgres.Querier, in EvalInp
 		return GateOutcome{}, fmt.Errorf("конфигурация гейта %q: %w", in.Gate.Key, err)
 	}
 
+	// «Не пройден» — решение человека, как отклонённый апрув: гейт failed,
+	// пока чек-лист не отметят заново. Решение по гейту одно на прогон
+	// (последнее перезаписывает прежнее), поэтому повторная отметка пунктов
+	// возвращает обычное правило.
+	if in.Decision != nil && in.Decision.Status == domain.GateResultFailed {
+		var d struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(in.Decision.Details, &d)
+		reason := "чек-лист отмечен непройденным"
+		if r := strings.TrimSpace(d.Reason); r != "" {
+			reason += ": " + r
+		}
+		out := base(in.Gate, domain.GateResultFailed, reason)
+		out.Details = map[string]any{"decision": json.RawMessage(in.Decision.Details)}
+		return out, nil
+	}
+
 	checked := map[string]bool{}
 	if in.Decision != nil {
 		var d struct {

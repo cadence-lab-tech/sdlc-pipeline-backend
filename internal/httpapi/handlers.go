@@ -227,7 +227,32 @@ func (s *Server) listTasks(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": items, "total": total})
+	// «Ждёт апрува» у каждой строки (CLAB-326): то же правило, что у детей
+	// карточки; гейты считаются только у задач в работе с апрувом на
+	// переходе вперёд.
+	tasks := make([]domain.Task, len(items))
+	for i, it := range items {
+		tasks[i] = it.Task
+	}
+	awaiting, err := s.engine.TasksAwaitingApproval(ctx, q, tasks)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	out := make([]taskListItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, taskListItem{TaskListItem: it, AwaitingApproval: awaiting[it.ID]})
+	}
+	c.JSON(http.StatusOK, gin.H{"tasks": out, "total": total})
+}
+
+// taskListItem — элемент списка задач: элемент списка (CLAB-327) и признак
+// «ждёт апрува» (CLAB-326) за её полями. Вложенная структура встроена, JSON
+// плоский: клиент прошлой версии читает элемент как раньше, новое поле — в
+// конце.
+type taskListItem struct {
+	domain.TaskListItem
+	AwaitingApproval bool `json:"awaiting_approval"`
 }
 
 // queryBool — необязательный логический параметр запроса; пусто — false.
@@ -574,6 +599,10 @@ func (s *Server) executeTransition(c *gin.Context) {
 type decideGateRequest struct {
 	Status  string          `json:"status" binding:"required"`
 	Details json.RawMessage `json:"details"`
+	// Условие сверки (CLAB-326): id последнего артефакта этапа, который видел
+	// решающий, "" — артефактов на этапе не было. Последний другой — 409, и
+	// решение не пишется. Поле необязательное: без него — как раньше.
+	SeenArtifactID *string `json:"seen_artifact_id"`
 }
 
 func (s *Server) decideGate(c *gin.Context) {
@@ -590,9 +619,9 @@ func (s *Server) decideGate(c *gin.Context) {
 		req.Details = json.RawMessage(`{}`)
 	}
 
-	out, err := s.engine.DecideGate(c.Request.Context(),
+	out, err := s.engine.DecideGateSeen(c.Request.Context(),
 		c.Param("taskKey"), c.Param("transitionKey"), c.Param("gateKey"),
-		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details)
+		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details, req.SeenArtifactID)
 	if err != nil {
 		fail(c, s.log, err)
 		return
