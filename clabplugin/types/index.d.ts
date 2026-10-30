@@ -21,6 +21,38 @@ export type CardGate = { name: string; type: string; status: string; reason: str
 
 export type CardGates = { transition: string; items: CardGate[]; passed: number; total: number }
 
+// Прогон этапа в строке вкладки: попытка, роль и исполнитель из прогона,
+// время начала и конца (ISO), возврат, из которого прогон начат, и
+// вложенные прогоны перепроверки под ним.
+export type RunRow = {
+  id: string
+  attempt: number
+  role: string | null
+  holder: string | null
+  from: string | null
+  to: string | null
+  running: boolean
+  back: { fromName: string; reason: string | null } | null
+  reviews: RunRow[]
+}
+
+// Вкладка этапа: статус версии цикла задачи, на котором были прогоны.
+// attempts — прогоны верхнего уровня.
+export type StageTab = { key: string; name: string; attempts: number; runs: RunRow[] }
+
+// Что открыто в панели вместо списка: артефакты этапа задачи. stage, kind и
+// version — выбор человека (version — id артефакта, null — текущая версия);
+// null — по умолчанию. rev меняется, когда в памяти мода появились данные.
+export type ArtifactView = {
+  key: string
+  stage: string | null
+  kind: string | null
+  version: string | null
+  error: string | null
+  busy: boolean
+  rev: number
+}
+
 export type CardArtifact = { title: string; version: number | null; stage: string | null; at: string | null }
 
 export type CardAttachment = { name: string; size: number | null; at: string | null }
@@ -62,6 +94,10 @@ export type CardData = {
   workflowName: string | null
   workflowVersion: number | null
   nodes: CycleNode[]
+  // Вкладки этапов: статусы с ролью, на которых были прогоны, по порядку цикла.
+  stages: StageTab[]
+  // Прогон (любой, и перепроверка) → статус, на котором он шёл.
+  runStages: Record<string, string>
   // Номер текущего узла среди узлов схемы (с 1); 0 — статуса задачи на схеме нет.
   step: number
   attempt: number
@@ -118,6 +154,8 @@ declare module 'claude-code' {
       described: Shaped<string[]>
       // Значение ряда theme из /config: палитра схемы цикла (Svg).
       theme: Shaped<string>
+      // Открытый просмотр артефактов этапа; null — панель показывает список.
+      view: Shaped<ArtifactView | null>
     }
   }
 }
