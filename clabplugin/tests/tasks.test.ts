@@ -11,7 +11,8 @@ import type { Reply } from './world'
 // Incident, Initiative на 5, 9 и 3 узла). Циклы — снимок стека задачи
 // CLAB-324 (tests/stack.ts), список — подставной сервер, который отвечает на
 // параметры списка так же, как ручка: terminal, has_role, category,
-// top_level, q, type, assignee, unassigned, order, limit, offset, parent.
+// in_work, top_level, q, type, assignee, unassigned, order, limit, offset,
+// parent.
 
 const NOW = Date.parse(CAPTURED_AT) + 3_600_000
 const MIN = 60_000
@@ -29,12 +30,21 @@ type Fx = { key: string; title: string; wf: string; status: string; parent?: str
 
 const statusOf = (f: Fx) => wfNamed(f.wf).statuses.find(s => s.key === f.status) as Status
 
-// Сегмент по правилам из бизнес-требований — считает тест, независимо от мода.
-function segmentOf(f: Fx): string | null {
+// Сегмент по правилам из бизнес-требований и решения человека после возврата
+// с тестирования — считает тест, независимо от мода и по всем задачам
+// проекта, а не по задачам без родителя. Нетерминальная задача, у которой есть
+// дети в работе, ждут апрува или готовые, — «в работе», хотя у её статуса нет
+// роли; в «бэклоге» остаются неначатые.
+const STARTED = ['active', 'waiting', 'done']
+function segmentOf(f: Fx, all: readonly Fx[]): string | null {
   const st = statusOf(f)
-  if (!st.is_terminal) return st.roles.length > 0 ? 'work' : 'backlog'
+  if (!st.is_terminal) {
+    const started = all.some(k => k.parent === f.key && STARTED.includes(statusOf(k).category))
+    return st.roles.length > 0 || started ? 'work' : 'backlog'
+  }
   return st.category === 'done' ? 'done' : null
 }
+const inSegment = (all: readonly Fx[], seg: string) => all.filter(f => segmentOf(f, all) === seg).sort((a, b) => a.age - b.age)
 
 function itemOf(f: Fx, all: Fx[], withNew = true) {
   const wf = wfNamed(f.wf)
@@ -127,7 +137,7 @@ function routes(sv: Server, project: string) {
         status: 200,
         body: {
           queue: fx
-            .filter(f => segmentOf(f) === 'work' || f.claimable)
+            .filter(f => (!statusOf(f).is_terminal && statusOf(f).roles.length > 0) || f.claimable)
             .map(f => ({ task: itemOf(f, fx), stage_run: { claimed_by_handle: f.holder ?? null }, claimable: f.claimable === true })),
         },
       }
@@ -143,6 +153,7 @@ function routes(sv: Server, project: string) {
         if (p.get('top_level') === 'true' && f.parent) return false
         if (p.has('terminal') && st.is_terminal !== (p.get('terminal') === 'true')) return false
         if (p.has('has_role') && st.roles.length > 0 !== (p.get('has_role') === 'true')) return false
+        if (p.has('in_work') && (segmentOf(f, fx) === 'work') !== (p.get('in_work') === 'true')) return false
         if (p.has('category') && !(p.get('category') ?? '').split(',').includes(st.category)) return false
         if (parents.length && !parents.includes(f.parent ?? '')) return false
         if (p.get('type') && wfNamed(f.wf).task_types[0] !== p.get('type')) return false
@@ -231,14 +242,23 @@ test('NOVA: сегменты «в работе», «бэклог», «готов
   const { clock } = world(on, { whoami: who('NOVA'), now: NOW, routes: routes(sv, 'NOVA') })
   const ui = await openTab($, clock)
 
-  const top = sv.fixtures.filter(f => !f.parent)
-  const expected = (seg: string) => top.filter(f => segmentOf(f) === seg).sort((a, b) => a.age - b.age)
+  // Сегменты считают все задачи проекта, дети эпика тоже (AC-17a, AC-17c).
+  const expected = (seg: string) => inSegment(sv.fixtures, seg)
   const work = expected('work')
-  expect(work).toHaveLength(6)
+  expect(work.map(f => f.key)).toEqual(
+    expect.arrayContaining(['NOVA-1', 'NOVA-4', 'NOVA-5', 'NOVA-6', 'NOVA-10', 'NOVA-13']),
+  )
 
   // «В работе» открыт по умолчанию; кнопки несут счётчики.
   expect(rowKeys(await ui.drawn())).toEqual(work.map(f => f.key))
-  for (const [label, n] of [[WORDS.segWork, 6], [WORDS.segQueue, 3], [WORDS.segBacklog, 14], [WORDS.segDone, 9]] as const) {
+  // Эпик в «В работе» (дети идут), его неначатые дети — в «Бэклоге» (дети эпика
+  // — строки своих сегментов), готовые — в «Готово».
+  expect(expected('backlog').map(f => f.key)).toEqual(expect.arrayContaining(['NOVA-7', 'NOVA-8']))
+  expect(expected('backlog').map(f => f.key)).not.toContain('NOVA-1')
+  expect(expected('done').map(f => f.key)).toEqual(expect.arrayContaining(['NOVA-2', 'NOVA-3']))
+  const sizes = { work: work.length, backlog: expected('backlog').length, done: expected('done').length }
+  expect(sizes).toEqual({ work: 9, backlog: 16, done: 11 })
+  for (const [label, n] of [[WORDS.segWork, sizes.work], [WORDS.segQueue, 3], [WORDS.segBacklog, sizes.backlog], [WORDS.segDone, sizes.done]] as const) {
     expect(await ui.find({ type: 'Button', text: `${label} ${n}` })).toBeDefined()
   }
 
@@ -246,11 +266,11 @@ test('NOVA: сегменты «в работе», «бэклог», «готов
   await tick(clock)
   const backlog = expected('backlog')
   expect(rowKeys(await ui.drawn())).toEqual(backlog.slice(0, PAGE).map(f => f.key))
-  // Отменённые и дети эпика в сегменты верхнего уровня не попадают.
+  // Отменённые в сегменты не попадают.
   await ui.press({ key: 'seg-done' })
   await tick(clock)
   const done = rowKeys(await ui.drawn())
-  expect(done).toEqual(expected('done').map(f => f.key))
+  expect(done).toEqual(expected('done').slice(0, PAGE).map(f => f.key))
   expect(done).not.toContain('NOVA-50')
   expect(done).not.toContain('NOVA-9')
   await ui.unmount()
@@ -261,22 +281,23 @@ test('NOVA: сегменты «в работе», «бэклог», «готов
   await onDesktop.unmount()
 })
 
-// Страница по десять и листание: «показано 1–10 из 14», дальше — вторая.
+// Страница по десять и листание: «показано 1–10 из 16», дальше — вторая.
 test('NOVA: страницы по десять, вперёд и назад', async ($, on) => {
   const sv: Server = { fixtures: nova(), hits: [] }
   const { clock } = world(on, { whoami: who('NOVA'), now: NOW, routes: routes(sv, 'NOVA') })
   const ui = await openTab($, clock)
   await ui.press({ key: 'seg-backlog' })
   await tick(clock)
-  const backlog = sv.fixtures.filter(f => !f.parent && segmentOf(f) === 'backlog').sort((a, b) => a.age - b.age)
-  expect(text(await ui.drawn())).toContain(`${WORDS.shown} 1–10 ${WORDS.of} 14`)
+  const backlog = inSegment(sv.fixtures, 'backlog')
+  expect(backlog).toHaveLength(16)
+  expect(text(await ui.drawn())).toContain(`${WORDS.shown} 1–10 ${WORDS.of} 16`)
   expect(await ui.find({ type: 'Button', text: /вперёд/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /назад/ })).toBeUndefined()
 
   await ui.press({ key: 'tasks-next' })
   await tick(clock)
   expect(rowKeys(await ui.drawn())).toEqual(backlog.slice(10).map(f => f.key))
-  expect(text(await ui.drawn())).toContain(`${WORDS.shown} 11–14 ${WORDS.of} 14`)
+  expect(text(await ui.drawn())).toContain(`${WORDS.shown} 11–16 ${WORDS.of} 16`)
   expect(await ui.find({ type: 'Button', text: /вперёд/ })).toBeUndefined()
   expect(sv.hits?.some(h => h.includes('offset=10'))).toBe(true)
 
@@ -425,8 +446,9 @@ test('FORGE: сегменты, типы и подписи статусов из 
   const sv: Server = { fixtures: forge() }
   const w = world(on, { whoami: who('FORGE'), now: NOW, routes: routes(sv, 'FORGE') })
   const ui = await openTab($, w.clock)
-  const top = sv.fixtures.filter(f => !f.parent)
-  const want = (seg: string) => top.filter(f => segmentOf(f) === seg).sort((a, b) => a.age - b.age).map(f => f.key)
+  const want = (seg: string) => inSegment(sv.fixtures, seg).map(f => f.key)
+  expect(want('work')).toEqual(expect.arrayContaining(['FORGE-1', 'FORGE-2', 'FORGE-3', 'FORGE-4']))
+  expect(want('done')).toEqual(expect.arrayContaining(['FORGE-5', 'FORGE-6']))
   expect(rowKeys(await ui.drawn())).toEqual(want('work'))
   expect(text(await ui.drawn())).toContain(statusOf(sv.fixtures[0] as Fx).name)
   for (const seg of ['backlog', 'done'] as const) {
@@ -455,8 +477,7 @@ for (const [project, fixtures] of [['NOVA', nova()], ['FORGE', forge()]] as cons
     const sv: Server = { fixtures, legacy: true, hits: [] }
     const w = world(on, { whoami: who(project), now: NOW, routes: routes(sv, project) })
     const ui = await openTab($, w.clock)
-    const top = fixtures.filter(f => !f.parent)
-    const want = (seg: string) => top.filter(f => segmentOf(f) === seg).sort((a, b) => a.age - b.age).map(f => f.key)
+    const want = (seg: string) => inSegment(fixtures, seg).map(f => f.key)
     expect(rowKeys(await ui.drawn())).toEqual(want('work').slice(0, PAGE))
     const n = (seg: string) => want(seg).length
     expect(await ui.find({ type: 'Button', text: `${WORDS.segBacklog} ${n('backlog')}` })).toBeDefined()
@@ -570,3 +591,36 @@ test('подписи вкладки: словарь, ключи, заголов�
   await ui.unmount()
 })
 
+
+// AC-17a, AC-17c: ключи всех страниц трёх сегментов вместе с отменёнными дают
+// весь проект, как список задач в CLI: ни одна задача, в том числе ребёнок
+// эпика, не выпадает, и ни одна не стоит в двух сегментах. Ожидание — по всем
+// задачам проекта, а не по задачам без родителя.
+for (const [project, fixtures] of [['NOVA', nova()], ['FORGE', forge()]] as const) {
+  test(`${project}: сегменты вместе покрывают все задачи проекта, дети эпика тоже`, async ($, on) => {
+    const sv: Server = { fixtures: [...fixtures] }
+    const w = world(on, { whoami: who(project), now: NOW, routes: routes(sv, project) })
+    const ui = await openTab($, w.clock)
+    const seen: string[] = []
+    for (const seg of ['work', 'backlog', 'done'] as const) {
+      await ui.press({ key: `seg-${seg}` })
+      await tick(w.clock)
+      const keys: string[] = []
+      for (;;) {
+        keys.push(...rowKeys(await ui.drawn()))
+        if (!(await ui.find({ type: 'Button', text: /вперёд/ }))) break
+        await ui.press({ key: 'tasks-next' })
+        await tick(w.clock)
+      }
+      expect(keys).toEqual(inSegment(fixtures, seg).map(f => f.key))
+      seen.push(...keys)
+    }
+    const cancelled = fixtures.filter(f => statusOf(f).category === 'cancelled').map(f => f.key)
+    expect([...seen, ...cancelled].sort()).toEqual(fixtures.map(f => f.key).sort())
+    expect(new Set(seen).size).toBe(seen.length)
+    // Ребёнок эпика — строка своего сегмента, а не только вложенный.
+    const kid = fixtures.find(f => f.parent && segmentOf(f, fixtures) === 'work') as Fx
+    expect(seen).toContain(kid.key)
+    await ui.unmount()
+  })
+}

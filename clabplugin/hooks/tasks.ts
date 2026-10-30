@@ -82,14 +82,15 @@ export type ListQuery = {
 export const UNASSIGNED = '-'
 
 const SEGMENT_PARAMS: Readonly<Record<Exclude<Segment, 'queue'>, Record<string, string>>> = {
-  work: { terminal: 'false', has_role: 'true' },
-  backlog: { terminal: 'false', has_role: 'false' },
+  work: { terminal: 'false', in_work: 'true' },
+  backlog: { terminal: 'false', in_work: 'false' },
   done: { terminal: 'true', category: 'done' },
 }
 
 // Строка запроса страницы списка у сервера, который листает. Поиск идёт по
-// всему проекту, поэтому сегмент при нём не действует; в сегменте строки
-// верхнего уровня — дети эпика показываются под ним.
+// всему проекту, поэтому сегмент при нём не действует. Сегмент считает все
+// задачи проекта, как список задач в CLI: дети эпика — строки своих сегментов
+// и ещё свёрнуты под строкой эпика (top_level не передаётся).
 export function listPath(v: ListQuery, limit: number, offset: number): string {
   const p = new URLSearchParams()
   p.set('limit', String(limit))
@@ -98,7 +99,6 @@ export function listPath(v: ListQuery, limit: number, offset: number): string {
   const q = v.q.trim()
   if (q) p.set('q', q)
   else if (v.segment !== 'queue') {
-    p.set('top_level', 'true')
     for (const [k, val] of Object.entries(SEGMENT_PARAMS[v.segment])) p.set(k, val)
   }
   if (v.type) p.set('type', v.type)
@@ -139,12 +139,21 @@ export function classify(wf: Workflow | undefined, statusKey: string | undefined
   }
 }
 
-// Сегмент по полям статуса: «в работе» — не конечный и с ролью, «бэклог» — не
-// конечный и без роли, «готово» — конечный категории done. Отменённые не
-// входят никуда: их находит поиск.
-export function segmentOf(c: Classified | null): Exclude<Segment, 'queue'> | null {
+// Дети, с которых работа начата: в работе, ждут апрува или готовы. Неначатые
+// (бэклог) и отменённые работой не считаются.
+export const STARTED_CATEGORIES: readonly string[] = ['active', 'waiting', 'done']
+
+export const startedKids = (counts: Readonly<Record<string, number>> | null | undefined) =>
+  STARTED_CATEGORIES.some(c => Number(counts?.[c] ?? 0) > 0)
+
+// Сегмент по полям статуса: «в работе» — не конечный и с ролью, либо не
+// конечный с начатыми детьми (эпик, чей статус ролей не имеет, но работа по
+// детям идёт); «бэклог» — не конечный, без роли и без начатых детей; «готово»
+// — конечный категории done. Отменённые не входят никуда: их находит поиск.
+// Те же правила у сервера (in_work).
+export function segmentOf(c: Classified | null, started = false): Exclude<Segment, 'queue'> | null {
   if (!c) return null
-  if (!c.terminal) return c.hasRole ? 'work' : 'backlog'
+  if (!c.terminal) return c.hasRole || started ? 'work' : 'backlog'
   return c.category === 'done' ? 'done' : null
 }
 
@@ -264,7 +273,7 @@ export const exactKey = (q: string) => /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(q.trim
 export type Legacy = {
   rows: ListRow[]
   counts: Record<Exclude<Segment, 'queue'>, number>
-  // Сколько строк верхнего уровня выбрано (до страницы).
+  // Сколько строк выбрано (до страницы).
   total: number
 }
 
@@ -279,12 +288,19 @@ export function legacyList(
   const info = (t: ApiListTask) => classify(workflows.get(String(t.workflow_id)), t.status_key)
   const catOf = (t: ApiListTask) => info(t)?.category ?? null
   const kids = groupKids(tasks)
+  const kidCounts = (own: readonly ApiListTask[]) => {
+    const out: Record<string, number> = {}
+    for (const k of own) {
+      const c = catOf(k) ?? 'active'
+      out[c] = (out[c] ?? 0) + 1
+    }
+    return out
+  }
   const counts = { work: 0, backlog: 0, done: 0 }
   const q = v.q.trim()
   const picked: ApiListTask[] = []
   for (const t of tasks) {
-    const seg = segmentOf(info(t))
-    if (!q && t.parent_key) continue
+    const seg = segmentOf(info(t), startedKids(kidCounts(kids.get(t.key) ?? [])))
     if (v.type && typeOf(t) !== v.type) continue
     if (v.assignee === UNASSIGNED ? !!t.assignee_handle : v.assignee ? t.assignee_handle !== v.assignee : false) continue
     if (!q && seg) counts[seg]++
@@ -295,12 +311,7 @@ export function legacyList(
   const offset = v.page * PAGE
   const rows = sorted.slice(offset, offset + PAGE).map(t => {
     const own = kids.get(t.key) ?? []
-    const counted: Record<string, number> = {}
-    for (const k of own) {
-      const c = catOf(k) ?? 'active'
-      counted[c] = (counted[c] ?? 0) + 1
-    }
-    return rowOf({ ...t, child_counts: own.length ? counted : null }, {
+    return rowOf({ ...t, child_counts: own.length ? kidCounts(own) : null }, {
       category: catOf(t),
       holder: holder.get(t.key) ?? null,
       kids: own,

@@ -208,3 +208,123 @@ func TestListTasksPaging(t *testing.T) {
 		}
 	}
 }
+
+// Сегменты вкладки «Задачи» считают все задачи проекта, дети эпиков тоже
+// строки своих сегментов (решение человека после возврата с тестирования
+// CLAB-327). Нетерминальный эпик с детьми в работе или готовыми — «в работе»,
+// в «бэклоге» только неначатые. Ожидания считаются из полей статуса напрямую
+// и не опираются на отсутствие родителя у задачи.
+func TestListTasksSegmentsCoverChildren(t *testing.T) {
+	f := newAuditFixture(t)
+	ctx := context.Background()
+	create := func(title, parent string) string {
+		t.Helper()
+		body := map[string]any{"title": title}
+		if parent != "" {
+			body["parent_key"] = parent
+		}
+		code, task := f.json(http.MethodPost, "/v1/projects/SDLC/tasks", f.root, body)
+		if code != http.StatusCreated {
+			t.Fatalf("задача %q: %d %v", title, code, task)
+		}
+		return task["key"].(string)
+	}
+	setStatus := func(key, status string) {
+		t.Helper()
+		if _, err := f.pool.Exec(ctx, `
+			UPDATE tasks t SET status_id = ws.id
+			FROM workflow_statuses ws
+			WHERE t.key = $1 AND ws.workflow_id = t.workflow_id AND ws.key = $2`, key, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(query string) ([]string, float64) {
+		t.Helper()
+		rec := f.do(http.MethodGet, "/v1/projects/SDLC/tasks?"+query+"&limit=500", f.root, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("список %q: %d %s", query, rec.Code, rec.Body)
+		}
+		var out struct {
+			Tasks []struct {
+				Key string `json:"key"`
+			} `json:"tasks"`
+			Total float64 `json:"total"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		var keys []string
+		for _, it := range out.Tasks {
+			keys = append(keys, it.Key)
+		}
+		return keys, out.Total
+	}
+
+	// Четыре эпика: дети в работе; только готовые; только неначатые и снятые;
+	// эпик, сам закрытый, с работающим ребёнком.
+	live := create("Эпик с работающим ребёнком", "")
+	liveKid := create("Работающий", live)
+	create("Неначатый", live)
+	finished := create("Эпик только с готовыми", "")
+	doneKid := create("Готовый", finished)
+	idle := create("Эпик без начатого", "")
+	idleKid := create("Ждёт очереди", idle)
+	cancelledKid := create("Снятый", idle)
+	closed := create("Закрытый эпик", "")
+	closedKid := create("Ребёнок закрытого", closed)
+	setStatus(liveKid, "analysis")
+	setStatus(doneKid, "done")
+	setStatus(cancelledKid, "cancelled")
+	setStatus(closed, "done")
+	setStatus(closedKid, "analysis")
+
+	work, wn := list("terminal=false&in_work=true")
+	backlog, bn := list("terminal=false&in_work=false")
+	done, dn := list("terminal=true&category=done")
+	for _, c := range []struct {
+		name string
+		got  []string
+		n    float64
+		in   []string
+		out  []string
+	}{
+		// Дети в работе — строки «В работе» вместе с эпиками, у которых дети
+		// начаты; закрытый эпик — не «в работе», что бы ни делали его дети.
+		{"в работе", work, wn, []string{live, liveKid, finished, closedKid}, []string{closed, doneKid, idle, idleKid, cancelledKid}},
+		{"бэклог", backlog, bn, []string{idle, idleKid}, []string{live, finished, liveKid, doneKid, cancelledKid}},
+		{"готово", done, dn, []string{doneKid, closed}, []string{live, liveKid, cancelledKid}},
+	} {
+		if c.n != float64(len(c.got)) {
+			t.Errorf("%s: total %v при %d строках", c.name, c.n, len(c.got))
+		}
+		for _, k := range c.in {
+			if !slices.Contains(c.got, k) {
+				t.Errorf("%s: нет %s в %v", c.name, k, c.got)
+			}
+		}
+		for _, k := range c.out {
+			if slices.Contains(c.got, k) {
+				t.Errorf("%s: лишний %s в %v", c.name, k, c.got)
+			}
+		}
+	}
+
+	// Без in_work «в работе» остаётся полем статуса: тот же набор, что у
+	// clab tasks по статусам с ролью; фильтр добавочный.
+	roleOnly, _ := list("terminal=false&has_role=true")
+	if !slices.Contains(roleOnly, liveKid) || slices.Contains(roleOnly, live) {
+		t.Errorf("has_role: %v", roleOnly)
+	}
+	// Три сегмента и снятые вместе дают все задачи проекта: никто не выпал.
+	cancelled, _ := list("category=cancelled")
+	every, total := list("")
+	union := slices.Concat(work, backlog, done, cancelled)
+	slices.Sort(union)
+	slices.Sort(every)
+	if !slices.Equal(union, every) || total != float64(len(every)) {
+		t.Errorf("сегменты не покрывают проект: %v против %v", union, every)
+	}
+	if rec := f.do(http.MethodGet, "/v1/projects/SDLC/tasks?in_work=maybe", f.root, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("in_work=maybe: %d %s", rec.Code, rec.Body)
+	}
+}

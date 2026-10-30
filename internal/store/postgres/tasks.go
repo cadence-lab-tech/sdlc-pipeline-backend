@@ -54,6 +54,13 @@ type ListTasksFilter struct {
 	// этапов. nil — фильтра нет.
 	Terminal *bool
 	HasRole  *bool
+	// «В работе» по данным: статус не конечный и либо у него есть роль, либо
+	// у задачи есть дети в работе или готовые (категории active, waiting,
+	// done). Так эпик, чей статус ролей не имеет, но дети уже идут, попадает в
+	// «В работе», а в «Бэклоге» остаются неначатые. false — все остальные,
+	// включая конечные: «Бэклог» — это terminal=false вместе с in_work=false.
+	// nil — фильтра нет.
+	InWork *bool
 	// Категории статуса (backlog, active, waiting, done, cancelled); пусто —
 	// любые.
 	Categories []string
@@ -72,7 +79,7 @@ type ListTasksFilter struct {
 const TaskListOrderUpdated = "updated"
 
 // listTasksWhere — условие выборки списка, общее для страницы и счёта:
-// `total` обязан считать ровно то, что листается. Параметры $1…$14.
+// `total` обязан считать ровно то, что листается. Параметры $1…$15.
 const listTasksWhere = `
 		WHERE t.project_id = $1
 		  AND ($2 = '' OR ws.key = $2)
@@ -92,7 +99,11 @@ const listTasksWhere = `
 		  AND ($11::boolean IS NULL OR $11 = EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ws.id))
 		  AND (cardinality($12::text[]) = 0 OR ws.category = ANY($12))
 		  AND ($13 = '' OR assignee.handle = $13)
-		  AND (NOT $14 OR t.assignee_id IS NULL)`
+		  AND (NOT $14 OR t.assignee_id IS NULL)
+		  AND ($15::boolean IS NULL OR $15 = (NOT ws.is_terminal AND (
+		        EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ws.id)
+		        OR EXISTS (SELECT 1 FROM tasks kid JOIN workflow_statuses kws ON kws.id = kid.status_id
+		                   WHERE kid.parent_id = t.id AND kws.category IN ('active', 'waiting', 'done')))))`
 
 func listTasksArgs(projectID uuid.UUID, f ListTasksFilter) []any {
 	// Поиск по ссылке идёт без индекса: он всегда внутри проекта, где задач
@@ -106,7 +117,7 @@ func listTasksArgs(projectID uuid.UUID, f ListTasksFilter) []any {
 		cats = []string{}
 	}
 	return []any{projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType,
-		extKey, extSystem, f.Query, f.TopLevel, f.Terminal, f.HasRole, cats, f.Assignee, f.Unassigned}
+		extKey, extSystem, f.Query, f.TopLevel, f.Terminal, f.HasRole, cats, f.Assignee, f.Unassigned, f.InWork}
 }
 
 func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
@@ -122,7 +133,7 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 	args := append(listTasksArgs(projectID, f), limit, offset)
 	rows, err := q.Query(ctx, taskSelect+listTasksWhere+`
 		ORDER BY `+order+`
-		LIMIT $15 OFFSET $16`, args...)
+		LIMIT $16 OFFSET $17`, args...)
 	if err != nil {
 		return nil, translate(err)
 	}

@@ -169,7 +169,7 @@ func (s *Server) getWorkflow(c *gin.Context) {
 // и команда clab tasks. Плагину Claude (CLAB-327) добавлено листание — offset
 // вместе с limit, поиск q по ключу и заголовку, order=updated, top_level и
 // исполнитель (assignee, unassigned) и поля статуса из версии цикла
-// (terminal, has_role, category); в ответе —
+// (terminal, has_role, in_work, category); в ответе —
 // total выборки, у элементов — status_category и child_counts. Всё
 // добавочное: прежние поля и их значения те же.
 func (s *Server) listTasks(c *gin.Context) {
@@ -208,7 +208,7 @@ func (s *Server) listTasks(c *gin.Context) {
 		badRequest(c, s.log, err)
 		return
 	}
-	for name, dst := range map[string]**bool{"terminal": &f.Terminal, "has_role": &f.HasRole} {
+	for name, dst := range map[string]**bool{"terminal": &f.Terminal, "has_role": &f.HasRole, "in_work": &f.InWork} {
 		if raw := c.Query(name); raw != "" {
 			v, err := strconv.ParseBool(raw)
 			if err != nil {
