@@ -16,3 +16,7 @@
 /clab-runner
 /api
 /worker
+
+# Типы, которые Claude кладёт рядом с модом, когда грузит его из этого
+# каталога при разработке (--plugin-dir): не исходник и не вшиваются.
+/clabplugin/.claude-plugin/types/

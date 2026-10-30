@@ -1,0 +1,26 @@
+{
+  "name": "clab-plugin",
+  "version": "0.0.0-dev",
+  "description": "Cadence Lab в Claude: задачи, которые звучат в чате, их статус и обновления личным входом clab",
+  "author": {
+    "name": "Cadence Lab"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "host": {
+      "type": "string",
+      "title": "Адрес инстанса Cadence Lab",
+      "description": "Адрес без /v1. Пусто — как у clab whoami в каталоге сессии"
+    },
+    "project": {
+      "type": "string",
+      "title": "Ключ проекта",
+      "description": "Префикс ключей задач, которые мод ловит в чате. Пусто — как у clab whoami"
+    },
+    "clab": {
+      "type": "string",
+      "title": "Путь к clab",
+      "description": "Пусто — clab из PATH, /opt/homebrew/bin или /usr/local/bin"
+    }
+  }
+}
