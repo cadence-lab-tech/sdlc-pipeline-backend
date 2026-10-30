@@ -48,8 +48,22 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    // Машинная причина из error.details.reason ответа (stage_result_changed).
+    readonly reason: string | null = null,
   ) {
     super(message)
+  }
+}
+
+// Причина 409 сверки: на этапе есть артефакт новее того, что видел человек.
+export const STAGE_CHANGED = 'stage_result_changed'
+
+export function reasonOf(text: string): string | null {
+  try {
+    const r = (JSON.parse(text) as { error?: { details?: { reason?: unknown } } }).error?.details?.reason
+    return typeof r === 'string' ? r : null
+  } catch {
+    return null
   }
 }
 
@@ -75,6 +89,11 @@ export type Session = {
   // Ключ → до какого времени изменения задачи — свои (без тоста).
   quiet: Map<string, number>
   ready: Promise<void>
+  // Решения по гейтам: уровень в проекте по ключу проекта, кто
+  // вошёл (для «от имени»), идёт ли запись — второе нажатие её не повторит.
+  levels: Map<string, Promise<string | null>>
+  principal: string | null
+  writing: boolean
 }
 
 export function newSession(opts: Options): Session {
@@ -94,6 +113,9 @@ export function newSession(opts: Options): Session {
     polledAt: new Map(),
     quiet: new Map(),
     ready: Promise.resolve(),
+    levels: new Map(),
+    principal: null,
+    writing: false,
   }
 }
 
@@ -117,13 +139,14 @@ export function eventKey(ev: unknown): string | null {
 }
 
 // Что ответил clab whoami --json: адрес API и проект каталога, если есть.
-export function whoamiOf(stdout: string): { host: string | null; project: string | null } {
+export function whoamiOf(stdout: string): { host: string | null; project: string | null; principal: string | null } {
   try {
-    const who = JSON.parse(stdout) as { api?: unknown; project?: { key?: unknown } | null }
+    const who = JSON.parse(stdout) as { api?: unknown; project?: { key?: unknown } | null; principal?: unknown }
     const host = typeof who.api === 'string' && who.api ? hostOf(who.api) : null
     const project = who.project && typeof who.project.key === 'string' && who.project.key ? who.project.key : null
-    return { host, project }
+    const principal = typeof who.principal === 'string' && who.principal ? who.principal : null
+    return { host, project, principal }
   } catch {
-    return { host: null, project: null }
+    return { host: null, project: null, principal: null }
   }
 }

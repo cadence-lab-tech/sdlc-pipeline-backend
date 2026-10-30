@@ -183,7 +183,27 @@ func (s *Server) listTasks(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+	// «Ждёт апрува» у каждой строки (CLAB-326): то же правило, что у детей
+	// карточки; гейты считаются только у задач в работе с апрувом на
+	// переходе вперёд.
+	awaiting, err := s.engine.TasksAwaitingApproval(ctx, q, tasks)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	items := make([]taskListItem, 0, len(tasks))
+	for _, t := range tasks {
+		items = append(items, taskListItem{Task: t, AwaitingApproval: awaiting[t.ID]})
+	}
+	c.JSON(http.StatusOK, gin.H{"tasks": items})
+}
+
+// taskListItem — элемент списка задач: задача и признак «ждёт апрува» за её
+// полями. Task встроен, JSON плоский: клиент прошлой версии читает элемент
+// как раньше.
+type taskListItem struct {
+	domain.Task
+	AwaitingApproval bool `json:"awaiting_approval"`
 }
 
 type createTaskRequest struct {
@@ -517,6 +537,10 @@ func (s *Server) executeTransition(c *gin.Context) {
 type decideGateRequest struct {
 	Status  string          `json:"status" binding:"required"`
 	Details json.RawMessage `json:"details"`
+	// Условие сверки (CLAB-326): id последнего артефакта этапа, который видел
+	// решающий, "" — артефактов на этапе не было. Последний другой — 409, и
+	// решение не пишется. Поле необязательное: без него — как раньше.
+	SeenArtifactID *string `json:"seen_artifact_id"`
 }
 
 func (s *Server) decideGate(c *gin.Context) {
@@ -533,9 +557,9 @@ func (s *Server) decideGate(c *gin.Context) {
 		req.Details = json.RawMessage(`{}`)
 	}
 
-	out, err := s.engine.DecideGate(c.Request.Context(),
+	out, err := s.engine.DecideGateSeen(c.Request.Context(),
 		c.Param("taskKey"), c.Param("transitionKey"), c.Param("gateKey"),
-		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details)
+		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details, req.SeenArtifactID)
 	if err != nil {
 		fail(c, s.log, err)
 		return

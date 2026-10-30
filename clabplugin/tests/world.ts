@@ -20,6 +20,9 @@ export type WorldOptions = {
   routes?: (path: string, auth: string | undefined) => Reply | undefined
   // Сетевая ошибка на запросы, путь которых подходит.
   fail?: RegExp
+  // Сервер с записью (CLAB-326): метод, путь после /v1 и тело запроса;
+  // undefined — запрос уходит в routes, как раньше.
+  serve?: (method: string, path: string, body: unknown) => Reply | undefined
   // Где стоят часы в начале теста (мс); по умолчанию 0.
   now?: number
   // Значение ряда theme в /config; undefined — ряда нет.
@@ -30,6 +33,8 @@ export type Journal = {
   argv: string[][]
   envs: Record<string, string>[]
   urls: string[]
+  // Метод каждого запроса к серверу, по порядку urls.
+  methods: string[]
   auths: (string | undefined)[]
   statuses: (string | undefined)[]
   opened: number
@@ -64,7 +69,7 @@ export const task = (key: string, title: string, status: string, workflow = 'wf-
 export const WHOAMI = { principal: 'user:ann', authenticated: true, api: `${HOST}/v1`, project: { key: 'ACME', name: 'Acme' } }
 
 export function world(on: On, opts: WorldOptions = {}) {
-  const j: Journal = { argv: [], envs: [], urls: [], auths: [], statuses: [], opened: 0, commands: [], toasts: [], tools: [], prompts: [], states: [] }
+  const j: Journal = { argv: [], envs: [], urls: [], methods: [], auths: [], statuses: [], opened: 0, commands: [], toasts: [], tools: [], prompts: [], states: [] }
   const tokens = opts.tokens ?? [TOKEN]
   let tokenCalls = 0
   const clock = mock.clock(on, { now: opts.now ?? 0 })
@@ -129,11 +134,13 @@ export function world(on: On, opts: WorldOptions = {}) {
   })
   on('http.fetch', (_, e) => {
     j.urls.push(e.url)
+    j.methods.push(String((e.init as { method?: string } | undefined)?.method ?? 'GET'))
     const auth = e.init?.headers?.Authorization
     j.auths.push(auth)
     const path = e.url.startsWith(`${HOST}/v1`) ? e.url.slice(`${HOST}/v1`.length) : e.url
     if (opts.fail?.test(path)) throw new Error('ECONNREFUSED')
-    const reply = opts.routes?.(path, auth) ?? defaultRoutes(path)
+    const raw = (e.init as { body?: string } | undefined)?.body
+    const reply = opts.serve?.(String((e.init as { method?: string } | undefined)?.method ?? 'GET'), path, raw ? JSON.parse(raw) : undefined) ?? opts.routes?.(path, auth) ?? defaultRoutes(path)
     if (!reply) return { value: { status: 404, ok: false, headers: {}, text: '404 page not found' } }
     const text = reply.text ?? JSON.stringify(reply.body ?? {})
     return { value: { status: reply.status, ok: reply.status >= 200 && reply.status < 300, headers: {}, text } }

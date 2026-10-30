@@ -27,6 +27,9 @@ export const gateWord = (type: string) => GATE_WORD[type] ?? type
 // Тип гейта апрува человека — словарь движка (domain.GateHumanApproval).
 export const HUMAN_APPROVAL = 'human_approval'
 
+// Ручной чек-лист — второй гейт, который закрывает решение человека.
+export const CHECKLIST = 'checklist'
+
 // Обвязка: каждая фраза, которую мод пишет сам. Тест подписей (AC-13) берёт
 // этот список как закрытый: всё, что нарисовано и не входит в него, в
 // словарь гейтов или в данные задачи, — провал.
@@ -67,6 +70,40 @@ export const WORDS = {
   byte: 'Б',
   kb: 'КБ',
   mb: 'МБ',
+  // Решения человека по гейтам. Подписи общие для любого цикла:
+  // имя гейта, перехода и статуса — из версии цикла задачи.
+  approve: 'Апрув',
+  returnWithReason: 'Вернуть с причиной',
+  yesApprove: 'Да, апрув',
+  doReturn: 'Вернуть',
+  cancel: 'Отмена',
+  where: 'Куда',
+  reason: 'Причина',
+  markPassed: 'Отметить пройденным',
+  notPassed: 'Не пройден',
+  mark: 'Отметить…',
+  viewArtifacts: 'Посмотреть артефакты',
+  notWritten: 'Решение не записано',
+  changed: 'результат этапа изменился',
+  lookAgain: 'посмотрите заново',
+  moved: 'задача уже на другом этапе',
+  approved: 'апрув поставлен',
+  recorded: 'Апрув записан',
+  returned: 'возвращена',
+  checkedOff: 'отмечен',
+  rejected: 'Отклонено',
+  inThisChat: 'в этом чате',
+  needMaintainer: 'нужен уровень сопровождающего',
+  transition: 'Переход',
+  confirmApprove: 'Утвердить',
+  andMoveTo: 'и перевести в',
+  onBehalf: 'от имени',
+  journal: 'журнал',
+  returnReason: 'Причина возврата',
+  awaitingMe: 'Ждут меня',
+  nothingAwaits: 'Вашего решения ничего не ждёт',
+  loadingApprovals: 'загружаю «Ждут меня»…',
+  olderServerApprovals: 'сервер старше: «Ждут меня» появятся с его обновлением',
 } as const
 
 // Значки вердикта гейта и состояния. Значки — не слова, но и они закрыты.
@@ -87,4 +124,6 @@ export const GLYPH = {
   bar: '█',
   barEmpty: '░',
   arrow: '→',
+  box: '☐',
+  boxChecked: '☑',
 } as const

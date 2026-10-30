@@ -21,6 +21,76 @@ export type CardGate = { name: string; type: string; status: string; reason: str
 
 export type CardGates = { transition: string; items: CardGate[]; passed: number; total: number }
 
+// Человеческий гейт перехода вперёд, который ждёт решения:
+// плашка в карточке. type — human_approval или checklist (словарь движка);
+// state failed — апрув отклонён, человек может передумать. reason — причина
+// отказа или пояснение сервера («апрувов 0 из 2»). items — пункты чек-листа.
+export type PlateItem = { id: string; text: string; required: boolean; checked: boolean }
+export type Plate = {
+  transition: string
+  transitionName: string
+  toName: string
+  gate: string
+  gateName: string
+  type: string
+  state: 'pending' | 'failed'
+  reason: string | null
+  items: PlateItem[]
+}
+
+// Переход-возврат из текущего статуса: виды артефактов, которых требуют его
+// гейты (их плагин сдаёт с причиной), и гейт, который человеку из плагина не
+// закрыть (held, «имя · причина»), если есть.
+export type ReturnOption = { transition: string; name: string; toName: string; kinds: string[]; held: string | null }
+
+// Что человек видел: статус задачи и последний артефакт этапа ("" — нет).
+export type Seen = { status: string; artifact: string }
+
+// Открытое действие — одно на сессию (R7): подтверждение апрува, форма
+// возврата или чек-листа. Токена здесь нет.
+export type Action = {
+  key: string
+  mode: 'approve' | 'return' | 'checklist'
+  transition: string
+  gate: string
+  seen: Seen
+  // Форма возврата: выбранный переход и причина.
+  target: string | null
+  reason: string
+  // Чек-лист: отмеченные пункты.
+  checked: string[]
+}
+
+// Итог последнего действия по задаче — строка под плашкой.
+export type Outcome = {
+  tone: 'ok' | 'warning' | 'error'
+  text: string
+  // «журнал» — ссылка на карточку в Cadence Lab; «Посмотреть артефакты».
+  journal: boolean
+  artifacts: boolean
+}
+
+// Строка вкладки «Ждут меня»: элемент серверной выборки.
+export type ApprovalRow = {
+  key: string
+  title: string
+  transition: string
+  transitionName: string
+  toName: string
+  gate: string
+  gateName: string
+  type: string
+}
+
+// supported: null — ещё не спрашивали, false — у сервера нет выборки.
+export type ApprovalsState = {
+  supported: boolean | null
+  canDecide: boolean
+  rows: ApprovalRow[]
+  truncated: boolean
+  error: string | null
+}
+
 export type CardArtifact = { title: string; version: number | null; stage: string | null; at: string | null }
 
 export type CardAttachment = { name: string; size: number | null; at: string | null }
@@ -78,6 +148,9 @@ export type CardData = {
   description: string | null
   children: CardChildren | null
   url: string | null
+  plates: Plate[]
+  returns: ReturnOption[]
+  seen: Seen
 }
 
 // Строка задачи во вкладке «Этот чат»: ключ, заголовок и подпись статуса из
@@ -88,6 +161,8 @@ export type TaskRow = {
   title: string
   statusName: string
   awaiting: boolean
+  // Может ли человек решать гейты в проекте задачи (уровень maintainer+).
+  canDecide: boolean
   error: string | null
   fetchedAt: number
   card: CardData | null
@@ -118,6 +193,10 @@ declare module 'claude-code' {
       described: Shaped<string[]>
       // Значение ряда theme из /config: палитра схемы цикла (Svg).
       theme: Shaped<string>
+      // Решения по гейтам: открытое действие, итоги и «Ждут меня».
+      action: Shaped<Action | null>
+      outcomes: Shaped<Record<string, Outcome>>
+      approvals: Shaped<ApprovalsState>
     }
   }
 }

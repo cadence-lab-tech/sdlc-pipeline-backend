@@ -173,6 +173,9 @@ func (s *Server) Handler() http.Handler {
 		// События долгим опросом (CLAB-323, решение 0067 п. 4): кто читает
 		// задачу или проект, читает и их события.
 		v1.GET("/projects/:projectKey/events", viewer, s.projectEvents)
+		// «Ждут меня» (CLAB-326): решать гейты человека — с maintainer, это
+		// ручка отвечает признаком can_decide, а читать — любой участник.
+		v1.GET("/projects/:projectKey/approvals", viewer, s.listApprovals)
 		// Заводить задачи вправе и агент, но только дочерние к той, которую он
 		// держит, и внутри её области — правило исполняет движок (решение 0024).
 		v1.POST("/projects/:projectKey/tasks", agent, s.createTask)
