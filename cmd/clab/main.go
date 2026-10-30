@@ -64,6 +64,7 @@ func commands() []command {
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file] — --artifact только для текста, бинарный файл сдаётся до перехода: clab submit --file", cmdTransition},
 		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
+		{"wait", "дождаться решения по гейту или смены статуса задачи", "clab wait SDLC-42 [--gate human_approval] [--transition <ключ>] [--timeout 8h] [--json] — ждёт долгим опросом, пока гейт (тип или ключ) на переходах из текущего статуса не решён или задача не сменила статус либо прогон; одна строка исхода в конце; коды: 0 passed, 3 returned (с причиной), 4 status_changed, 5 timeout, 1 ошибка, 2 ждать нечего; аренду не продлевает — clab heartbeat SDLC-42 --with-credentials -- clab wait SDLC-42 …; сервер без ручки событий — опрос раз в 15 с", cmdWait},
 		{"search", "поиск по коду, артефактам и документам проекта", "clab search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
 		{"index", "состояние индекса репозиториев", "clab index [--project SDLC]", cmdIndex},
 		{"drift", "открытые расхождения задачи", "clab drift SDLC-42", cmdDrift},

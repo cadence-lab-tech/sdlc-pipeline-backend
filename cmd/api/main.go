@@ -190,9 +190,10 @@ func run() error {
 		log.Info("MCP-сервер поднят", "path", "/mcp/projects/{PROJECT}")
 	}
 
-	handler := httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).
+	api := httpapi.NewServer(cfg, log, store, engine, authoring, auth, mcpServer).
 		WithVersion(version).WithMetrics(apiMetrics).
-		WithTracing(traces.Provider()).Handler()
+		WithTracing(traces.Provider())
+	handler := api.Handler()
 	logRequestLimits(log, cfg)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -202,6 +203,9 @@ func run() error {
 		WriteTimeout:      cfg.RequestTimeout,
 		IdleTimeout:       120 * time.Second,
 	}
+	// Долгий опрос событий (CLAB-323) остановку не держит: ожидающие
+	// отвечают сразу пустым списком, клиент переподключится к другой реплике.
+	srv.RegisterOnShutdown(api.StopWaiting)
 
 	errc := make(chan error, 1)
 	go func() {

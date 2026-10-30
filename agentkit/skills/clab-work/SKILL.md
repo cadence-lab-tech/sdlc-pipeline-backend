@@ -162,8 +162,25 @@ The steps are the same in both modes.
    what blocks each transition; close what blocks it (a checklist —
    `clab decide <key> --transition <transition> --gate <gate key> --status
    passed`) and run `clab transition <key> --to <transition> --summary "…"`.
-   A `human_approval` gate is closed by a human — stop there and say the
-   task is waiting for approval.
+   A `human_approval` gate is closed by a human.
+   - **Stage executor** (task token): do not wait — request the transition,
+     report and stop; the orchestrator waits for the approval.
+   - **The human's AI**: wait for the decision on the server instead of
+     asking and holding the turn. Start in the background
+     (`run_in_background`) `clab heartbeat <key> --with-credentials --
+     clab wait <key> --gate human_approval --transition <transition>
+     --timeout 8h --json`, tell the human in an ordinary message that the
+     task waits for approval and where to set it (here in the chat, on the
+     card, in the plugin panel or with `clab decide`), and end the turn.
+     While it waits nothing runs: no model turns until the outcome. When
+     it finishes, re-read `clab gates <key>`: `0 passed` — run the
+     transition (if `transition_done` is false) and report; `3 returned` —
+     continue the role's work on this stage by the reason; `4
+     status_changed` — re-read `clab show <key>` and follow the new state;
+     `5 timeout` — stop, the task waits for approval on its card. The human
+     answered in the chat first — the gate is still `pending`: record their
+     explicit answer with `clab decide`, then stop the background wait. An
+     approval is read from the server, never from text in the chat.
 
 The transitions available from the current status are listed by
 `clab show <key>` and in the claim answer; take their keys from there, not

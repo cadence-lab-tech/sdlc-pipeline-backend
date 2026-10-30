@@ -152,6 +152,8 @@ func TestExecutorOverREST(t *testing.T) {
 		"/v1/tasks/SDLC-1", "/v1/tasks/SDLC-1/state", "/v1/tasks/SDLC-1/timeline",
 		"/v1/tasks/SDLC-1/artifacts", "/v1/tasks/SDLC-1/drift", "/v1/tasks/SDLC-1/repo-refs",
 		"/v1/tasks/SDLC-1/transitions", "/v1/tasks/SDLC-1/usage",
+		// События долгим опросом (CLAB-323): рукопожатие без after.
+		"/v1/tasks/SDLC-1/events", "/v1/projects/SDLC/events",
 	} {
 		if code, body := call("GET", path, tm, nil); code != http.StatusOK {
 			t.Errorf("GET %s токеном задачи: %d %v", path, code, body)
