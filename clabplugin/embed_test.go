@@ -122,6 +122,32 @@ func TestNoCycleVocabulary(t *testing.T) {
 	}
 }
 
+// CLAB-324, AC-17: $ — только в hooks/register.tsx. Движок модов прослеживает
+// $ внутри одного файла, поэтому остальные модули мода — чистые функции,
+// которые строят модель вида; register.tsx превращает её в дерево.
+func TestOnlyRegisterCallsEngine(t *testing.T) {
+	files, err := Files("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`\$\.`)
+	seen := 0
+	for _, f := range files {
+		if !strings.HasPrefix(f.Path, "hooks/") || f.Path == "hooks/register.tsx" || !strings.HasSuffix(f.Path, ".ts") {
+			continue
+		}
+		seen++
+		for i, line := range strings.Split(string(f.Content), "\n") {
+			if re.MatchString(line) {
+				t.Errorf("%s:%d: $ вне register.tsx: %s", f.Path, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	if seen < 5 {
+		t.Fatalf("проверено модулей %d: каталог hooks не тот, что ожидался", seen)
+	}
+}
+
 // AC-9: claude plugin validate --strict и claude plugin test по исходному
 // каталогу. В CI claude нет (В-1: его установка — отдельная задача), там
 // проверка пропускается; на машине разработчика и тестировщика она идёт с
