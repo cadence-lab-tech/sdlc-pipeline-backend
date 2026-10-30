@@ -267,7 +267,8 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 		if err := e.store.FinishStageRun(ctx, tx, run.ID, runState, outcome); err != nil {
 			return err
 		}
-		if err := e.store.SetTaskStatus(ctx, tx, task.ID, toStatus.ID, toStatus.IsTerminal); err != nil {
+		updatedAt, closedAt, err := e.store.SetTaskStatus(ctx, tx, task.ID, toStatus.ID, toStatus.IsTerminal)
+		if err != nil {
 			return err
 		}
 
@@ -317,6 +318,7 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 		task.StatusID = toStatus.ID
 		task.StatusKey = toStatus.Key
 		task.StatusName = toStatus.Name
+		task.UpdatedAt, task.ClosedAt = updatedAt, closedAt
 		res.Task = task
 		return nil
 	})
