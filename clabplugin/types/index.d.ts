@@ -95,6 +95,52 @@ export type TaskRow = {
 
 export type Tab = 'chat' | 'approvals' | 'tasks'
 
+// Вкладка «Задачи» (CLAB-327). Сегменты делит данные цикла: «в работе» — не
+// конечные статусы с ролью, «можно забрать» — очередь проекта, «бэклог» — не
+// конечные без роли, «готово» — конечные категории done.
+export type Segment = 'work' | 'queue' | 'backlog' | 'done'
+
+// Выбор человека на вкладке: сегмент, тип (из циклов проекта), исполнитель
+// ('' — любой, '-' — без исполнителя), поиск, страница с нуля и эпики, у
+// которых раскрыты все дети. Токена здесь нет.
+export type TasksView = { segment: Segment; type: string; assignee: string; q: string; page: number; more: string[] }
+
+export type ListKid = { key: string; title: string; statusName: string; state: ChildState; awaiting: boolean }
+
+// Строка списка. nested есть у задачи с детьми: полоса по категориям детей и
+// первые дети; all — все дети, включая отменённых; partial — не все дети
+// загружены.
+export type ListRow = {
+  key: string
+  title: string
+  type: string | null
+  statusName: string
+  state: ChildState
+  awaiting: boolean
+  holder: string | null
+  assignee: string | null
+  updatedAt: string | null
+  nested: { progress: ChildProgress; kids: ListKid[]; all: number; partial: boolean } | null
+}
+
+// Что вкладка знает о выборке. mode: paged — сервер листает, legacy — сервер
+// прошлого выпуска (выборка целиком, сегменты по версиям циклов), null — ещё
+// не спрашивали. counts: null — счёт неизвестен. truncated — выборка прошлого
+// сервера обрезана лимитом.
+export type TasksData = {
+  loaded: boolean
+  error: string | null
+  mode: 'paged' | 'legacy' | null
+  types: string[]
+  handles: string[]
+  counts: Record<Segment, number | null>
+  rows: ListRow[]
+  total: number
+  truncated: boolean
+  // Есть ли у сервера признак «ждёт апрува» (его вводит CLAB-326).
+  approvals: boolean
+}
+
 // Что мод знает об инстансе: адрес и проект (clab whoami или настройки
 // плагина), версия сервера из /v1/instance и есть ли у него ручка событий
 // проекта (null — ещё не спрашивали). error — почему данные не обновляются.
@@ -118,6 +164,8 @@ declare module 'claude-code' {
       described: Shaped<string[]>
       // Значение ряда theme из /config: палитра схемы цикла (Svg).
       theme: Shaped<string>
+      tasksView: Shaped<TasksView>
+      tasksData: Shaped<TasksData>
     }
   }
 }

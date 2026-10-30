@@ -89,7 +89,7 @@ test('панель: пустое состояние, три вкладки, ко
     expect(await ui.find({ type: 'Text', text: /ACME-1 Первая · Проектирование/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /сервер v9\.9\.9/ })).toBeDefined()
     await ui.press({ key: 'tab-tasks' })
-    expect(await ui.find({ type: 'Text', text: /список задач проекта/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: /В работе/ })).toBeDefined()
     await ui.press({ key: 'tab-approvals' })
     expect(await ui.find({ type: 'Text', text: /ждут вашего решения/ })).toBeDefined()
     await ui.press({ key: 'tab-chat' })
@@ -99,7 +99,7 @@ test('панель: пустое состояние, три вкладки, ко
 
   await run($, 'tasks')
   const onDesktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await onDesktop.find({ type: 'Text', text: /список задач проекта/ })).toBeDefined()
+  expect(await onDesktop.find({ type: 'Button', text: /В работе/ })).toBeDefined()
   await onDesktop.unmount()
   await run($, 'approvals')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })

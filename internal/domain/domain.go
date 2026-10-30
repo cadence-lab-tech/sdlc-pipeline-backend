@@ -480,6 +480,19 @@ type ChildTask struct {
 	BlockedBy []string `json:"blocked_by"`
 }
 
+// TaskListItem — элемент списка задач проекта (CLAB-327): та же задача и два
+// поля поверх неё, чтобы клиент рисовал сегменты и прогресс эпика без запроса
+// на каждую задачу и без чтения версии цикла каждой. Task встроен: JSON
+// плоский, поля задачи идут первыми в прежнем порядке — клиент прошлой
+// версии читает ответ как раньше.
+type TaskListItem struct {
+	Task
+	// Категория статуса задачи (backlog, active, waiting, done, cancelled).
+	StatusCategory string `json:"status_category"`
+	// Дети по категории их статуса; у задачи без детей поля нет.
+	ChildCounts map[string]int `json:"child_counts,omitempty"`
+}
+
 // DefaultTaskType — тип задачи, если она его не называет. Набор типов
 // задаёт проект (task_property_defs.type), но какой-то тип у задачи есть
 // всегда: по нему выбирается цикл.
