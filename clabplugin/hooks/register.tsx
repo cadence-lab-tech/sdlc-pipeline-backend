@@ -19,7 +19,8 @@ import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
 import { cycleLine } from './term'
 import { cycleAlt, cycleSvg } from './svg'
-import { schemeOf } from './theme'
+import { schemeOf, tintOf } from './theme'
+import type { Scheme, Tone } from './theme'
 import { CHECKLIST, GLYPH, gateWord, HUMAN_APPROVAL, WORDS } from './vocab'
 import {
   ApiError,
@@ -65,7 +66,7 @@ const COMMAND = 'clab-plugin'
 // Значения сессии, которые читает панель. Учётных данных среди них нет.
 export const keysAtom = atom({ plugin: 'clab-plugin', key: 'keys' } as const, [] as string[], { shape: 'keys-1' })
 export const rowsAtom = atom({ plugin: 'clab-plugin', key: 'rows' } as const, {} as Record<string, TaskRow>, {
-  shape: 'rows-3',
+  shape: 'rows-4',
 })
 export const openAtom = atom({ plugin: 'clab-plugin', key: 'open' } as const, [] as string[], { shape: 'open-1' })
 export const describedAtom = atom({ plugin: 'clab-plugin', key: 'described' } as const, [] as string[], { shape: 'described-1' })
@@ -85,8 +86,8 @@ export const outcomesAtom = atom({ plugin: 'clab-plugin', key: 'outcomes' } as c
 })
 export const approvalsAtom = atom(
   { plugin: 'clab-plugin', key: 'approvals' } as const,
-  { supported: null, canDecide: false, rows: [], truncated: false, error: null } as ApprovalsState,
-  { shape: 'approvals-1' },
+  { supported: null, canDecide: false, rows: [], truncated: false, error: null, loadedAt: null } as ApprovalsState,
+  { shape: 'approvals-2' },
 )
 
 const TABS: { id: Tab; label: string }[] = [
@@ -330,12 +331,14 @@ async function loadApprovals($: $T, s: Session) {
       s,
       `/projects/${encodeURIComponent(s.project)}/approvals`,
     )
+    const loadedAt = await $.clock.now()
     await update($, approvalsAtom, () => ({
       supported: true,
       canDecide: r.can_decide === true,
       rows: approvalRowsOf(r.approvals),
       truncated: r.truncated === true,
       error: null,
+      loadedAt,
     }))
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
@@ -982,6 +985,12 @@ function childrenTree($: $T, els: Els, ch: NonNullable<CardData['children']>) {
 // Плашки «ждёт вашего решения» в карточке, формы действий и итог последнего
 // действия. Кнопок нет у участника ниже maintainer; на mobile нет
 // полей ввода — вместо действий ссылка в веб-интерфейс.
+//
+// Каждое состояние — блок (макет 04): плашка и подтверждение — заливка
+// warning, отклонённое и «Решение не записано» — error, «записан, но переход
+// держит» — нейтральная, формы и итог апрува — рамка. Заливка — свой цвет под
+// явную тему Claude (tintOf); при теме auto её нет, и блок держит рамка цвета
+// тона.
 type Decide = {
   surface: string
   canDecide: boolean
@@ -991,7 +1000,24 @@ type Decide = {
   // Цифры 1 и 2 в терминале — у первой плашки панели: две одинаковые
   // цифры перебивали бы друг друга.
   hotkeys: { used: boolean }
+  scheme: Scheme
+  now: number
 }
+
+// Блок состояния: рамка всегда, заливка — по тону и явной теме.
+function block(els: Els, key: string, tone: Tone | null, scheme: Scheme, children: unknown) {
+  const { Box } = els
+  const fill = tone ? tintOf(scheme, tone) : undefined
+  const edge = tone && tone !== 'neutral' ? tone : undefined
+  return (
+    <Box key={key} flexDirection="column" borderStyle="round" borderColor={edge} borderDimColor={!edge} backgroundColor={fill} paddingX={1}>
+      {children}
+    </Box>
+  )
+}
+
+// Заголовок на заливке — цветом текста темы; без заливки — цветом тона.
+const headColor = (scheme: Scheme, tone: Tone) => (tintOf(scheme, tone) ? undefined : tone)
 
 function decideTree($: $T, els: Els, c: CardData, d: Decide) {
   const { Box } = els
@@ -999,7 +1025,7 @@ function decideTree($: $T, els: Els, c: CardData, d: Decide) {
   return (
     <Box flexDirection="column" gap={1} key={`plates-${c.key}`}>
       {c.plates.map(p => plateTree($, els, c, p, d))}
-      {d.outcome ? outcomeTree(els, c, d.outcome) : null}
+      {d.outcome ? outcomeTree(els, c, d.outcome, d) : null}
     </Box>
   )
 }
@@ -1008,16 +1034,26 @@ function plateTree($: $T, els: Els, c: CardData, p: Plate, d: Decide) {
   const { Box, Text, Button, Link } = els
   const id = `${c.key}-${p.transition}-${p.gate}`
   const open = d.action && d.action.key === c.key && d.action.transition === p.transition && d.action.gate === p.gate ? d.action : null
-  const chips = c.artifacts.filter(a => a.stage === null)
   const mobile = d.surface === 'mobile' || !els.Input || !els.Select
   const hot = d.surface === 'terminal' && !d.hotkeys.used
   if (hot && d.canDecide && !mobile) d.hotkeys.used = true
 
+  // Второе состояние того же блока: подтверждение, форма возврата или
+  // чек-листа стоят на месте плашки.
+  if (d.canDecide && open && !mobile) {
+    if (open.mode === 'approve') return confirmTree($, els, c, p, d, hot)
+    if (open.mode === 'return') return returnTree($, els, c, open, d)
+    return checklistTree($, els, c, p, open, d)
+  }
+
+  const checklist = p.type === CHECKLIST
+  const failed = p.state === 'failed'
+  const tone: Tone | null = failed ? 'error' : checklist ? null : 'warning'
+  const age = p.state === 'pending' ? ago(p.since, d.now) : null
+
   let actions = null
   if (mobile) {
     actions = c.url ? <Link key={`plate-lab-${id}`} href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null
-  } else if (d.canDecide && open) {
-    actions = open.mode === 'approve' ? confirmTree($, els, c, p, d) : open.mode === 'return' ? returnTree($, els, c, open) : checklistTree($, els, c, p, open)
   } else if (d.canDecide) {
     actions =
       p.type === HUMAN_APPROVAL ? (
@@ -1040,90 +1076,148 @@ function plateTree($: $T, els: Els, c: CardData, p: Plate, d: Decide) {
       )
   }
 
-  return (
-    <Box flexDirection="column" key={`plate-${id}`}>
-      {p.state === 'failed' ? (
-        <Text color="error" wrap="wrap">
-          {GLYPH.fail} {WORDS.rejected} · {p.gateName}
-          {p.reason ? ` · ${p.reason}` : ''}
-        </Text>
-      ) : (
-        <Text color="warning" wrap="wrap">
-          {GLYPH.approval} {cap(WORDS.awaitingYou)} · {p.gateName}
-        </Text>
-      )}
-      <Text dimColor wrap="wrap">
-        {WORDS.transition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
-        {p.state === 'pending' && p.reason ? ` · ${p.reason}` : ''}
+  const head = failed ? (
+    <Text color={headColor(d.scheme, 'error') ?? undefined} bold wrap="wrap">
+      {GLYPH.fail} {WORDS.rejected} · {p.gateName}
+      {p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  ) : checklist ? (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Text bold wrap="wrap">
+        {GLYPH.open} {p.gateName}
       </Text>
-      {chips.length > 0 ? (
-        <Box flexDirection="row" gap={2} flexWrap="wrap">
-          {chips.map((a, i) =>
-            c.url ? (
-              <Link key={`chip-${id}-${i}`} href={c.url} label={`${GLYPH.artifact} ${a.title}`} />
-            ) : (
-              <Text key={`chip-${id}-${i}`} dimColor>
-                {GLYPH.artifact} {a.title}
-              </Text>
-            ),
-          )}
-        </Box>
-      ) : null}
-      {actions}
+      <Text dimColor>{gateWord(p.type)}</Text>
     </Box>
+  ) : (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text color={headColor(d.scheme, 'warning')} bold wrap="wrap">
+          {cap(WORDS.awaitingYou)} · {p.gateName}
+        </Text>
+      </Box>
+      {age ? <Text dimColor>{age}</Text> : null}
+    </Box>
+  )
+
+  const where = checklist ? (
+    <Text dimColor wrap="wrap">
+      {WORDS.beforeTransition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      {p.state === 'pending' && p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  ) : (
+    <Text dimColor wrap="wrap">
+      {WORDS.transition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      {p.state === 'pending' && p.reason ? ` · ${p.reason}` : ''}
+    </Text>
+  )
+
+  const others =
+    p.others.length > 0 && !failed ? (
+      <Text dimColor wrap="wrap">
+        {WORDS.othersPassed}: {p.others.map(o => `${o} ${GLYPH.ok}`).join(' · ')}
+      </Text>
+    ) : null
+
+  // Чипы — артефакты этапа по виду; до просмотра в самом плагине ведут в
+  // карточку веб-интерфейса.
+  const chips =
+    c.stageChips.length > 0 ? (
+      <Box flexDirection="row" gap={2} flexWrap="wrap">
+        {c.stageChips.map(a =>
+          c.url ? (
+            <Link key={`chip-${id}-${a.kind}`} href={c.url} label={`${a.title} ${GLYPH.chip}`} />
+          ) : (
+            <Text key={`chip-${id}-${a.kind}`} dimColor>
+              {a.title}
+            </Text>
+          ),
+        )}
+      </Box>
+    ) : null
+
+  return block(
+    els,
+    `plate-${id}`,
+    tone,
+    d.scheme,
+    <Box flexDirection="column">
+      {head}
+      {where}
+      {others}
+      {chips}
+      {actions}
+    </Box>,
   )
 }
 
-function confirmTree($: $T, els: Els, c: CardData, p: Plate, d: Decide) {
+function confirmTree($: $T, els: Els, c: CardData, p: Plate, d: Decide, hot: boolean) {
   const { Box, Text, Button } = els
-  return (
-    <Box flexDirection="column" key={`confirm-${c.key}`}>
-      <Text bold wrap="wrap">
+  const who = d.principal ? ` (${d.principal})` : ''
+  return block(
+    els,
+    `confirm-${c.key}`,
+    'warning',
+    d.scheme,
+    <Box flexDirection="column">
+      <Text color={headColor(d.scheme, 'warning')} bold wrap="wrap">
         {WORDS.confirmApprove} {c.key} {WORDS.andMoveTo} {p.toName}?
       </Text>
       <Text dimColor wrap="wrap">
-        {p.gateName} · {WORDS.transition} «{p.transitionName}»{d.principal ? ` · ${WORDS.onBehalf} ${d.principal}` : ''}
+        {WORDS.gate} «{p.gateName}» · {WORDS.transitionLower} «{p.transitionName}». {WORDS.writtenAs}
+        {who}. {WORDS.agentLearns}
       </Text>
       <Box flexDirection="row" gap={1}>
-        <Button key={`yes-${c.key}`} variant="primary" autoFocus onPress={() => void confirmApprove($)}>
-          {WORDS.yesApprove}
+        <Button key={`yes-${c.key}`} variant="primary" autoFocus hotkey={hot ? '1' : undefined} onPress={() => void confirmApprove($)}>
+          {WORDS.yesApprove} <Text dimColor>{GLYPH.enter}</Text>
         </Button>
-        <Button key={`cancel-${c.key}`} onPress={() => void cancelAction($)}>
+        <Button key={`cancel-${c.key}`} hotkey={hot ? '2' : undefined} onPress={() => void cancelAction($)}>
           {WORDS.cancel}
         </Button>
       </Box>
-    </Box>
+    </Box>,
   )
 }
 
-function returnTree($: $T, els: Els, c: CardData, a: Action) {
+function returnTree($: $T, els: Els, c: CardData, a: Action, d: Decide) {
   const { Box, Text, Button, Input, Select } = els
   const option = c.returns.find(o => o.transition === a.target) ?? null
   const ready = !!option && !option.held && a.reason.trim() !== ''
-  return (
-    <Box flexDirection="column" key={`return-form-${c.key}`}>
+  return block(
+    els,
+    `return-form-${c.key}`,
+    null,
+    d.scheme,
+    <Box flexDirection="column">
+      <Text bold>
+        {WORDS.returnTitle} {c.key}
+      </Text>
       <Select
         key={`target-${c.key}`}
-        label={WORDS.where}
+        label={WORDS.whereHint}
         options={c.returns.map(o => ({ value: o.transition, label: `${o.name} ${GLYPH.arrow} ${o.toName}` }))}
         value={a.target ?? undefined}
         onSelect={(v: string) => void setTarget($, v)}
       />
       <Input
         key={`reason-${c.key}`}
-        label={WORDS.reason}
+        label={WORDS.reasonHint}
         placeholder={WORDS.reason}
         value={a.reason}
         autoFocus
         onInput={(v: string) => void setReason($, v)}
         onSubmit={(v: string) => void setReason($, v)}
       />
+      {option && option.kinds.length > 0 ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.withReturn} {option.kinds.map(k => `«${k}»`).join(', ')} {WORDS.withReturnTail}
+        </Text>
+      ) : null}
       {option?.held ? (
         <Text color="error" wrap="wrap">
           {cap(WORDS.holds)}: {option.held}
         </Text>
       ) : null}
-      <Box flexDirection="row" gap={1}>
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
         {ready ? (
           <Button key={`do-return-${c.key}`} variant="primary" onPress={() => void confirmReturn($)}>
             {WORDS.doReturn}
@@ -1134,17 +1228,32 @@ function returnTree($: $T, els: Els, c: CardData, a: Action) {
         <Button key={`cancel-${c.key}`} onPress={() => void cancelAction($)}>
           {WORDS.cancel}
         </Button>
+        <Text dimColor>{WORDS.returnPlan}</Text>
       </Box>
-    </Box>
+    </Box>,
   )
 }
 
-function checklistTree($: $T, els: Els, c: CardData, p: Plate, a: Action) {
+function checklistTree($: $T, els: Els, c: CardData, p: Plate, a: Action, d: Decide) {
   const { Box, Text, Button, Input } = els
   const canPass = requiredChecked(p.items, a.checked)
   const canFail = a.reason.trim() !== ''
-  return (
-    <Box flexDirection="column" key={`checklist-${c.key}`}>
+  return block(
+    els,
+    `checklist-${c.key}`,
+    null,
+    d.scheme,
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text bold wrap="wrap">
+          <Text dimColor>{c.key} </Text>
+          {p.gateName}
+        </Text>
+        <Text dimColor>{gateWord(p.type)}</Text>
+      </Box>
+      <Text dimColor wrap="wrap">
+        {WORDS.beforeTransition} «{p.transitionName}» {GLYPH.arrow} {p.toName}
+      </Text>
       {p.items.map(it => (
         <Button key={`item-${c.key}-${it.id}`} plain onPress={() => void toggleItem($, it.id)}>
           {a.checked.includes(it.id) ? GLYPH.boxChecked : GLYPH.box} {it.text}
@@ -1177,22 +1286,50 @@ function checklistTree($: $T, els: Els, c: CardData, p: Plate, a: Action) {
           {WORDS.cancel}
         </Button>
       </Box>
-    </Box>
+      {canPass ? null : <Text dimColor>{WORDS.checkRequired}</Text>}
+      <Text dimColor wrap="wrap">
+        {WORDS.notPassedHint}
+      </Text>
+    </Box>,
   )
 }
 
 const TONE = { ok: 'success', warning: 'warning', error: 'error' } as const
 
-function outcomeTree(els: Els, c: CardData, o: Outcome) {
+// Итог: апрув поставлен — рамка; записан, но переход держит — нейтральная
+// заливка; не записано — заливка error.
+function outcomeTree(els: Els, c: CardData, o: Outcome, d: Decide) {
   const { Box, Text, Link } = els
-  return (
-    <Box flexDirection="row" gap={1} flexWrap="wrap" key={`outcome-${c.key}`}>
-      <Text color={TONE[o.tone]} wrap="wrap">
+  const tone: Tone | null = o.tone === 'error' ? 'error' : o.tone === 'warning' ? (o.artifacts ? 'error' : 'neutral') : null
+  const color = tone && tintOf(d.scheme, tone) ? undefined : TONE[o.tone]
+  return block(
+    els,
+    `outcome-${c.key}`,
+    tone,
+    d.scheme,
+    <Box flexDirection="column">
+      <Text color={color ?? TONE[o.tone]} bold={o.artifacts} wrap="wrap">
         {o.text}
       </Text>
-      {o.journal && c.url ? <Link key={`journal-${c.key}`} href={c.url} label={`${WORDS.journal} ${GLYPH.link}`} /> : null}
+      {o.artifacts ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.staleHint}
+        </Text>
+      ) : null}
+      {o.journal && o.tone === 'warning' && o.text.startsWith(WORDS.recorded) ? (
+        <Text dimColor wrap="wrap">
+          {WORDS.heldHint}
+        </Text>
+      ) : null}
+      {o.journal ? (
+        <Box flexDirection="row" flexWrap="wrap">
+          <Text dimColor>{WORDS.underYourName} · </Text>
+          {c.url ? <Link key={`journal-${c.key}`} href={c.url} label={`${WORDS.journal} ${GLYPH.link}`} /> : <Text dimColor>{WORDS.journal}</Text>}
+          <Text dimColor>. {WORDS.silentChat}</Text>
+        </Box>
+      ) : null}
       {o.artifacts && c.url ? <Link key={`artifacts-${c.key}`} href={c.url} label={`${WORDS.viewArtifacts} ${GLYPH.link}`} /> : null}
-    </Box>
+    </Box>,
   )
 }
 
@@ -1278,11 +1415,21 @@ export const register: Register = (on, options) => {
     if (!key || !row) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const gate = row.card?.approvalGate
+    // Макет 06: полоса — рамка и заливка warning; в терминале — без рамки,
+    // полоса там в одну строку.
+    const framed = e.surface !== 'terminal'
+    const scheme = schemeOf(await read($, themeAtom))
     // «Апрув» в полосе — только у того, кто вправе решать, и не на mobile:
     // нажатие раскрывает карточку с тем же подтверждением.
     const plate = row.canDecide && e.surface !== 'mobile' ? row.card?.plates.find(p => p.type === HUMAN_APPROVAL && p.state === 'pending') : undefined
     return (
-      <Box flexDirection="row" gap={1}>
+      <Box
+        flexDirection="row"
+        gap={1}
+        borderStyle={framed ? 'round' : undefined}
+        borderColor={framed ? 'warning' : undefined}
+        backgroundColor={framed ? tintOf(scheme, 'warning') : undefined}
+        paddingX={framed ? 1 : 0}>
         <Text color="warning">{GLYPH.approval}</Text>
         <Box flexGrow={1} flexShrink={1}>
           <Text wrap="truncate-end">
@@ -1378,7 +1525,7 @@ export const register: Register = (on, options) => {
                       scheme,
                       now,
                       described: described.includes(key),
-                      decide: { surface: e.surface, canDecide: row.canDecide, action, outcome: outcomes[key], principal, hotkeys },
+                      decide: { surface: e.surface, canDecide: row.canDecide, action, outcome: outcomes[key], principal, hotkeys, scheme, now },
                     })
                   : null}
               </Box>
@@ -1399,6 +1546,9 @@ export const register: Register = (on, options) => {
     // «Ждут меня»: ровно ответ серверной выборки. Действие из
     // строки раскрывает карточку задачи с тем же подтверждением.
     const projectUrl = conn.host && conn.project ? `${conn.host}/p/${encodeURIComponent(conn.project)}` : null
+    // Подвал «Ждут меня»: чем и когда выборка перечитана последний раз.
+    const loaded = appr.loadedAt !== null ? ago(new Date(appr.loadedAt).toISOString(), now) : null
+    const updated = loaded ? `${conn.events === true ? WORDS.updatedByEvent : WORDS.updatedByPoll} · ${loaded}` : null
     const approvals =
       appr.supported === false ? (
         <Text dimColor>{WORDS.olderServerApprovals}</Text>
@@ -1412,22 +1562,37 @@ export const register: Register = (on, options) => {
         <Text dimColor>{WORDS.nothingAwaits}</Text>
       ) : (
         <Box flexDirection="column" gap={1}>
+          <Text dimColor wrap="wrap">
+            {WORDS.approvalsIntro}
+          </Text>
           {appr.rows.map(r => {
             const id = `${r.key}-${r.transition}-${r.gate}`
+            const checklist = r.type === CHECKLIST
             return (
-              <Box flexDirection="column" key={`appr-${id}`}>
-                <Text wrap="truncate-end">
-                  <Text dimColor>{r.key} </Text>
-                  {r.title}
-                </Text>
-                <Text color="warning" wrap="wrap">
-                  {GLYPH.approval} {r.gateName} · «{r.transitionName}» {GLYPH.arrow} {r.toName}
-                  {keys.includes(r.key) ? <Text dimColor> · {WORDS.inThisChat}</Text> : ''}
+              <Box key={`appr-${id}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+                <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="truncate-end">
+                      <Text color="warning">{GLYPH.current} </Text>
+                      <Text dimColor>{r.key} </Text>
+                      {r.title}
+                    </Text>
+                  </Box>
+                  {keys.includes(r.key) ? <Text color="claude">{WORDS.inThisChat}</Text> : null}
+                </Box>
+                <Text wrap="wrap">
+                  <Text color="warning" backgroundColor={tintOf(scheme, 'warning')}>
+                    {checklist ? GLYPH.open : GLYPH.approval} {r.gateName}
+                  </Text>
+                  <Text dimColor>
+                    {' '}
+                    {r.transitionName} {GLYPH.arrow} {r.toName}
+                  </Text>
                 </Text>
                 <Box flexDirection="row" gap={1}>
                   {e.surface !== 'mobile' ? (
                     <Button key={`appr-act-${id}`} variant="primary" onPress={() => void openAction($, r.key, r.transition, r.gate)}>
-                      {r.type === CHECKLIST ? WORDS.mark : WORDS.approve}
+                      {checklist ? WORDS.mark : WORDS.approve}
                     </Button>
                   ) : null}
                   <Button key={`appr-open-${id}`} onPress={() => void openCard($, r.key)}>
@@ -1438,6 +1603,7 @@ export const register: Register = (on, options) => {
             )
           })}
           {appr.truncated && projectUrl ? <Link key="appr-more" href={projectUrl} label={`${WORDS.more}… ${GLYPH.link}`} /> : null}
+          {updated ? <Text dimColor>{updated}</Text> : null}
         </Box>
       )
 

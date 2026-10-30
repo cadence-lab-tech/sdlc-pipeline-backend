@@ -23,8 +23,11 @@ export type CardGates = { transition: string; items: CardGate[]; passed: number;
 
 // Человеческий гейт перехода вперёд, который ждёт решения:
 // плашка в карточке. type — human_approval или checklist (словарь движка);
-// state failed — апрув отклонён, человек может передумать. reason — причина
-// отказа или пояснение сервера («апрувов 0 из 2»). items — пункты чек-листа.
+// state failed — апрув или чек-лист отклонён, человек может передумать.
+// reason — причина отказа или пояснение сервера («апрувов 0 из 2»). items —
+// пункты чек-листа. since — с какого момента решение ждёт: последняя сдача на
+// этапе, без сдач — начало прогона. others — остальные блокирующие гейты
+// перехода, уже пройденные (подписи из версии цикла).
 export type PlateItem = { id: string; text: string; required: boolean; checked: boolean }
 export type Plate = {
   transition: string
@@ -36,7 +39,12 @@ export type Plate = {
   state: 'pending' | 'failed'
   reason: string | null
   items: PlateItem[]
+  since: string | null
+  others: string[]
 }
+
+// Артефакт текущего этапа — чип плашки: по одному на вид, последняя версия.
+export type StageChip = { kind: string; title: string; version: number | null }
 
 // Переход-возврат из текущего статуса: виды артефактов, которых требуют его
 // гейты (их плагин сдаёт с причиной), и гейт, который человеку из плагина не
@@ -83,12 +91,14 @@ export type ApprovalRow = {
 }
 
 // supported: null — ещё не спрашивали, false — у сервера нет выборки.
+// loadedAt — когда выборка прочитана (часы сессии, мс); null — ещё не читали.
 export type ApprovalsState = {
   supported: boolean | null
   canDecide: boolean
   rows: ApprovalRow[]
   truncated: boolean
   error: string | null
+  loadedAt: number | null
 }
 
 export type CardArtifact = { title: string; version: number | null; stage: string | null; at: string | null }
@@ -151,6 +161,7 @@ export type CardData = {
   plates: Plate[]
   returns: ReturnOption[]
   seen: Seen
+  stageChips: StageChip[]
 }
 
 // Строка задачи во вкладке «Этот чат»: ключ, заголовок и подпись статуса из

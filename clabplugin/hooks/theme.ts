@@ -42,6 +42,23 @@ export const DARK: Palette = {
 
 export type Scheme = 'light' | 'dark' | 'auto'
 
+// Заливки блоков панели (макеты 04, 06): плашка и подтверждение — warning,
+// «Решение не записано» — error, «записан, но переход держит» — нейтральная.
+// У ключей темы Claude заливок нет — только насыщенные цвета текста, поверх
+// которых текст не читается, поэтому заливка — свой цвет под явную тему.
+// Тема auto (не знаем, светлая или тёмная) — без заливки: блок рисуется рамкой
+// ключа темы, а текст — цветом тона.
+export type Tone = 'warning' | 'error' | 'neutral'
+
+export const TINT: Readonly<Record<'light' | 'dark', Readonly<Record<Tone, string>>>> = {
+  light: { warning: '#fcf1de', error: '#fae3e0', neutral: '#f2f0ea' },
+  dark: { warning: '#3a3020', error: '#3d2624', neutral: '#30302d' },
+}
+
+export function tintOf(scheme: Scheme, tone: Tone): string | undefined {
+  return scheme === 'auto' ? undefined : TINT[scheme][tone]
+}
+
 // Ряд theme: dark, dark-daltonized, dark-ansi — тёмная; light* — светлая;
 // auto и всё незнакомое — по prefers-color-scheme внутри самого SVG.
 export function schemeOf(theme: string | null | undefined): Scheme {

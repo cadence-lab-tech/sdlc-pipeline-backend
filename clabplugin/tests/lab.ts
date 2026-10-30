@@ -270,7 +270,17 @@ export function lab(name: (s: string) => string = s => s): Lab {
             y.reason = got >= min ? null : `апрувов ${got} из ${min}`
           }
         } else if (y.type === 'checklist') {
-          y.status = b.status === 'passed' ? 'passed' : 'pending'
+          // Как движок: «Не пройден» — failed с причиной, пока чек-лист не
+          // отметят заново; отметка — passed.
+          if (b.status === 'failed') {
+            y.status = 'failed'
+            y.reason = `чек-лист отмечен непройденным: ${b.details?.reason ?? ''}`
+            y.details = { decision: b.details }
+          } else {
+            y.status = 'passed'
+            y.reason = null
+            y.details = null
+          }
         }
         settle(t)
         return { status: 200, body: { gate_key: y.gate_key, status: b.status } }

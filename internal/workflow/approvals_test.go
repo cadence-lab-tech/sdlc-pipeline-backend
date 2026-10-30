@@ -525,3 +525,80 @@ func TestDecideGateSeen(t *testing.T) {
 		t.Fatalf("без условия: %v", err)
 	}
 }
+
+// «Не пройден» по ручному чек-листу закрывает гейт failed: предпросмотр
+// (его же показывают проверка гейтов CLI и карточка) и выборка «Ждут меня»
+// видят отказ, переход вперёд закрыт. Повторная отметка пунктов возвращает
+// обычное правило: все обязательные — passed, не все — pending.
+func TestChecklistFailedDecision(t *testing.T) {
+	w := newApprovalsWorld(t)
+	dev := w.task("nova", "Разработка", "start")
+	w.submit(dev, "analysis.brief")
+	w.decide(dev, "analysis_done", "human_approval", w.human, domain.GateResultPassed, `{}`)
+	w.move(dev, "analysis_done")
+	w.submit(dev, "dev.summary")
+
+	gate := func() GateOutcome {
+		t.Helper()
+		task, err := w.store.GetTaskByKey(w.ctx, w.store.DB(), dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previews, err := w.engine.Preview(w.ctx, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range previews {
+			if p.Key != "dev_done" {
+				continue
+			}
+			for _, g := range p.Gates {
+				if g.GateKey == "selfhosted" {
+					return g
+				}
+			}
+		}
+		t.Fatal("нет гейта selfhosted в предпросмотре dev_done")
+		return GateOutcome{}
+	}
+	row := dev + " dev_done/selfhosted"
+
+	if g := gate(); g.Status != domain.GateResultPending || !contains(w.list(), row) {
+		t.Fatalf("до решения: %+v, выборка %v", g, w.list())
+	}
+
+	w.decide(dev, "dev_done", "selfhosted", w.human, domain.GateResultFailed, `{"reason":"нет раздела про апгрейд"}`)
+	g := gate()
+	if g.Status != domain.GateResultFailed || !strings.Contains(g.Reason, "нет раздела про апгрейд") || g.Details["decision"] == nil {
+		t.Fatalf("после «Не пройден»: %+v", g)
+	}
+	if contains(w.list(), row) {
+		t.Fatalf("отклонённый чек-лист остался в выборке: %v", w.list())
+	}
+	if res, err := w.engine.Execute(w.ctx, dev, "dev_done", w.system.ID, ""); err != nil || !res.Blocked {
+		t.Fatalf("переход при отклонённом чек-листе: %v %+v", err, res)
+	}
+	// Заблокированный переход решение человека не перезаписал.
+	if g := gate(); g.Status != domain.GateResultFailed {
+		t.Fatalf("после попытки перехода: %+v", g)
+	}
+
+	// Отметка без обязательного пункта — обычное pending, строка вернулась.
+	w.decide(dev, "dev_done", "selfhosted", w.human, domain.GateResultPassed, `{"checked":[]}`)
+	if g := gate(); g.Status != domain.GateResultPending || !contains(w.list(), row) {
+		t.Fatalf("неполная отметка: %+v, выборка %v", g, w.list())
+	}
+
+	// Без причины — общая формулировка.
+	w.decide(dev, "dev_done", "selfhosted", w.human, domain.GateResultFailed, `{}`)
+	if g := gate(); g.Status != domain.GateResultFailed || g.Reason != "чек-лист отмечен непройденным" {
+		t.Fatalf("без причины: %+v", g)
+	}
+
+	// Все обязательные отмечены — passed, переход проходит.
+	w.decide(dev, "dev_done", "selfhosted", w.human, domain.GateResultPassed, `{"checked":["selfhosted"]}`)
+	if g := gate(); g.Status != domain.GateResultPassed || contains(w.list(), row) {
+		t.Fatalf("повторная отметка: %+v, выборка %v", g, w.list())
+	}
+	w.move(dev, "dev_done")
+}

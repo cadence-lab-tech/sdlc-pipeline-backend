@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { TaskDetail, Workflow } from '../hooks/card'
-import { platesOf, returnsOf, seenOf, driftOf, returnSteps, approveSteps } from '../hooks/approve'
+import { platesOf, returnsOf, seenOf, driftOf, returnSteps, approveSteps, stageChipsOf } from '../hooks/approve'
 import { GATE_WORD, GLYPH, WORDS } from '../hooks/vocab'
+import { contrast, DARK, LIGHT, TINT } from '../hooks/theme'
 import { lab } from './lab'
 import type { Lab } from './lab'
 import { PANE, TOKEN, run, world } from './world'
@@ -40,7 +41,19 @@ test('модель: плашки, возвраты и снимок по отве
 
   const p1 = platesOf(d('NOVA-1'), wf('wf-nova'))
   expect(p1).toEqual([
-    { transition: 'analysis_done', transitionName: 'Аналитика готова', toName: 'Разработка', gate: 'human_approval', gateName: 'Апрув аналитики', type: 'human_approval', state: 'pending', reason: 'апрувов 0 из 1', items: [] },
+    {
+      transition: 'analysis_done',
+      transitionName: 'Аналитика готова',
+      toName: 'Разработка',
+      gate: 'human_approval',
+      gateName: 'Апрув аналитики',
+      type: 'human_approval',
+      state: 'pending',
+      reason: 'апрувов 0 из 1',
+      items: [],
+      since: L.tasks['NOVA-1']!.artifacts[0]!.created_at,
+      others: ['Артефакты сданы'],
+    },
   ])
   // Чек-лист: пункты из версии цикла, обязательный не отмечен.
   const p2 = platesOf(d('NOVA-2'), wf('wf-nova'))
@@ -49,6 +62,13 @@ test('модель: плашки, возвраты и снимок по отве
   ])
   // FORGE-1: чек-лист пройден, плашка одна — апрув на двух людей.
   expect(platesOf(d('FORGE-1'), wf('wf-forge')).map(p => p.gate)).toEqual(['two_people'])
+  // «Не пройден» у чек-листа: плашка отклонённого с причиной, пункты — с нуля.
+  L.serve('POST', '/tasks/NOVA-2/transitions/dev_done/gates/selfhosted/decision', { status: 'failed', details: { reason: 'нет раздела' } })
+  expect(platesOf(d('NOVA-2'), wf('wf-nova')).map(p => [p.state, p.reason, p.items.map(i => i.checked)])).toEqual([['failed', 'нет раздела', [false, false]]])
+  // Чипы этапа — по виду, последняя версия, в порядке первой сдачи.
+  L.submit('NOVA-3', 'test.report')
+  L.submit('NOVA-3', 'test.report')
+  expect(stageChipsOf(d('NOVA-3')).map(c => c.kind)).toEqual(['result', 'test.report'])
 
   // Возвраты: только reject, без недоступного; вид артефакта — свой у цикла;
   // предел попыток — держит.
@@ -86,7 +106,7 @@ test('апрув: плашка в карточке, первое нажатие 
   const L = lab()
   const { j, clock } = await start($, on, L, 'NOVA-1')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await texts(ui, /Ждёт вашего апрува/)).toEqual(['⏸ Ждёт вашего апрува · Апрув аналитики'])
+  expect(await texts(ui, /Ждёт вашего апрува/)).toEqual(['Ждёт вашего апрува · Апрув аналитики'])
   expect(await texts(ui, /^Переход «/)).toEqual(['Переход «Аналитика готова» → Разработка · апрувов 0 из 1'])
   const id = 'NOVA-1-analysis_done-human_approval'
   expect(await ui.find({ key: `approve-${id}` })).toBeDefined()
@@ -97,7 +117,9 @@ test('апрув: плашка в карточке, первое нажатие 
   await ui.press({ key: `approve-${id}` })
   await tick(clock)
   expect(await texts(ui, /^Утвердить/)).toEqual(['Утвердить NOVA-1 и перевести в Разработка?'])
-  expect(await texts(ui, /от имени/)).toEqual(['Апрув аналитики · Переход «Аналитика готова» · от имени user:ann'])
+  expect(await texts(ui, /от вашего имени/)).toEqual([
+    'Гейт «Апрув аналитики» · переход «Аналитика готова». Решение запишется от вашего имени (user:ann). Ждущий агент узнает исход по состоянию задачи.',
+  ])
   await ui.press({ key: 'cancel-NOVA-1' })
   await tick(clock)
   expect(await ui.find({ key: 'yes-NOVA-1' })).toBeUndefined()
@@ -166,6 +188,8 @@ test('апрув на двух людей: решение записано, пе
   expect(decisions(L)).toHaveLength(1)
   expect(moves(L)).toEqual([])
   expect(await texts(ui, /Апрув записан/)).toEqual(['Апрув записан · Two sign-offs · апрувов 1 из 2'])
+  // Записан, но переход держит — нейтральный блок с пояснением, где смотреть.
+  expect(await texts(ui, /^Что держит переход/)).toHaveLength(1)
   expect(await texts(ui, /^Переход «Ship/)).toEqual(['Переход «Ship to board» → Review board · апрувов 1 из 2'])
   await ui.unmount()
 })
@@ -266,6 +290,25 @@ test('чек-лист: пункты из версии цикла, «Отмети
   await tick(clock)
   expect(L.posts.at(-1)?.body).toMatchObject({ status: 'failed', details: { reason: 'раздела нет' } })
   expect(moves(L)).toEqual([])
+
+  // Гейт закрыт failed: плашка отклонённого с причиной, из «Ждут меня»
+  // строка ушла; «Отметить…» снова открывает чек-лист с пустыми пунктами.
+  expect(await texts(ui, /Отклонено/)).toEqual(['✕ Отклонено · Self-hosted учтён · раздела нет'])
+  expect(await texts(ui, /^Что держит переход/)).toEqual([])
+  await ui.press({ key: 'tab-approvals' })
+  await tick(clock)
+  expect(await ui.find({ key: 'appr-NOVA-2-dev_done-selfhosted' })).toBeUndefined()
+  await ui.press({ key: 'tab-chat' })
+  await ui.press({ key: 'mark-NOVA-2-dev_done-selfhosted' })
+  await tick(clock)
+  expect((await ui.findAll({ type: 'Button', text: /☐|☑/ })).map((b: any) => b.text)).toEqual(['☐ Раздел «Self-hosted» написан', '☐ Заметки релиза'])
+  await ui.press({ key: 'item-NOVA-2-selfhosted' })
+  await tick(clock)
+  await ui.press({ key: 'pass-NOVA-2' })
+  await tick(clock)
+  expect(L.posts.at(-1)?.body).toMatchObject({ status: 'passed', details: { checked: ['selfhosted'] } })
+  expect(L.tasks['NOVA-2']!.transitions.development![0]!.gates[1]!.status).toBe('passed')
+  expect(await texts(ui, /Отклонено/)).toEqual([])
   await ui.unmount()
 })
 
@@ -370,12 +413,15 @@ test('«Ждут меня»: ровно ответ выборки, число в
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ key: 'tab-approvals' })).toMatchObject({ text: 'Ждут меня 3' })
   expect(j.statuses.at(-1)).toBe('Clab: 1 в чате · ⏸ 3 апрув')
-  const rows = await ui.findAll({ type: 'Text', text: /^⏸ / })
-  expect(rows.map((r: any) => r.text)).toEqual([
-    '⏸ Апрув аналитики · «Аналитика готова» → Разработка · в этом чате',
-    '⏸ Self-hosted учтён · «Разработка готова» → Тестирование',
-    '⏸ Разрешение слить · «Готово к слиянию» → Готово',
+  expect(await texts(ui, /^[⏸○] .*→/)).toEqual([
+    '⏸ Апрув аналитики Аналитика готова → Разработка',
+    '○ Self-hosted учтён Разработка готова → Тестирование',
+    '⏸ Разрешение слить Готово к слиянию → Готово',
   ])
+  // «в этом чате» — только у задачи чата; вводная и подвал выборки.
+  expect(await texts(ui, /^в этом чате$/)).toHaveLength(1)
+  expect(await texts(ui, /^Гейты проекта/)).toEqual(['Гейты проекта, которые вы можете закрыть по уровню доступа.'])
+  expect(await texts(ui, /^обновлено/)).toEqual(['обновлено опросом · только что'])
   expect(await ui.find({ key: 'appr-act-NOVA-2-dev_done-selfhosted' })).toMatchObject({ text: 'Отметить…' })
   // «Апрув» из строки: карточка в «Этом чате» с тем же подтверждением.
   await ui.press({ key: 'appr-act-NOVA-3-merge_ready-human_approval' })
@@ -389,7 +435,7 @@ test('«Ждут меня»: ровно ответ выборки, число в
   await clock.advance(30_000)
   await tick(clock)
   await ui.press({ key: 'tab-approvals' })
-  expect((await ui.findAll({ type: 'Text', text: /^⏸ / })).map((r: any) => r.text)).toEqual(['⏸ Апрув аналитики · «Аналитика готова» → Разработка · в этом чате'])
+  expect(await texts(ui, /^[⏸○] .*→/)).toEqual(['⏸ Апрув аналитики Аналитика готова → Разработка'])
   expect(j.statuses.at(-1)).toBe('Clab: 2 в чате · ⏸ 1 апрув')
   await ui.unmount()
 })
@@ -444,6 +490,93 @@ test('поверхности: полоса с «Апрув», терминал �
   expect(await ui.find({ type: 'Link', text: /Открыть в Cadence Lab/ })).toBeDefined()
   await ui.unmount()
   expect(L.posts).toEqual([])
+})
+
+// --- Макеты 02, 04, 04b, 06: блоки, пояснения, возраст, чипы -------------------
+
+test('макет: заливка по явной теме и рамка при auto, возраст, остальные гейты, чипы по виду, пояснения форм и итогов', async ($, on) => {
+  const L = lab()
+  L.submit('NOVA-1', 'analysis.requirements')
+  const { clock } = await start($, on, L, 'NOVA-1 NOVA-2 NOVA-3', { theme: 'light' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const plate = await ui.find({ key: 'plate-NOVA-1-analysis_done-human_approval' })
+  expect(plate?.props).toMatchObject({ borderStyle: 'round', borderColor: 'warning', backgroundColor: TINT.light.warning })
+  // Возраст ожидания — от последней сдачи на этапе (12:00:0x, сейчас 12:30);
+  // остальные гейты перехода.
+  expect(await texts(ui, /^29 мин$/)).toHaveLength(2)
+  expect(await texts(ui, /^Остальные гейты пройдены/)).toEqual(['Остальные гейты пройдены: Артефакты сданы ✓', 'Остальные гейты пройдены: Разбор сдан ✓'])
+  // Чипы — по одному на вид артефакта этапа, ведут в карточку.
+  expect((await ui.findAll({ type: 'Link', text: /›$/ })).map((l: any) => l.text).slice(0, 2)).toEqual(['Результат этапа ›', 'analysis.requirements ›'])
+  // Чек-лист — рамка без заливки, глиф ○ и слово типа гейта.
+  expect((await ui.find({ key: 'plate-NOVA-2-dev_done-selfhosted' }))?.props.backgroundColor).toBeUndefined()
+  expect(await texts(ui, /^○ Self-hosted учтён$/)).toHaveLength(1)
+  expect(await texts(ui, /^До перехода «Разработка готова» → Тестирование/)).toHaveLength(1)
+
+  // Подтверждение стоит на месте плашки, с заливкой и подсказкой Enter.
+  await ui.press({ key: 'approve-NOVA-1-analysis_done-human_approval' })
+  await tick(clock)
+  expect(await ui.find({ key: 'plate-NOVA-1-analysis_done-human_approval' })).toBeUndefined()
+  expect((await ui.find({ key: 'confirm-NOVA-1' }))?.props).toMatchObject({ backgroundColor: TINT.light.warning })
+  expect((await ui.find({ key: 'yes-NOVA-1' }))?.text).toBe('Да, апрув ↩')
+  // Результат изменился — блок с заливкой error и пояснением.
+  L.submit('NOVA-1', 'analysis.requirements')
+  await ui.press({ key: 'yes-NOVA-1' })
+  await tick(clock)
+  expect((await ui.find({ key: 'outcome-NOVA-1' }))?.props).toMatchObject({ backgroundColor: TINT.light.error, borderColor: 'error' })
+  expect(await texts(ui, /^Апрув до новой сдачи не считается/)).toHaveLength(1)
+
+  // Форма возврата: заголовок, подсказки полей, артефакт, который сдаётся.
+  await ui.press({ key: 'return-NOVA-3-merge_ready-human_approval' })
+  await tick(clock)
+  expect(await texts(ui, /^Вернуть NOVA-3$/)).toHaveLength(1)
+  expect((await ui.find({ key: 'target-NOVA-3' }))?.props).toMatchObject({ label: 'Куда — переходы-возвраты текущего статуса' })
+  expect((await ui.find({ key: 'reason-NOVA-3' }))?.props).toMatchObject({ label: 'Причина — её прочитает агент следующего этапа' })
+  expect(await texts(ui, /^Вместе с возвратом/)).toEqual(['Вместе с возвратом от вашего имени сдаётся артефакт «problem.report» с этой причиной — его требует гейт перехода.'])
+  expect(await texts(ui, /^гейт: failed \+ переход$/)).toHaveLength(1)
+  await ui.press({ key: 'cancel-NOVA-3' })
+  await tick(clock)
+
+  // Чек-лист: подсказка про обязательные пункты и про «Не пройден».
+  await ui.press({ key: 'mark-NOVA-2-dev_done-selfhosted' })
+  await tick(clock)
+  expect(await texts(ui, /^отметьте все обязательные пункты$/)).toHaveLength(1)
+  expect(await texts(ui, /^«Не пройден» просит причину/)).toHaveLength(1)
+  await ui.press({ key: 'item-NOVA-2-selfhosted' })
+  await tick(clock)
+  expect(await texts(ui, /^отметьте все обязательные пункты$/)).toEqual([])
+  await ui.press({ key: 'cancel-NOVA-2' })
+  await tick(clock)
+
+  // Итог апрува — рамка, «под вашим именем», журнал и «в разговор не пишет».
+  await ui.press({ key: 'approve-NOVA-3-merge_ready-human_approval' })
+  await tick(clock)
+  await ui.press({ key: 'yes-NOVA-3' })
+  await tick(clock)
+  expect((await ui.find({ key: 'outcome-NOVA-3' }))?.props.backgroundColor).toBeUndefined()
+  expect(await texts(ui, /В разговор плагин ничего не пишет/)).toHaveLength(1)
+  await ui.unmount()
+
+  // Полоса над вводом (макет 06): рамка и заливка warning.
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  expect((await band.findAll({ type: 'Box' }))[0]?.props).toMatchObject({ borderStyle: 'round', borderColor: 'warning', backgroundColor: TINT.light.warning })
+  await band.unmount()
+})
+
+test('заливки блоков: текст и приглушённый текст темы читаются на каждой (≥ 4.5:1)', () => {
+  for (const [p, tints] of [[LIGHT, TINT.light], [DARK, TINT.dark]] as const) {
+    for (const bg of Object.values(tints)) for (const fg of [p.text, p.dim]) expect(contrast(fg, bg)).toBeGreaterThanOrEqual(4.5)
+  }
+})
+
+test('макет: тема auto — без заливки, блоки держит рамка цвета тона, заголовок — цветом тона', async ($, on) => {
+  const L = lab()
+  await start($, on, L, 'NOVA-1', { theme: 'auto' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const plate = await ui.find({ key: 'plate-NOVA-1-analysis_done-human_approval' })
+  expect(plate?.props.backgroundColor).toBeUndefined()
+  expect(plate?.props.borderColor).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: /^Ждёт вашего апрува/ }))?.props.color).toBe('warning')
+  await ui.unmount()
 })
 
 // --- AC-12: подписи -------------------------------------------------------------

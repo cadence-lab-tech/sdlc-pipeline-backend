@@ -7,7 +7,7 @@
 // сравнивает: узлы, подписи и порядок приходят из версии цикла.
 
 import type { CardData, CardGate, CardGates, CycleNode, GateMark } from '../types'
-import { platesOf, returnsOf, seenOf } from './approve'
+import { platesOf, returnsOf, seenOf, stageChipsOf } from './approve'
 import { childrenOf } from './children'
 import type { ApiChild } from './children'
 import { HUMAN_APPROVAL } from './vocab'
@@ -261,6 +261,7 @@ export function cardOf(detail: TaskDetail, wf: Workflow, host: string | null): C
     plates: platesOf(detail, wf),
     returns: returnsOf(detail, wf),
     seen: seenOf(detail),
+    stageChips: stageChipsOf(detail),
   }
 }
 

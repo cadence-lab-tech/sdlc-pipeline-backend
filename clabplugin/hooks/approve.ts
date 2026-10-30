@@ -7,7 +7,7 @@
 // а не данные проекта. Имена гейтов, переходов, статусов и виды артефактов —
 // только из версии цикла задачи и ответа сервера.
 
-import type { Plate, PlateItem, ReturnOption, Seen } from '../types'
+import type { Plate, PlateItem, ReturnOption, Seen, StageChip } from '../types'
 import type { ApiGate, ApiTransition, TaskDetail, Workflow } from './card'
 import { CHECKLIST, HUMAN_APPROVAL, WORDS } from './vocab'
 
@@ -30,18 +30,20 @@ function configOf(wf: Workflow, transition: string, gate: string): Record<string
 }
 
 // Пункты чек-листа из версии цикла; отмечен — обязательный пункт, которого
-// нет среди неотмеченных в вердикте гейта.
+// нет среди неотмеченных в вердикте гейта. Отклонённый чек-лист (failed)
+// отмечается заново с нуля.
 function itemsOf(wf: Workflow, transition: string, gate: ApiGate): PlateItem[] {
   const raw = configOf(wf, transition, String(gate.gate_key ?? '')).items
   const unchecked = new Set(
     ((gate.details?.unchecked as { id?: unknown }[] | undefined) ?? []).map(u => String(u.id ?? '')),
   )
   const passed = RESOLVED.has(String(gate.status))
+  const failed = String(gate.status) === 'failed'
   return (Array.isArray(raw) ? raw : []).map(it => {
     const item = it as { id?: unknown; text?: unknown; required?: unknown }
     const id = String(item.id ?? '')
     const required = item.required === true
-    return { id, text: String(item.text ?? id), required, checked: passed || (required && !unchecked.has(id)) }
+    return { id, text: String(item.text ?? id), required, checked: !failed && (passed || (required && !unchecked.has(id))) }
   })
 }
 
@@ -51,19 +53,21 @@ function failedReason(g: ApiGate): string | null {
 }
 
 // Плашки: по одной на человеческий гейт перехода вперёд, который ждёт решения
-// (pending) или отклонён (failed: человек может передумать), при том что все
-// остальные блокирующие гейты прошли или тоже человеческие. Переход в
-// выключенный этап плашки не даёт.
+// (pending) или отклонён (failed — апрув или «Не пройден» у чек-листа:
+// человек может передумать), при том что все остальные блокирующие гейты
+// прошли или тоже человеческие. Переход в выключенный этап плашки не даёт.
 export function platesOf(detail: TaskDetail, wf: Workflow): Plate[] {
   const out: Plate[] = []
+  const since = waitingSince(detail)
   for (const t of detail.transitions ?? []) {
     if (t.kind !== 'advance' || t.unavailable) continue
     const blocking = (t.gates ?? []).filter(g => g.blocking !== false)
     if (blocking.some(g => !isHuman(g.type) && !RESOLVED.has(String(g.status)))) continue
+    const others = blocking.filter(g => !isHuman(g.type) && String(g.status) !== 'skipped').map(g => String(g.gate_name ?? g.gate_key ?? ''))
     for (const g of blocking) {
       if (!isHuman(g.type)) continue
       const status = String(g.status)
-      const failed = status === 'failed' && g.type === HUMAN_APPROVAL
+      const failed = status === 'failed'
       if (status !== 'pending' && !failed) continue
       const key = String(t.key ?? '')
       out.push({
@@ -76,6 +80,8 @@ export function platesOf(detail: TaskDetail, wf: Workflow): Plate[] {
         state: failed ? 'failed' : 'pending',
         reason: failed ? failedReason(g) : g.reason ? String(g.reason) : null,
         items: g.type === CHECKLIST ? itemsOf(wf, key, g) : [],
+        since,
+        others,
       })
     }
   }
@@ -111,13 +117,40 @@ export function returnsOf(detail: TaskDetail, wf: Workflow): ReturnOption[] {
 }
 
 // Текущий прогон этапа: верхнего уровня на статусе задачи, последний.
-function currentRunId(detail: TaskDetail): string | null {
-  let best: { id?: string; attempt?: number } | null = null
+function currentRun(detail: TaskDetail): { id?: string; attempt?: number; started_at?: string | null } | null {
+  let best: { id?: string; attempt?: number; started_at?: string | null } | null = null
   for (const r of detail.stage_runs ?? []) {
     if (r.parent_run_id || (r.kind !== undefined && r.kind !== 'stage') || r.status_key !== detail.task.status_key) continue
     if (!best || (r.attempt ?? 0) >= (best.attempt ?? 0)) best = r
   }
-  return best?.id ?? null
+  return best
+}
+
+const currentRunId = (detail: TaskDetail) => currentRun(detail)?.id ?? null
+
+// С какого момента решение человека ждёт: последняя сдача на этапе (апрувы
+// до неё не считаются, решение 0042), без сдач — начало прогона.
+function waitingSince(detail: TaskDetail): string | null {
+  let latest: string | null = null
+  for (const a of stageArtifacts(detail)) {
+    if (a.created_at && (!latest || Date.parse(a.created_at) > Date.parse(latest))) latest = a.created_at
+  }
+  return latest ?? currentRun(detail)?.started_at ?? null
+}
+
+// Чипы плашки: артефакты текущего этапа, по одному на вид — последняя версия,
+// в порядке первой сдачи вида.
+export function stageChipsOf(detail: TaskDetail): StageChip[] {
+  const byKind = new Map<string, { chip: StageChip; at: number }>()
+  for (const a of stageArtifacts(detail)) {
+    const kind = String(a.kind ?? '')
+    const at = Date.parse(a.created_at ?? '')
+    const prev = byKind.get(kind)
+    const chip = { kind, title: String(a.title ?? kind), version: typeof a.version === 'number' ? a.version : null }
+    if (!prev) byKind.set(kind, { chip, at })
+    else if (!(at < prev.at)) byKind.set(kind, { chip, at })
+  }
+  return [...byKind.values()].map(v => v.chip)
 }
 
 // Артефакты текущего этапа: по ним сервер считает свежесть апрува (0042).
