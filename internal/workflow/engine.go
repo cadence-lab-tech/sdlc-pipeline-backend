@@ -138,7 +138,7 @@ func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPre
 		}
 		// Гейты недоступного перехода вычисляются как обычно: человек видит,
 		// что ещё понадобится, когда включит этап.
-		outcomes, allowed, err := e.evaluate(ctx, q, task, run, t, stageArtifacts, taskArtifacts)
+		outcomes, allowed, err := e.evaluate(ctx, q, task, run, t, land, stageArtifacts, taskArtifacts)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +217,7 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 			return err
 		}
 
-		outcomes, allowed, err := e.evaluate(ctx, tx, task, run, transition, stageArtifacts, taskArtifacts)
+		outcomes, allowed, err := e.evaluate(ctx, tx, task, run, transition, land, stageArtifacts, taskArtifacts)
 		if err != nil {
 			return err
 		}
@@ -341,7 +341,7 @@ func finishSemantics(kind string) (state, outcome, eventType string) {
 	}
 }
 
-func (e *Engine) evaluate(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun, t domain.Transition, stageArtifacts, taskArtifacts []domain.Artifact) ([]GateOutcome, bool, error) {
+func (e *Engine) evaluate(ctx context.Context, q postgres.Querier, task domain.Task, run domain.StageRun, t domain.Transition, land landing, stageArtifacts, taskArtifacts []domain.Artifact) ([]GateOutcome, bool, error) {
 	outcomes := make([]GateOutcome, 0, len(t.Gates))
 	allowed := true
 
@@ -354,7 +354,7 @@ func (e *Engine) evaluate(ctx context.Context, q postgres.Querier, task domain.T
 		in := EvalInput{
 			Task: task, StageRun: run, Transition: t, Gate: gate,
 			StageArtifacts: stageArtifacts, TaskArtifacts: taskArtifacts,
-			Decision: decision,
+			Decision: decision, Landing: land,
 		}
 
 		var outcome GateOutcome

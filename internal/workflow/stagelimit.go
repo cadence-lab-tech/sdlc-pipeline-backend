@@ -88,9 +88,34 @@ func stageTimeGate(t domain.Transition) *domain.Gate {
 	return nil
 }
 
+// enteredLimit — предел, заданный переходом входа в статус: гейт и его
+// длительность. ok=false — предела нет: на переходе нет гейта или его
+// max_duration негоден. Один помощник на вычислитель гейта и limitFor:
+// заявленный предел обходного перехода и stage_limit прогона разойтись не
+// могут.
+func enteredLimit(t domain.Transition) (gate *domain.Gate, d time.Duration, text string, ok bool) {
+	gate = stageTimeGate(t)
+	if gate == nil {
+		return nil, 0, "", false
+	}
+	d, text, err := maxDuration(gate.Config)
+	if err != nil {
+		return gate, 0, "", false
+	}
+	return gate, d, text, true
+}
+
 // evalStageTimeLimit на своём переходе всегда passed: предел начинает
 // действовать после входа в статус, а держать сам вход ему нечего.
+//
+// При пропуске выключенного этапа предел запрошенного перехода не действует:
+// прогон открывается там, где задача встала, и получает предел последнего
+// обходного перехода (CLAB-333, решение 0066). Гейт говорит об этом прямо и
+// называет действующий предел, а config запрошенного перехода не читает.
 func (e *Engine) evalStageTimeLimit(ctx context.Context, q postgres.Querier, in EvalInput) (GateOutcome, error) {
+	if len(in.Landing.Skipped) > 0 {
+		return e.skippedStageTimeLimit(ctx, q, in)
+	}
 	_, text, err := maxDuration(in.Gate.Config)
 	if err != nil {
 		reason := "предел этапа не задан"
@@ -106,6 +131,36 @@ func (e *Engine) evalStageTimeLimit(ctx context.Context, q postgres.Querier, in 
 	out := base(in.Gate, domain.GateResultPassed,
 		fmt.Sprintf("предел этапа в статусе %s — %s, отсчёт с входа", target.Key, text))
 	out.Details = map[string]any{"status": target.Key, "max_duration": text}
+	return out, nil
+}
+
+// skippedStageTimeLimit — вердикт гейта запрошенного перехода, у которого
+// цепочка обходов пропускает выключенные этапы. Статус passed, как и без
+// пропуска: гейт ничего не держит. Смысл «не действует» несут
+// details.applies=false и текст; ключевое (не действует, что пропущено, где
+// встанет задача) лежит в первых 100 символах — столько печатает clab gates.
+func (e *Engine) skippedStageTimeLimit(ctx context.Context, q postgres.Querier, in EvalInput) (GateOutcome, error) {
+	target, err := e.store.GetStatus(ctx, q, in.Transition.ToStatusID)
+	if err != nil {
+		return GateOutcome{}, err
+	}
+	skips := in.Landing.skipKeys()
+	lands, via := in.Landing.To.Key, in.Landing.Via.Key
+	details := map[string]any{
+		"applies": false, "status": target.Key, "skips": skips,
+		"lands_in": lands, "via": via,
+	}
+	where := fmt.Sprintf("пропущен %s, задача встанет в %s", strings.Join(skips, ", "), lands)
+	if len(skips) > 1 {
+		where = fmt.Sprintf("пропущены %s, задача встанет в %s", strings.Join(skips, ", "), lands)
+	}
+	reason := fmt.Sprintf("предел не действует: %s; предела там нет (%s)", where, via)
+	if _, _, text, ok := enteredLimit(in.Landing.Via); ok {
+		details["effective_max_duration"] = text
+		reason = fmt.Sprintf("предел не действует: %s; там предел %s (%s)", where, text, via)
+	}
+	out := base(in.Gate, domain.GateResultPassed, reason)
+	out.Details = details
 	return out, nil
 }
 
@@ -158,12 +213,8 @@ func (e *Engine) limitFor(ctx context.Context, q postgres.Querier, run domain.St
 		}
 		return nil, err
 	}
-	gate := stageTimeGate(t)
-	if gate == nil {
-		return nil, nil
-	}
-	d, text, err := maxDuration(gate.Config)
-	if err != nil {
+	gate, d, text, ok := enteredLimit(t)
+	if !ok {
 		return nil, nil
 	}
 	deadline, overdue := stageClock(run.EnteredAt, d, now)

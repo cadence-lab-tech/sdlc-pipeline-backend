@@ -31,6 +31,9 @@ type EvalInput struct {
 	TaskArtifacts []domain.Artifact
 	// Записанное решение по гейту, если человек или агент его выносил.
 	Decision *domain.GateResult
+	// Куда встанет задача по переходу при её выборе этапов (CLAB-333).
+	// Нулевое значение — «без пропуска»: так зовут вычислители напрямую.
+	Landing landing
 }
 
 // GateOutcome — результат одного гейта.
