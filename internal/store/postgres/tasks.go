@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -466,14 +467,18 @@ func (s *Store) FinishStageRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, 
 	return err
 }
 
-func (s *Store) SetTaskStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, terminal bool) error {
-	_, err := tx.Exec(ctx, `
+// SetTaskStatus переводит задачу в статус и возвращает то, что база проставила
+// сама: updated_at и closed_at (nil для нетерминального статуса). Копия задачи,
+// прочитанная до перехода, получает их отсюда (CLAB-331).
+func (s *Store) SetTaskStatus(ctx context.Context, tx pgx.Tx, taskID, statusID uuid.UUID, terminal bool) (updatedAt time.Time, closedAt *time.Time, err error) {
+	err = tx.QueryRow(ctx, `
 		UPDATE tasks
 		SET status_id = $2,
 		    updated_at = now(),
 		    closed_at = CASE WHEN $3 THEN now() ELSE NULL END
-		WHERE id = $1`, taskID, statusID, terminal)
-	return translate(err)
+		WHERE id = $1
+		RETURNING updated_at, closed_at`, taskID, statusID, terminal).Scan(&updatedAt, &closedAt)
+	return updatedAt, closedAt, translate(err)
 }
 
 // UpdateTaskProperties пишет свойства задачи целиком.

@@ -631,6 +631,12 @@ func TestSkipChainTerminalAndLock(t *testing.T) {
 	if closed.ClosedAt == nil {
 		t.Fatal("задача не закрыта входом в терминальный через пропуск")
 	}
+	// CLAB-331: результат перехода несёт то же время закрытия и обновления.
+	if res.Task.ClosedAt == nil || !res.Task.ClosedAt.Equal(*closed.ClosedAt) ||
+		!res.Task.UpdatedAt.Equal(closed.UpdatedAt) {
+		t.Fatalf("копия задачи в результате: closed_at %v updated_at %v, в базе %v и %v",
+			res.Task.ClosedAt, res.Task.UpdatedAt, closed.ClosedAt, closed.UpdatedAt)
+	}
 
 	// Переход держит строку задачи: правка выбора ждёт его конца и видит
 	// статус, где задача встала.
