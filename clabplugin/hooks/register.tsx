@@ -1,8 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Connection, Tab, TaskRow } from '../types'
+import type { CardData, Connection, Tab, TaskRow } from '../types'
+import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
+import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
+import { cycleLine } from './term'
+import { cycleAlt, cycleSvg } from './svg'
+import { schemeOf } from './theme'
+import { GLYPH, gateWord, WORDS } from './vocab'
 import {
   ApiError,
   AUTH_RETRY_MS,
@@ -17,9 +23,10 @@ import {
   newSession,
   optionsOf,
   POLL_MS,
+  QUIET_MS,
   whoamiOf,
 } from './model'
-import type { EventsPage, Options, Session, TaskDetail, Workflow } from './model'
+import type { EventsPage, Options, Session } from './model'
 
 // clab-plugin — Cadence Lab в Claude (решение 0067). Каркас: поимка ключей
 // задач в чате, строка задачи с подписью статуса из её версии цикла, вкладки
@@ -42,8 +49,11 @@ const COMMAND = 'clab-plugin'
 // Значения сессии, которые читает панель. Учётных данных среди них нет.
 export const keysAtom = atom({ plugin: 'clab-plugin', key: 'keys' } as const, [] as string[], { shape: 'keys-1' })
 export const rowsAtom = atom({ plugin: 'clab-plugin', key: 'rows' } as const, {} as Record<string, TaskRow>, {
-  shape: 'rows-1',
+  shape: 'rows-2',
 })
+export const openAtom = atom({ plugin: 'clab-plugin', key: 'open' } as const, [] as string[], { shape: 'open-1' })
+export const describedAtom = atom({ plugin: 'clab-plugin', key: 'described' } as const, [] as string[], { shape: 'described-1' })
+export const themeAtom = atom({ plugin: 'clab-plugin', key: 'theme' } as const, '', { shape: 'theme-1' })
 export const tabAtom = atom({ plugin: 'clab-plugin', key: 'tab' } as const, 'chat' as Tab, { shape: 'tab-1' })
 export const connectionAtom = atom(
   { plugin: 'clab-plugin', key: 'connection' } as const,
@@ -151,20 +161,38 @@ async function readInstance($: $T, s: Session) {
 async function loadRow($: $T, s: Session, key: string): Promise<TaskRow> {
   const detail = await api<TaskDetail>($, s, `/tasks/${encodeURIComponent(key)}`)
   const wf = await workflow($, s, detail.task.workflow_id)
-  const status = wf.statuses.find(st => st.key === detail.task.status_key)
+  const card = cardOf(detail, wf, s.host)
   return {
     key: detail.task.key || key,
     title: detail.task.title,
-    statusName: status?.name ?? detail.task.status_key,
+    statusName: card.statusName,
+    awaiting: card.awaiting,
     error: null,
     fetchedAt: await $.clock.now(),
+    card,
   }
+}
+
+// Почему перечитываем: своё действие в чате, событие или опрос (могло
+// измениться извне — тогда тост), или задача только появилась.
+type Reason = 'own' | 'external' | 'track'
+
+// Тост — только на изменение извне, и только статуса или апрува.
+function toastOf(prev: TaskRow | undefined, next: TaskRow): string | null {
+  if (!prev || !prev.statusName || !next.statusName) return null
+  if (prev.statusName !== next.statusName) return `${next.key} · ${prev.statusName} ${GLYPH.arrow} ${next.statusName}`
+  if (prev.awaiting !== next.awaiting) {
+    if (next.awaiting) return `${next.key} · ${GLYPH.approval} ${WORDS.awaiting}`
+    const gate = prev.card?.approvalGate
+    return gate ? `${next.key} · ${gate} ${GLYPH.ok}` : null
+  }
+  return null
 }
 
 // Перечитать задачи. Ошибка не стирает последнее известное: у строки
 // остаются прежние поля и появляется текст ошибки. Ошибка входа поднимается
 // наверх — цикл обновления по ней делает долгую паузу, а не повторяет.
-async function refresh($: $T, s: Session, keys: string[]) {
+async function refresh($: $T, s: Session, keys: string[], reason: Reason = 'own') {
   if (keys.length === 0) return
   const now = await $.clock.now()
   let authFailed = false
@@ -180,15 +208,23 @@ async function refresh($: $T, s: Session, keys: string[]) {
     }),
   )
   const tracked = await read($, keysAtom)
+  const before = await read($, rowsAtom)
   await update($, rowsAtom, rows => {
     const next = { ...rows }
     for (const { key, row, error } of loaded) {
       if (!tracked.includes(key)) continue
       const prev = next[key]
-      next[key] = row ?? (prev ? { ...prev, error } : { key, title: '', statusName: '', error, fetchedAt: now })
+      next[key] = row ?? (prev ? { ...prev, error } : { key, title: '', statusName: '', awaiting: false, error, fetchedAt: now, card: null })
     }
     return next
   })
+  if (reason === 'external') {
+    for (const { key, row } of loaded) {
+      if (!row || !tracked.includes(key) || (s.quiet.get(key) ?? 0) > now) continue
+      const text = toastOf(before[key], row)
+      if (text) $.ui.toast(text)
+    }
+  }
   await update($, connectionAtom, c => ({ ...c, error: authFailed ? LOGIN_HINT : null }))
   await showStatus($)
   if (authFailed) throw new ApiError(401, LOGIN_HINT)
@@ -198,7 +234,10 @@ async function showStatus($: $T) {
   const keys = await read($, keysAtom)
   if (keys.length === 0) return $.ui.status(undefined)
   const conn = await read($, connectionAtom)
-  $.ui.status(`Clab: ${keys.length} в чате${conn.error ? ` · ${conn.error}` : ''}`)
+  const rows = await read($, rowsAtom)
+  const waiting = keys.filter(k => rows[k]?.awaiting).length
+  const approvals = waiting > 0 ? ` · ${GLYPH.approval} ${waiting} ${WORDS.approval}` : ''
+  $.ui.status(`Clab: ${keys.length} ${WORDS.inChat}${approvals}${conn.error ? ` · ${conn.error}` : ''}`)
 }
 
 async function track($: $T, s: Session, found: string[]) {
@@ -209,12 +248,20 @@ async function track($: $T, s: Session, found: string[]) {
   await update($, keysAtom, keys => [...keys, ...fresh.filter(k => !keys.includes(k))])
   await showStatus($)
   await s.ready.catch(() => undefined)
-  await refresh($, s, fresh).catch(() => undefined)
+  await refresh($, s, fresh, 'track').catch(() => undefined)
   wake($, s)
 }
 
+async function expand($: $T, keys: string[]) {
+  if (keys.length === 0) return
+  await update($, openAtom, list => [...list, ...keys.filter(k => !list.includes(k))])
+}
+
+const toggle = (key: string) => (list: string[]) => (list.includes(key) ? list.filter(k => k !== key) : [...list, key])
+
 async function untrack($: $T, keys: string[]) {
   await update($, keysAtom, list => list.filter(k => !keys.includes(k)))
+  await update($, openAtom, list => list.filter(k => !keys.includes(k)))
   await update($, rowsAtom, rows => {
     const next = { ...rows }
     for (const k of keys) delete next[k]
@@ -288,7 +335,13 @@ async function cycle($: $T, s: Session): Promise<number | null> {
   const started = await $.clock.now()
 
   if (s.events === false || own.length === 0) {
-    await refresh($, s, keys)
+    // Опрос: только задачи, которые не читались весь период, — только что
+    // добавленная в чат прочитана при добавлении.
+    const due = keys.filter(k => {
+      const at = s.polledAt.get(k)
+      return at === undefined || started - at >= POLL_MS
+    })
+    await refresh($, s, due, 'external')
     return POLL_MS
   }
 
@@ -303,7 +356,7 @@ async function cycle($: $T, s: Session): Promise<number | null> {
       s.events = false
       await update($, connectionAtom, c => ({ ...c, events: false }))
     }
-    await refresh($, s, keys)
+    await refresh($, s, keys, 'external')
     return s.events === false ? POLL_MS : MIN_GAP_MS
   }
 
@@ -312,6 +365,9 @@ async function cycle($: $T, s: Session): Promise<number | null> {
   // Событие только будит: истина — перечитанная задача (решение 0067, п. 4).
   const hit = new Set((page.events ?? []).map(eventKey).filter((k): k is string => k !== null))
   const now = await read($, keysAtom)
+  // Событие ребёнка будит родителя из чата: строки детей — часть его карточки.
+  const rows = await read($, rowsAtom)
+  const parents = now.filter(k => !hit.has(k) && (rows[k]?.card?.children?.rows ?? []).some(c => hit.has(c.key)))
   // Задачи другого проекта событиями этого проекта не покрыты: им — опрос
   // раз в 30 с.
   const end = await $.clock.now()
@@ -320,7 +376,7 @@ async function cycle($: $T, s: Session): Promise<number | null> {
     const at = s.polledAt.get(k)
     return at === undefined || end - at >= POLL_MS
   })
-  await refresh($, s, [...now.filter(k => hit.has(k)), ...stale])
+  await refresh($, s, [...now.filter(k => hit.has(k)), ...parents, ...stale], 'external')
   return Math.max(0, MIN_GAP_MS - (end - started))
 }
 
@@ -354,6 +410,7 @@ async function eventsPage($: $T, s: Session, path: string): Promise<EventsPage |
 function activate($: $T, opts: Options): Session {
   const s = newSession(opts)
   s.ready = (async () => {
+    await readTheme($)
     await resolveSession($, s)
     await readInstance($, s)
   })()
@@ -362,6 +419,15 @@ function activate($: $T, opts: Options): Session {
     () => wake($, s),
   )
   return s
+}
+
+// Тема Claude — ряд theme из /config: по нему выбирается палитра Svg.
+// Ряда нет или он не читается — auto, prefers-color-scheme внутри картинки.
+async function readTheme($: $T) {
+  try {
+    const row = (await $.config.list()).find(r => r.key === 'theme')
+    await update($, themeAtom, () => (typeof row?.value === 'string' ? row.value : ''))
+  } catch {}
 }
 
 // Команда регистрируется уже включённым модом и до первого промпта: хук
@@ -386,7 +452,10 @@ async function runCommand($: $T, s: Session, args: string): Promise<string> {
     tab = word
     text = word === 'tasks' ? 'Открыта вкладка «Задачи».' : 'Открыта вкладка «Ждут меня».'
   } else {
-    if (keys.length) await track($, s, keys)
+    if (keys.length) {
+      await track($, s, keys)
+      await expand($, keys)
+    }
     const now = await read($, keysAtom)
     text = now.length ? `Задачи чата: ${now.join(', ')}.` : 'Панель открыта; задач в этом чате пока нет.'
   }
@@ -399,17 +468,239 @@ async function afterTool($: $T, s: Session, tool: string, input: Record<string, 
   await s.ready
   const hit = toolKeys(tool, input, s.project)
   if (!hit.mutates || hit.keys.length === 0) return
-  await refresh($, s, hit.keys)
+  const until = (await $.clock.now()) + QUIET_MS
+  for (const k of hit.keys) s.quiet.set(k, until)
+  await refresh($, s, hit.keys, 'own')
 }
 
 async function beforeTool($: $T, s: Session, tool: string, input: Record<string, unknown>) {
   await s.ready
-  await track($, s, toolKeys(tool, input, s.project).keys)
+  const hit = toolKeys(tool, input, s.project)
+  // Пока меняющий тул идёт, события по его задачам — свои: тоста нет.
+  if (hit.mutates) for (const k of hit.keys) s.quiet.set(k, Number.MAX_SAFE_INTEGER)
+  await track($, s, hit.keys)
 }
 
 async function onPrompt($: $T, s: Session, text: string) {
   await s.ready
   await track($, s, promptKeys(text, s.project, COMMAND))
+}
+
+// --- Карточка ------------------------------------------------------------------
+
+// Элементы поверхности. Svg есть везде, кроме терминала: там схема — строка.
+type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Svg?: any }
+
+// Раскрыть карточку задачи из полосы над вводом или из строки ребёнка:
+// задача попадает в чат, строка раскрывается, панель открывается.
+async function openCard($: $T, key: string) {
+  const s = sessionOf.current
+  if (s) await track($, s, [key])
+  await expand($, [key])
+  await update($, tabAtom, () => 'chat' as Tab)
+  await $.ui.open({ id: PANE, title: TITLE })
+}
+
+// Сессия для обработчиков нажатий, у которых нет своей ссылки на неё.
+const sessionOf: { current: Session | null } = { current: null }
+
+const MARK_COLOR = { ok: 'success', skip: undefined, open: undefined, approval: 'warning', fail: 'error' } as const
+const MARK_GLYPH = { ok: GLYPH.ok, skip: GLYPH.ok, open: GLYPH.open, approval: GLYPH.approval, fail: GLYPH.fail } as const
+const CHILD_DOT = { done: 'success', waiting: 'warning', active: 'claude', backlog: undefined, cancelled: undefined } as const
+
+type CardOpts = { scheme: ReturnType<typeof schemeOf>; now: number; described: boolean }
+
+function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
+  const { Box, Text, Button, Link, Markdown, Svg } = els
+  const chips = [c.type, c.priority].filter(Boolean).join(' · ')
+
+  const cycle =
+    c.nodes.length === 0 ? null : surface !== 'terminal' && Svg ? (
+      <Svg source={cycleSvg(c.nodes, c.back, o.scheme)} alt={cycleAlt(c.nodes)} />
+    ) : (
+      <Text wrap="wrap">
+        {cycleLine(c.nodes).map((seg, i) => (
+          <Text key={`seg-${i}`} color={seg.color} dimColor={seg.dim} strikethrough={seg.strike}>
+            {seg.text}
+          </Text>
+        ))}
+      </Text>
+    )
+
+  const back = backLine(c, o.now)
+
+  const gates = c.gates ? (
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text bold wrap="truncate-end">
+          {WORDS.beforeTransition} «{c.gates.transition}»
+        </Text>
+        {c.gates.total > 0 ? (
+          <Text dimColor>
+            {c.gates.passed} {WORDS.of} {c.gates.total}
+          </Text>
+        ) : null}
+      </Box>
+      {c.gates.items.map((g, i) => (
+        <Text key={`gate-${i}`} wrap="wrap">
+          <Text color={MARK_COLOR[g.mark]} dimColor={g.mark === 'skip' || g.mark === 'open'}>
+            {MARK_GLYPH[g.mark]}{' '}
+          </Text>
+          {g.name}
+          <Text dimColor>
+            {' · '}
+            {gateWord(g.type)}
+            {g.reason ? ` · ${g.reason}` : ''}
+          </Text>
+        </Text>
+      ))}
+    </Box>
+  ) : null
+
+  const kids = c.children ? childrenTree($, els, c.children) : null
+
+  const files =
+    c.artifacts.length + c.attachments.length === 0 ? null : (
+      <Box flexDirection="column">
+        <Text bold>{WORDS.artifacts}</Text>
+        {c.artifacts.map((a, i) => (
+          <Box key={`art-${i}`} flexDirection="row" justifyContent="space-between" gap={1}>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text dimColor>{GLYPH.artifact} </Text>
+                {a.title}
+                {a.stage ? <Text dimColor> · {a.stage}</Text> : ''}
+              </Text>
+            </Box>
+            <Text dimColor>{[a.version !== null ? `v${a.version}` : null, ago(a.at, o.now)].filter(Boolean).join(' · ')}</Text>
+          </Box>
+        ))}
+        {c.attachments.map((a, i) => (
+          <Box key={`file-${i}`} flexDirection="row" justifyContent="space-between" gap={1}>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text dimColor>{GLYPH.file} </Text>
+                {a.name}
+                <Text dimColor> · {WORDS.attachment}</Text>
+              </Text>
+            </Box>
+            <Text dimColor>{sizeOf(a.size) ?? ''}</Text>
+          </Box>
+        ))}
+      </Box>
+    )
+
+  const footer = (
+    <Box flexDirection="row" gap={2} flexWrap="wrap">
+      {c.description ? (
+        <Button key={`desc-${c.key}`} plain onPress={() => void update($, describedAtom, toggle(c.key))}>
+          {WORDS.description}
+        </Button>
+      ) : null}
+      {c.cost !== null ? <Text dimColor>{money(c.cost)}</Text> : null}
+      {c.prs.map((p, i) => (
+        <Link key={`pr-${i}`} href={p.url} label={`${WORDS.pr} ${p.label} ${GLYPH.link}`} />
+      ))}
+      {c.url ? <Link key={`lab-${c.key}`} href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" gap={1} paddingLeft={2} key={`card-${c.key}`}>
+      {chips ? <Text dimColor>{chips}</Text> : null}
+      <Text bold wrap="wrap">
+        {c.title}
+      </Text>
+      {cycle}
+      <Box flexDirection="column">
+        <Text dimColor wrap="wrap">
+          {metaLine(c, o.now)}
+        </Text>
+        {back ? (
+          <Text wrap="wrap">
+            <Text color="error">{GLYPH.back} </Text>
+            {back}
+          </Text>
+        ) : null}
+      </Box>
+      {gates}
+      {kids}
+      {files}
+      {footer}
+      {o.described && c.description ? <Markdown text={c.description} /> : null}
+    </Box>
+  )
+}
+
+const BAR = 24
+
+function childrenTree($: $T, els: Els, ch: NonNullable<CardData['children']>) {
+  const { Box, Text, Button } = els
+  const p = ch.progress
+  let bar = null
+  if (p && p.total > 0) {
+    const cells = (n: number) => Math.round((n / p.total) * BAR)
+    const done = cells(p.done)
+    const waiting = cells(p.waiting)
+    const active = cells(p.active)
+    const rest = Math.max(0, BAR - done - waiting - active)
+    bar = (
+      <Box flexDirection="column">
+        <Text>
+          <Text color="success">{GLYPH.bar.repeat(done)}</Text>
+          <Text color="warning">{GLYPH.bar.repeat(waiting)}</Text>
+          <Text color="claude">{GLYPH.bar.repeat(active)}</Text>
+          <Text dimColor>{GLYPH.barEmpty.repeat(rest)}</Text>
+        </Text>
+        <Text dimColor wrap="wrap">
+          {[
+            `${GLYPH.dot} ${WORDS.done} ${p.done}`,
+            `${GLYPH.dot} ${WORDS.awaiting} ${p.waiting}`,
+            `${GLYPH.dot} ${WORDS.inWork} ${p.active}`,
+            `${GLYPH.dot} ${WORDS.notStarted} ${p.backlog}`,
+          ].join('  ')}
+        </Text>
+      </Box>
+    )
+  }
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text bold>{WORDS.children}</Text>
+        {p ? (
+          <Text dimColor>
+            {p.done} {WORDS.of} {p.total} {WORDS.done}
+            {p.cancelled > 0 ? ` · ${WORDS.cancelled} ${p.cancelled}` : ''}
+          </Text>
+        ) : null}
+      </Box>
+      {bar}
+      {ch.rows.map(r => (
+        <Button key={`child-${r.key}`} plain onPress={() => void openCard($, r.key)}>
+          <Text color={CHILD_DOT[r.state]} dimColor={r.state === 'backlog' || r.state === 'cancelled'}>
+            {r.state === 'backlog' || r.state === 'cancelled' ? GLYPH.open : GLYPH.current}{' '}
+          </Text>
+          <Text dimColor>{r.key} </Text>
+          <Text strikethrough={r.state === 'cancelled'}>{r.title}</Text>
+          {r.after ? (
+            <Text dimColor>
+              {' · '}
+              {WORDS.after} {r.after}
+            </Text>
+          ) : (
+            ''
+          )}
+          {r.typeChip && r.type ? <Text dimColor> · {r.type}</Text> : ''}
+          <Text color={r.awaiting ? 'warning' : undefined} dimColor={!r.awaiting}>
+            {' · '}
+            {r.awaiting ? `${GLYPH.approval} ` : ''}
+            {r.statusName}
+          </Text>
+        </Button>
+      ))}
+      {p ? null : <Text dimColor>{WORDS.olderServer}</Text>}
+    </Box>
+  )
 }
 
 // --- Модуль -------------------------------------------------------------------
@@ -426,6 +717,7 @@ export const register: Register = (on, options) => {
       live = activate($, opts)
       await registerCommand($)
     }
+    sessionOf.current = live
     return started
   })
 
@@ -436,12 +728,14 @@ export const register: Register = (on, options) => {
       live = activate($, opts)
       await registerCommand($)
     }
+    sessionOf.current = live
     return attached
   })
 
   on('session.end', async ($, e, next) => {
     if (live) stop(live)
     live = null
+    sessionOf.current = null
     return next(e)
   })
 
@@ -469,12 +763,52 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  // Тема поменялась в /config — палитра схемы перерисовывается без
+  // перезапуска сессии: запись в themeAtom будит читателей.
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const set = await next(e)
+    if (set.deny === undefined) await update($, themeAtom, () => (typeof set.value === 'string' ? set.value : ''))
+    return set
+  }).catch(($, e, next) => next(e))
+
+  // Полоса над вводом — только для задачи этого чата, ждущей апрува; одна,
+  // о первой такой задаче.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!live || e.props.hasSurvey) return next(e)
+    const keys = await read($, keysAtom)
+    const rows = await read($, rowsAtom)
+    const key = keys.find(k => rows[k]?.awaiting)
+    const row = key ? rows[key] : undefined
+    if (!key || !row) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
+    const gate = row.card?.approvalGate
+    return (
+      <Box flexDirection="row" gap={1}>
+        <Text color="warning">{GLYPH.approval}</Text>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text wrap="truncate-end">
+            {key} {WORDS.awaitingYou}
+            {gate ? ` · ${gate}` : ''}
+          </Text>
+        </Box>
+        <Button key="band-open" onPress={() => void openCard($, key)}>
+          {WORDS.open}
+        </Button>
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const els = $.ui.resolve(e) as unknown as Els
+    const { Box, Text, Button } = els
     const tab = await read($, tabAtom)
     const keys = await read($, keysAtom)
     const rows = await read($, rowsAtom)
     const conn = await read($, connectionAtom)
+    const open = await read($, openAtom)
+    const described = await read($, describedAtom)
+    const scheme = schemeOf(await read($, themeAtom))
+    const now = await $.clock.now()
     const example = `${conn.project ?? 'КЛЮЧ'}-12`
 
     const tabs = (
@@ -500,23 +834,38 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
       ) : (
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap={1}>
           {keys.map(key => {
             const row = rows[key]
             const head = row?.title ? `${key} ${row.title}` : key
             const status = row?.statusName ? ` · ${row.statusName}` : row ? '' : ' · загружаю…'
+            const isOpen = open.includes(key) && !!row?.card
             return (
               <Box flexDirection="column" key={`row-${key}`}>
-                <Box flexDirection="row" justifyContent="space-between">
-                  <Text wrap="truncate-end">
-                    {head}
-                    {status}
-                  </Text>
+                <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <Button key={`open-${key}`} plain dimColor onPress={() => void update($, openAtom, toggle(key))}>
+                    {isOpen ? GLYPH.opened : GLYPH.closed}
+                  </Button>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="truncate-end" bold={isOpen}>
+                      {head}
+                      {status}
+                    </Text>
+                  </Box>
                   <Button key={`remove-${key}`} plain dimColor onPress={() => void untrack($, [key])}>
                     ✕
                   </Button>
                 </Box>
+                {row?.awaiting ? (
+                  <Text color="warning">
+                    {GLYPH.approval} {WORDS.awaiting}
+                    {row.card?.approvalGate ? ` · ${row.card.approvalGate}` : ''}
+                  </Text>
+                ) : null}
                 {row?.error ? <Text color="error">Не обновилось: {row.error}</Text> : null}
+                {isOpen && row?.card
+                  ? cardTree($, els, e.surface, row.card, { scheme, now, described: described.includes(key) })
+                  : null}
               </Box>
             )
           })}

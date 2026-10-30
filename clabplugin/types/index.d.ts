@@ -1,15 +1,96 @@
 // Контракт состояния мода clab-plugin в $.state сессии. Токена здесь нет и
 // быть не может: он живёт только в памяти модуля (решение 0067, п. 3).
 
+// Состояние узла схемы цикла: пройден, текущий, текущий и ждёт апрува,
+// впереди, выключенный необязательный этап (решение 0066).
+export type NodeState = 'done' | 'current' | 'waiting' | 'future' | 'skipped'
+
+// Узел схемы — статус версии цикла с ролью или терминальный. name — подпись
+// из версии цикла; attempts — прогоны верхнего уровня на этом статусе.
+export type CycleNode = { key: string; name: string; state: NodeState; attempts: number }
+
+// Фактический возврат: из какого узла (индекс в nodes, null — узла на схеме
+// нет) в какой, подпись статуса-источника, комментарий перехода и время.
+export type CardBack = { from: number | null; to: number | null; fromName: string; reason: string | null; at: string | null }
+
+// Вердикт гейта так, как его рисует карточка: ✓ прошёл или снят, ✓ серым —
+// не относится, ○ не прошёл, ⏸ ждёт апрува человека, ✕ отклонён.
+export type GateMark = 'ok' | 'skip' | 'open' | 'approval' | 'fail'
+
+export type CardGate = { name: string; type: string; status: string; reason: string | null; blocking: boolean; mark: GateMark }
+
+export type CardGates = { transition: string; items: CardGate[]; passed: number; total: number }
+
+export type CardArtifact = { title: string; version: number | null; stage: string | null; at: string | null }
+
+export type CardAttachment = { name: string; size: number | null; at: string | null }
+
+export type CardLink = { label: string; url: string }
+
+// Состояние ребёнка в карточке родителя: по категории статуса и признаку
+// «ждёт апрува», которые отдаёт сервер в children[].
+export type ChildState = 'done' | 'waiting' | 'active' | 'backlog' | 'cancelled'
+
+export type ChildRow = {
+  key: string
+  title: string
+  type: string | null
+  // Чип типа — только у ребёнка, чей тип отличается от самого частого.
+  typeChip: boolean
+  statusName: string
+  state: ChildState
+  awaiting: boolean
+  // Входящие blocks: «после КЛЮЧ, КЛЮЧ +N»; null — связей нет или сервер их
+  // не отдаёт.
+  after: string | null
+}
+
+export type ChildProgress = { done: number; waiting: number; active: number; backlog: number; cancelled: number; total: number }
+
+// progress null — сервер старше полей children[] (status_category и др.):
+// строки детей есть, полосы и «после» нет.
+export type CardChildren = { progress: ChildProgress | null; rows: ChildRow[] }
+
+// Модель карточки — всё, что рисует раскрытая строка, без слов, зависящих от
+// часов: давность и остаток аренды считаются при рисовании.
+export type CardData = {
+  key: string
+  title: string
+  type: string | null
+  priority: string | null
+  statusName: string
+  workflowName: string | null
+  workflowVersion: number | null
+  nodes: CycleNode[]
+  // Номер текущего узла среди узлов схемы (с 1); 0 — статуса задачи на схеме нет.
+  step: number
+  attempt: number
+  holder: string | null
+  leaseUntil: string | null
+  back: CardBack | null
+  gates: CardGates | null
+  awaiting: boolean
+  approvalGate: string | null
+  artifacts: CardArtifact[]
+  attachments: CardAttachment[]
+  cost: number | null
+  prs: CardLink[]
+  description: string | null
+  children: CardChildren | null
+  url: string | null
+}
+
 // Строка задачи во вкладке «Этот чат»: ключ, заголовок и подпись статуса из
-// версии цикла задачи. error — последняя ошибка чтения; прежние поля при
-// ошибке остаются, как были.
+// версии цикла задачи, признак «ждёт апрува» и модель карточки. error —
+// последняя ошибка чтения; прежние поля при ошибке остаются, как были.
 export type TaskRow = {
   key: string
   title: string
   statusName: string
+  awaiting: boolean
   error: string | null
   fetchedAt: number
+  card: CardData | null
 }
 
 export type Tab = 'chat' | 'approvals' | 'tasks'
@@ -32,6 +113,11 @@ declare module 'claude-code' {
       rows: Shaped<Record<string, TaskRow>>
       tab: Shaped<Tab>
       connection: Shaped<Connection>
+      // Раскрытые строки и открытые описания — ключи задач.
+      open: Shaped<string[]>
+      described: Shaped<string[]>
+      // Значение ряда theme из /config: палитра схемы цикла (Svg).
+      theme: Shaped<string>
     }
   }
 }
