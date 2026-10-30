@@ -2,6 +2,8 @@
 // ответов. Всё, что зовёт $ (clab, сеть, часы, состояние), живёт в
 // register.tsx: движок прослеживает $ только внутри одного файла.
 
+import type { Workflow } from './card'
+
 export type Options = { host: string; project: string; clab: string }
 
 export const hostOf = (s: string) => s.trim().replace(/\/+$/, '').replace(/\/v1$/, '').replace(/\/+$/, '')
@@ -22,6 +24,9 @@ export const POLL_MS = 30_000
 // Между запросами событий не меньше секунды: сервер, который отвечает сразу,
 // не превращает цикл в плотный.
 export const MIN_GAP_MS = 1_000
+// Своё действие в чате (clab, тул MCP), которое меняет задачу, не даёт
+// тоста: событие о нём приходит, пока тул идёт, и ещё столько после.
+export const QUIET_MS = 5_000
 // Паузы после сетевых ошибок подряд.
 export const BACKOFF_MS = [5_000, 10_000, 30_000, 60_000] as const
 // Токена нет или он не принят: повтор не раньше чем через минуту — вдруг
@@ -48,12 +53,10 @@ export class ApiError extends Error {
   }
 }
 
-export type Workflow = { id: string; statuses: { key: string; name: string }[] }
-export type TaskDetail = { task: { key: string; title: string; status_key: string; workflow_id: string } }
 export type EventsPage = { events?: unknown[]; cursor?: unknown }
 
-// Сессия мода. Токен — только здесь, в памяти модуля: ни в $.state, ни в
-// $.store, ни в тостах и строке статуса (решение 0067, п. 3).
+// Сессия мода. Токен — только здесь, в памяти модуля: ни в состоянии сессии,
+// ни в хранилище мода, ни в тостах и строке статуса (решение 0067, п. 3).
 export type Session = {
   opts: Options
   host: string | null
@@ -69,6 +72,8 @@ export type Session = {
   stopped: boolean
   failures: number
   polledAt: Map<string, number>
+  // Ключ → до какого времени изменения задачи — свои (без тоста).
+  quiet: Map<string, number>
   ready: Promise<void>
 }
 
@@ -87,6 +92,7 @@ export function newSession(opts: Options): Session {
     stopped: false,
     failures: 0,
     polledAt: new Map(),
+    quiet: new Map(),
     ready: Promise.resolve(),
   }
 }

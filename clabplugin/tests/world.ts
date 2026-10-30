@@ -20,6 +20,10 @@ export type WorldOptions = {
   routes?: (path: string, auth: string | undefined) => Reply | undefined
   // Сетевая ошибка на запросы, путь которых подходит.
   fail?: RegExp
+  // Где стоят часы в начале теста (мс); по умолчанию 0.
+  now?: number
+  // Значение ряда theme в /config; undefined — ряда нет.
+  theme?: string
 }
 
 export type Journal = {
@@ -63,7 +67,13 @@ export function world(on: On, opts: WorldOptions = {}) {
   const j: Journal = { argv: [], envs: [], urls: [], auths: [], statuses: [], opened: 0, commands: [], toasts: [], tools: [], prompts: [], states: [] }
   const tokens = opts.tokens ?? [TOKEN]
   let tokenCalls = 0
-  const clock = mock.clock(on)
+  const clock = mock.clock(on, { now: opts.now ?? 0 })
+  on('config.list', () => ({
+    value:
+      opts.theme === undefined
+        ? []
+        : [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme, options: ['auto', 'dark', 'light'], provider: { plugin: 'engine', tier: 'core' }, isLocked: false }],
+  }) as never)
 
   on('state.set', (_, e, next) => {
     j.states.push(JSON.stringify(e))

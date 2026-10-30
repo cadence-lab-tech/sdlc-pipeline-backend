@@ -291,8 +291,10 @@ func (s *Server) getTask(c *gin.Context) {
 		return
 	}
 	// Дети, связи и стоимость едут вместе с задачей: карточка эпика — это
-	// дерево нарезки со счётом, а не отдельный экран.
-	children, err := s.store.ChildTasks(ctx, q, task.ID)
+	// дерево нарезки со счётом, а не отдельный экран. У ребёнка — категория
+	// статуса, «ждёт апрува» и входящие blocks (CLAB-324): форма элемента
+	// прежняя, поля только добавлены.
+	children, err := s.engine.ChildCards(ctx, q, task.ID)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -303,6 +305,14 @@ func (s *Server) getTask(c *gin.Context) {
 		return
 	}
 	usage, err := s.store.TaskUsage(ctx, q, task.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	// Привязанные PR и ветки — соседним полем (CLAB-324): карточка плагина
+	// показывает PR вторым планом и укладывается в два запроса на задачу.
+	// Ручка /repo-refs остаётся: поле только добавлено.
+	refs, err := s.store.ListRepoRefs(ctx, q, task.ID)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -325,6 +335,7 @@ func (s *Server) getTask(c *gin.Context) {
 		"children":    children,
 		"links":       links,
 		"usage":       usage,
+		"repo_refs":   refs,
 	})
 }
 
