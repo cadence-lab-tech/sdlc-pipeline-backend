@@ -499,6 +499,12 @@ func renderTransitionResult(raw json.RawMessage) error {
 		Blocked bool          `json:"blocked"`
 		Skips   []string      `json:"skips"`
 		Gates   []gateOutcome `json:"gates"`
+		// REST отдаёт прежний прогон как previous_run (handlers.go); from_stage_run —
+		// имя из Go-структуры движка, по проводу его нет. Читаем оба: прежний
+		// статус пуст, только если сервер не прислал ни одного из них.
+		PreviousRun struct {
+			StatusKey string `json:"status_key"`
+		} `json:"previous_run"`
 		FromRun struct {
 			StatusKey string `json:"status_key"`
 		} `json:"from_stage_run"`
@@ -506,10 +512,14 @@ func renderTransitionResult(raw json.RawMessage) error {
 	if err := decode(raw, &out); err != nil {
 		return err
 	}
+	from := out.PreviousRun.StatusKey
+	if from == "" {
+		from = out.FromRun.StatusKey
+	}
 	if out.Blocked {
 		fmt.Printf("%s остаётся в %s: гейты не пройдены\n", out.Task.Key, out.Task.StatusKey)
 	} else {
-		fmt.Printf("%s: %s → %s\n", out.Task.Key, dash(out.FromRun.StatusKey), out.Task.StatusKey)
+		fmt.Printf("%s: %s → %s\n", out.Task.Key, dash(from), out.Task.StatusKey)
 		if line := skippedLine(out.Skips); line != "" {
 			fmt.Println(line)
 		}
