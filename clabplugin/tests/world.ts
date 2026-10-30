@@ -30,6 +30,8 @@ export type Journal = {
   argv: string[][]
   envs: Record<string, string>[]
   urls: string[]
+  // Метод каждого запроса к серверу, по порядку urls.
+  methods: string[]
   auths: (string | undefined)[]
   statuses: (string | undefined)[]
   opened: number
@@ -64,7 +66,7 @@ export const task = (key: string, title: string, status: string, workflow = 'wf-
 export const WHOAMI = { principal: 'user:ann', authenticated: true, api: `${HOST}/v1`, project: { key: 'ACME', name: 'Acme' } }
 
 export function world(on: On, opts: WorldOptions = {}) {
-  const j: Journal = { argv: [], envs: [], urls: [], auths: [], statuses: [], opened: 0, commands: [], toasts: [], tools: [], prompts: [], states: [] }
+  const j: Journal = { argv: [], envs: [], urls: [], methods: [], auths: [], statuses: [], opened: 0, commands: [], toasts: [], tools: [], prompts: [], states: [] }
   const tokens = opts.tokens ?? [TOKEN]
   let tokenCalls = 0
   const clock = mock.clock(on, { now: opts.now ?? 0 })
@@ -129,6 +131,7 @@ export function world(on: On, opts: WorldOptions = {}) {
   })
   on('http.fetch', (_, e) => {
     j.urls.push(e.url)
+    j.methods.push(String((e.init as { method?: string } | undefined)?.method ?? 'GET'))
     const auth = e.init?.headers?.Authorization
     j.auths.push(auth)
     const path = e.url.startsWith(`${HOST}/v1`) ? e.url.slice(`${HOST}/v1`.length) : e.url

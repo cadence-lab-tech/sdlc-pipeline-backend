@@ -67,7 +67,29 @@ export const WORDS = {
   byte: 'Б',
   kb: 'КБ',
   mb: 'МБ',
+  // Просмотр артефактов этапа.
+  stages: 'Этапы',
+  run: 'Прогон',
+  running: 'идёт',
+  toChat: 'В чат',
+  copy: 'Копировать',
+  attachments: 'Вложения',
+  noArtifacts: 'Артефактов нет',
+  currentVersion: 'текущая',
+  lines: 'строк',
+  openFull: 'Открыть полностью',
+  download: 'скачать',
+  noInline: 'не открывать inline',
+  loading: 'загружаю…',
+  notLoaded: 'Не загрузилось',
+  noText: 'файл по контракту: открывается скачиванием',
+  viaCli: 'с токеном',
+  copied: 'Скопировано',
+  notCopied: 'Не скопировалось',
 } as const
+
+// Месяцы для даты прогона: «29 окт, 18:40».
+export const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'] as const
 
 // Значки вердикта гейта и состояния. Значки — не слова, но и они закрыты.
 export const GLYPH = {
@@ -87,4 +109,10 @@ export const GLYPH = {
   bar: '█',
   barEmpty: '░',
   arrow: '→',
+  prev: '‹',
+  crumb: '›',
+  nested: '↳',
+  down: '↓',
+  close: '✕',
+  more: '…',
 } as const

@@ -2,6 +2,7 @@
 // ответов. Всё, что зовёт $ (clab, сеть, часы, состояние), живёт в
 // register.tsx: движок прослеживает $ только внутри одного файла.
 
+import type { TaskFiles } from './artifact'
 import type { Workflow } from './card'
 
 export type Options = { host: string; project: string; clab: string }
@@ -64,6 +65,10 @@ export type Session = {
   token: string | null
   bin: string | null
   workflows: Map<string, Promise<Workflow>>
+  // Просмотр артефактов: списки задач и тексты версий. Артефакт иммутабелен
+  // (supersedes_id), поэтому полученный текст не читается второй раз.
+  files: Map<string, TaskFiles>
+  content: Map<string, string>
   // null — ещё не спрашивали, false — ручки нет, мод опрашивает задачи.
   events: boolean | null
   cursor: string | null
@@ -85,6 +90,8 @@ export function newSession(opts: Options): Session {
     token: null,
     bin: null,
     workflows: new Map(),
+    files: new Map(),
+    content: new Map(),
     events: null,
     cursor: null,
     timer: null,

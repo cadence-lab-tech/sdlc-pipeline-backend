@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CardData, Connection, Tab, TaskRow } from '../types'
+import type { ArtifactView, CardData, Connection, RunRow, Tab, TaskRow } from '../types'
+import { chatText, clip, contentPath, isMarkup, languageOf, resolve, shownOf, typeLabel, whenRange } from './artifact'
+import type { ApiArtifact, ApiAttachment, Selection, TaskFiles } from './artifact'
 import { ago, backLine, cardOf, metaLine, money, sizeOf } from './card'
 import type { TaskDetail, Workflow } from './card'
 import { anyKeys, promptKeys, toolKeys } from './keys'
@@ -49,11 +51,12 @@ const COMMAND = 'clab-plugin'
 // Значения сессии, которые читает панель. Учётных данных среди них нет.
 export const keysAtom = atom({ plugin: 'clab-plugin', key: 'keys' } as const, [] as string[], { shape: 'keys-1' })
 export const rowsAtom = atom({ plugin: 'clab-plugin', key: 'rows' } as const, {} as Record<string, TaskRow>, {
-  shape: 'rows-2',
+  shape: 'rows-3',
 })
 export const openAtom = atom({ plugin: 'clab-plugin', key: 'open' } as const, [] as string[], { shape: 'open-1' })
 export const describedAtom = atom({ plugin: 'clab-plugin', key: 'described' } as const, [] as string[], { shape: 'described-1' })
 export const themeAtom = atom({ plugin: 'clab-plugin', key: 'theme' } as const, '', { shape: 'theme-1' })
+export const viewAtom = atom({ plugin: 'clab-plugin', key: 'view' } as const, null as ArtifactView | null, { shape: 'view-1' })
 export const tabAtom = atom({ plugin: 'clab-plugin', key: 'tab' } as const, 'chat' as Tab, { shape: 'tab-1' })
 export const connectionAtom = atom(
   { plugin: 'clab-plugin', key: 'connection' } as const,
@@ -112,20 +115,24 @@ async function token($: $T, s: Session): Promise<string> {
 
 // Запрос к /v1 личным токеном. На 401 токен перечитывается один раз (его мог
 // обновить clab auth login в другом терминале); второй 401 — просьба войти.
-async function api<T>($: $T, s: Session, path: string): Promise<T> {
+async function request($: $T, s: Session, path: string, accept = 'application/json'): Promise<string> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const auth = await token($, s)
     const res = await $.http.fetch(`${s.host}/v1${path}`, {
-      headers: { Authorization: `Bearer ${auth}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${auth}`, Accept: accept },
     })
     if (res.status === 401) {
       s.token = null
       continue
     }
     if (!res.ok) throw new ApiError(res.status, messageOf(res.status, res.text))
-    return JSON.parse(res.text) as T
+    return res.text
   }
   throw new ApiError(401, LOGIN_HINT)
+}
+
+async function api<T>($: $T, s: Session, path: string): Promise<T> {
+  return JSON.parse(await request($, s, path)) as T
 }
 
 // Версия цикла иммутабельна (решение 0016): за сессию каждая читается один
@@ -260,6 +267,8 @@ async function expand($: $T, keys: string[]) {
 const toggle = (key: string) => (list: string[]) => (list.includes(key) ? list.filter(k => k !== key) : [...list, key])
 
 async function untrack($: $T, keys: string[]) {
+  await update($, viewAtom, v => (v && keys.includes(v.key) ? null : v))
+  for (const k of keys) sessionOf.current?.files.delete(k)
   await update($, keysAtom, list => list.filter(k => !keys.includes(k)))
   await update($, openAtom, list => list.filter(k => !keys.includes(k)))
   await update($, rowsAtom, rows => {
@@ -489,7 +498,7 @@ async function onPrompt($: $T, s: Session, text: string) {
 // --- Карточка ------------------------------------------------------------------
 
 // Элементы поверхности. Svg есть везде, кроме терминала: там схема — строка.
-type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Svg?: any }
+type Els = { Box: any; Text: any; Button: any; Link: any; Markdown: any; Code: any; Select: any; Svg?: any }
 
 // Раскрыть карточку задачи из полосы над вводом или из строки ребёнка:
 // задача попадает в чат, строка раскрывается, панель открывается.
@@ -503,6 +512,92 @@ async function openCard($: $T, key: string) {
 
 // Сессия для обработчиков нажатий, у которых нет своей ссылки на неё.
 const sessionOf: { current: Session | null } = { current: null }
+
+// --- Просмотр артефактов этапа --------------------------------------------------
+//
+// Только чтение: GET списка, содержимого и вложений личным токеном. Данные —
+// в памяти сессии мода (файлы и тексты), в состоянии — только выбор человека.
+// Состояние меняется после того, как данные выбранного пришли: при ошибке
+// остаётся прежнее показанное, а ошибка — строкой под ним.
+
+const enc = encodeURIComponent
+
+async function loadFiles($: $T, s: Session, key: string) {
+  const [a, f] = await Promise.all([
+    api<{ artifacts?: ApiArtifact[] | null }>($, s, `/tasks/${enc(key)}/artifacts?include_superseded=true`),
+    api<{ attachments?: ApiAttachment[] | null }>($, s, `/tasks/${enc(key)}/attachments`),
+  ])
+  s.files.set(key, { artifacts: a.artifacts ?? [], attachments: f.attachments ?? [] } satisfies TaskFiles)
+}
+
+async function loadContent($: $T, s: Session, art: ApiArtifact) {
+  if (s.content.has(art.id)) return
+  s.content.set(art.id, await request($, s, `/artifacts/${enc(art.id)}/content`, '*/*'))
+}
+
+const patchView = (key: string, p: Partial<ArtifactView>) => (v: ArtifactView | null) =>
+  v && v.key === key ? { ...v, ...p, rev: v.rev + 1 } : v
+
+// Показать выбор: сначала данные, потом состояние. reload — перечитать список
+// (открытие просмотра), иначе список из памяти и версия без запроса, если её
+// текст уже получен.
+async function showView($: $T, s: Session, key: string, sel: Selection, reload = false) {
+  await update($, viewAtom, patchView(key, { busy: true }))
+  try {
+    if (reload || !s.files.has(key)) await loadFiles($, s, key)
+    const card = (await read($, rowsAtom))[key]?.card
+    if (!card) throw new Error('карточка задачи ещё не загружена')
+    const r = resolve(card, s.files.get(key), sel)
+    if (r.version && shownOf(r.version.art) !== 'file') await loadContent($, s, r.version.art)
+    await update(
+      $,
+      viewAtom,
+      patchView(key, {
+        stage: r.stage?.key ?? null,
+        kind: r.chip?.kind ?? null,
+        version: r.version && !r.version.current ? r.version.art.id : null,
+        error: null,
+        busy: false,
+      }),
+    )
+  } catch (err) {
+    await update($, viewAtom, patchView(key, { error: err instanceof Error ? err.message : String(err), busy: false }))
+  }
+}
+
+// Открыть просмотр из карточки: этап (null — по умолчанию) и панель.
+async function openView($: $T, key: string, stage: string | null) {
+  const s = sessionOf.current
+  if (!s) return
+  await update($, viewAtom, () => ({ key, stage, kind: null, version: null, error: null, busy: true, rev: 0 }))
+  await update($, tabAtom, () => 'chat' as Tab)
+  await $.ui.open({ id: PANE, title: TITLE })
+  await showView($, s, key, { stage, kind: null, version: null }, true)
+}
+
+// Выбор вкладки, чипа или версии. Выбор выше по иерархии сбрасывает ниже.
+async function choose($: $T, key: string, pick: Partial<Selection>) {
+  const s = sessionOf.current
+  const v = await read($, viewAtom)
+  if (!s || !v || v.key !== key) return
+  const sel: Selection = { stage: v.stage, kind: v.kind, version: v.version, ...pick }
+  await showView($, s, key, sel)
+}
+
+async function closeView($: $T) {
+  await update($, viewAtom, () => null)
+}
+
+// «В чат»: заголовок и полный текст — в поле ввода. Ход не начинается и в
+// разговор плагин ничего не пишет: отправляет человек.
+async function toChat($: $T, key: string, art: ApiArtifact, text: string) {
+  await $.prompt.fill({ text: chatText(key, art.kind, art.version, text), mode: 'insert' })
+}
+
+async function copyText($: $T, text: string, surface: string) {
+  const done = await $.ui.copy({ text, surface: surface as never })
+  $.ui.toast(done.isCopied ? WORDS.copied : WORDS.notCopied)
+}
 
 const MARK_COLOR = { ok: 'success', skip: undefined, open: undefined, approval: 'warning', fail: 'error' } as const
 const MARK_GLYPH = { ok: GLYPH.ok, skip: GLYPH.ok, open: GLYPH.open, approval: GLYPH.approval, fail: GLYPH.fail } as const
@@ -590,6 +685,20 @@ function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
       </Box>
     )
 
+  const stages =
+    c.stages.length === 0 ? null : (
+      <Box flexDirection="column">
+        <Text bold>{WORDS.stages}</Text>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {c.stages.map(st => (
+            <Button key={`stage-open-${c.key}-${st.key}`} onPress={() => void openView($, c.key, st.key)}>
+              {st.attempts > 1 ? `${st.name} ×${st.attempts}` : st.name}
+            </Button>
+          ))}
+        </Box>
+      </Box>
+    )
+
   const footer = (
     <Box flexDirection="row" gap={2} flexWrap="wrap">
       {c.description ? (
@@ -626,8 +735,217 @@ function cardTree($: $T, els: Els, surface: string, c: CardData, o: CardOpts) {
       {gates}
       {kids}
       {files}
+      {stages}
       {footer}
       {o.described && c.description ? <Markdown text={c.description} /> : null}
+    </Box>
+  )
+}
+
+const runLine = (r: RunRow) => [r.role, r.holder, [whenRange(r.from, r.to), r.running ? WORDS.running : null].filter(Boolean).join(' · ') || null].filter(Boolean).join(' · ')
+
+function viewTree($: $T, els: Els, row: TaskRow, v: ArtifactView) {
+  const { Box, Text, Button, Link, Markdown, Code, Select } = els
+  const s = sessionOf.current
+  const c = row.card as CardData
+  const files = s?.files.get(v.key)
+  const r = resolve(c, files, v)
+  const art = r.version?.art
+  const shown = art ? shownOf(art) : null
+  const text = art ? s?.content.get(art.id) : undefined
+  const cut = text !== undefined ? clip(text) : null
+
+  const head = (
+    <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1}>
+        <Button key="view-back" plain onPress={() => void closeView($)}>
+          {`${GLYPH.prev} ${c.key}`}
+        </Button>
+        {r.stage ? (
+          <Text bold wrap="truncate-end">
+            {GLYPH.crumb} {r.stage.name}
+          </Text>
+        ) : null}
+      </Box>
+      <Button key="view-close" plain dimColor onPress={() => void closeView($)}>
+        {GLYPH.close}
+      </Button>
+    </Box>
+  )
+
+  const tabs = (
+    <Box flexDirection="row" gap={1} flexWrap="wrap">
+      {c.stages.map(st => (
+        <Button
+          key={`stage-${st.key}`}
+          variant={st.key === r.stage?.key ? 'primary' : 'secondary'}
+          onPress={() => void choose($, v.key, { stage: st.key, kind: null, version: null })}>
+          {st.attempts > 1 ? `${st.name} ×${st.attempts}` : st.name}
+        </Button>
+      ))}
+    </Box>
+  )
+
+  const runs = r.stage ? (
+    <Box flexDirection="column">
+      {r.stage.runs.map(run => (
+        <Box flexDirection="column" key={`run-${run.id}`}>
+          <Text wrap="wrap" dimColor>
+            {WORDS.run} {run.attempt} · {runLine(run)}
+          </Text>
+          {run.back ? (
+            <Text wrap="wrap">
+              <Text color="error">{GLYPH.back} </Text>
+              {WORDS.returnedFrom} {run.back.fromName}
+              {run.back.reason ? `: «${run.back.reason}»` : ''}
+            </Text>
+          ) : null}
+          {run.reviews.map(rv => (
+            <Text key={`review-${rv.id}`} wrap="wrap" dimColor>
+              {GLYPH.nested} {gateWord('agent_review')} · {runLine(rv)}
+            </Text>
+          ))}
+        </Box>
+      ))}
+    </Box>
+  ) : null
+
+  const chips =
+    r.chips.length === 0 ? (
+      <Text dimColor>{files ? WORDS.noArtifacts : WORDS.loading}</Text>
+    ) : (
+      <Box flexDirection="row" gap={1} flexWrap="wrap">
+        {r.chips.map(ch => (
+          <Button
+            key={`kind-${ch.kind}`}
+            variant={ch.kind === r.chip?.kind ? 'primary' : 'secondary'}
+            onPress={() => void choose($, v.key, { kind: ch.kind, version: null })}>
+            {ch.title}
+          </Button>
+        ))}
+      </Box>
+    )
+
+  const download = (id: string, path: string) => (
+    <Box flexDirection="column">
+      {s?.host ? <Link href={`${s.host}${path}`} label={`${WORDS.download} ${GLYPH.down}`} /> : null}
+      <Text dimColor wrap="wrap">
+        {WORDS.download} {WORDS.viaCli}: clab artifact {id} -o ./
+      </Text>
+    </Box>
+  )
+
+  let body = null
+  if (r.chip && art) {
+    const versions = r.chip.versions
+    const picker =
+      versions.length > 1 ? (
+        <Select
+          key="version"
+          options={[...versions].reverse().map(x => ({ value: x.art.id, label: `v${x.art.version ?? 1}${x.current ? ` · ${WORDS.currentVersion}` : ''}` }))}
+          value={art.id}
+          onSelect={(id: string) => void choose($, v.key, { version: id })}
+        />
+      ) : (
+        <Text dimColor>v{art.version ?? 1}</Text>
+      )
+    let content = null
+    if (shown === 'file') {
+      content = (
+        <Box flexDirection="column">
+          <Text dimColor wrap="wrap">
+            {[typeLabel(art.media_type ?? undefined, art.file_name ?? undefined), sizeOf(typeof art.size_bytes === 'number' ? art.size_bytes : null), art.file_name].filter(Boolean).join(' · ')}
+            {isMarkup(art) ? ` · ${WORDS.download}, ${WORDS.noInline}` : ''}
+          </Text>
+          {download(art.id, contentPath(art.id))}
+        </Box>
+      )
+    } else if (cut) {
+      content = (
+        <Box flexDirection="column">
+          {shown === 'markdown' ? <Markdown text={cut.text} /> : <Code source={cut.text} language={languageOf(art)} format={shown === 'diff' ? 'diff' : undefined} />}
+          {cut.hidden > 0 ? (
+            <Box flexDirection="row" gap={2} flexWrap="wrap">
+              <Text dimColor>
+                {GLYPH.more} {WORDS.more} {cut.hidden} {WORDS.lines}
+              </Text>
+              {c.url ? <Link href={c.url} label={`${WORDS.openFull} ${GLYPH.link}`} /> : null}
+            </Box>
+          ) : null}
+        </Box>
+      )
+    } else {
+      content = <Text dimColor>{v.busy ? WORDS.loading : ''}</Text>
+    }
+    body = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text bold wrap="wrap">
+              {art.title ?? art.kind}
+            </Text>
+            <Text dimColor wrap="truncate-end">
+              {art.kind}
+            </Text>
+          </Box>
+          {picker}
+        </Box>
+        {content}
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {text !== undefined ? (
+            <Button key="to-chat" variant="primary" onPress={() => void toChat($, c.key, art, text)}>
+              {WORDS.toChat}
+            </Button>
+          ) : null}
+          {text !== undefined ? (
+            <Button key="copy" variant="secondary" onPress={e => void copyText($, text, e.surface)}>
+              {WORDS.copy}
+            </Button>
+          ) : null}
+          {c.url ? <Link href={c.url} label={`${WORDS.openInLab} ${GLYPH.link}`} /> : null}
+        </Box>
+      </Box>
+    )
+  }
+
+  const attachments = (files?.attachments ?? []).length === 0 ? null : (
+    <Box flexDirection="column">
+      <Text bold>{WORDS.attachments}</Text>
+      {(files?.attachments ?? []).map(a => (
+        <Box flexDirection="column" key={`att-${a.id}`}>
+          <Text wrap="wrap">
+            <Text dimColor>{GLYPH.file} </Text>
+            {a.file_name ?? a.title}
+          </Text>
+          <Text dimColor wrap="wrap">
+            {[
+              typeLabel(a.media_type, a.file_name),
+              sizeOf(typeof a.size_bytes === 'number' ? a.size_bytes : null),
+              a.added_by,
+              isMarkup({ media_type: a.media_type, file_name: a.file_name }) ? `${WORDS.download}, ${WORDS.noInline}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+          {download(a.id, a.content_path ?? contentPath(a.id))}
+        </Box>
+      ))}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" gap={1} key={`view-${c.key}`}>
+      {head}
+      {tabs}
+      {runs}
+      {chips}
+      {body}
+      {v.error ? (
+        <Text color="error" wrap="wrap">
+          {WORDS.notLoaded}: {v.error}
+        </Text>
+      ) : null}
+      {attachments}
     </Box>
   )
 }
@@ -810,6 +1128,7 @@ export const register: Register = (on, options) => {
     const conn = await read($, connectionAtom)
     const open = await read($, openAtom)
     const described = await read($, describedAtom)
+    const view = await read($, viewAtom)
     const scheme = schemeOf(await read($, themeAtom))
     const now = await $.clock.now()
     const example = `${conn.project ?? 'КЛЮЧ'}-12`
@@ -884,9 +1203,12 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    const viewRow = view ? rows[view.key] : undefined
     const body =
       tab === 'chat'
-        ? chat
+        ? view && viewRow?.card
+          ? viewTree($, els, viewRow, view)
+          : chat
         : tab === 'approvals'
           ? later('Здесь будут задачи, которые ждут вашего решения.')
           : later('Здесь будет список задач проекта.')
