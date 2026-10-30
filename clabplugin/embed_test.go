@@ -102,14 +102,15 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-// AC-14: мод не знает этапов, ролей и типов нашего цикла и нашего инстанса.
+// AC-14 (CLAB-324) и AC-8.8 (CLAB-325): мод не знает этапов, ролей и типов
+// нашего цикла и циклов других проектов (story, incident) и нашего инстанса.
 // Типы движка и тесты — вне проверки.
 func TestNoCycleVocabulary(t *testing.T) {
 	files, err := Files("dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`analysis|development|testing|merge|epic|release|CLAB|food-cart`)
+	re := regexp.MustCompile(`analysis|development|testing|merge|epic|release|story|incident|CLAB|food-cart`)
 	for _, f := range files {
 		if strings.HasPrefix(f.Path, "types/") {
 			continue
