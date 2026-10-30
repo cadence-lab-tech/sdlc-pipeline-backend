@@ -220,3 +220,36 @@ func TestSkipStageLimitUnchangedWithoutSkip(t *testing.T) {
 		t.Fatalf("недоступный переход: %v %+v", err, out)
 	}
 }
+
+// AC-2, ветка «негодный»: у последнего обходного перехода max_duration
+// негоден — гейт не называет effective_max_duration и говорит, что предела
+// там нет, а прогон на посадке открывается без предела (один помощник
+// enteredLimit у гейта и limitFor).
+func TestSkipStageLimitInvalidViaConfig(t *testing.T) {
+	ctx := context.Background()
+	w := newSkipWorld(t)
+	task := w.create(t, "Негодный предел обходного", "", `{"design": false, "docs": false}`)
+	w.move(t, task.Key, "start")
+	cur, _ := w.current(t, task.Key)
+	if _, err := w.store.DB().Exec(ctx, `
+		UPDATE gates SET config = '{"max_duration": "abc"}'
+		WHERE type = 'stage_time_limit' AND transition_id = (
+			SELECT id FROM workflow_transitions WHERE workflow_id = $1 AND key = 'docs_done')`, cur.WorkflowID); err != nil {
+		t.Fatal(err)
+	}
+	_, g := w.timeGate(t, cur)
+	if g.Status != domain.GateResultPassed || g.Details["via"] != "docs_done" || g.Details["applies"] != false {
+		t.Fatalf("вердикт: %+v", g)
+	}
+	if _, has := g.Details["effective_max_duration"]; has {
+		t.Fatalf("негодный предел назван действующим: %v", g.Details)
+	}
+	if !strings.Contains(g.Reason, "предела там нет (docs_done)") {
+		t.Fatalf("reason: %q", g.Reason)
+	}
+	w.move(t, task.Key, "analysis_done")
+	landed, _ := w.current(t, task.Key)
+	if limit, err := w.engine.StageLimit(ctx, landed); err != nil || limit != nil {
+		t.Fatalf("предел на посадке: %+v %v", limit, err)
+	}
+}
