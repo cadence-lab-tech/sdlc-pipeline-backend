@@ -78,6 +78,21 @@ The rules of the import format (names, types, what is refused) are in
      agents and runners fail with `stage_time_exceeded`, a live lease keeps
      working. Only a human lifts it, with `waived` on the entry transition,
      until the stage ends.
+   - Which of a role's documents a status delivers is the cycle's choice,
+     not the role's: a role knows nothing about statuses. In a status of
+     `bundle.json`, `role_documents` lists the document names of the
+     executing role (`role`) for this status, and `reviewer_documents`
+     maps a reviewer role key to its names: `{"<reviewer key>": ["…"]}`.
+     No field — the stage gets all the role's documents; there is no empty
+     list. The order of names means nothing: documents come in the role
+     version's order. A name must not be empty or repeated, at most 50 per
+     role; `role_documents` without `role` or a key of `reviewer_documents`
+     missing from `reviewers` is refused. A name the role's latest version
+     lacks is not refused: validation and activation report it as the
+     `role_document_missing` warning, and the stage then skips it (or gets
+     all the documents if none of the names exists). Rename or remove a
+     role document — check the selections that name it. The same selection
+     is set in the interface in the status dialog of a cycle draft.
 3. **Dry run**: `clab import --dir rules/ --dry-run`. In the report roles
    are `unchanged | new_version` (only the roles you edited are
    `new_version`), cycles `draft_created`, and
@@ -110,6 +125,11 @@ several documents.
 A bundle written as one JSON file (`clab export > bundle.json`,
 `clab import --file bundle.json`) still works and suits carrying the whole
 bundle between projects; for editing roles use the directory.
+`export --dir`, `import --dir` and `role put --dir` exist only in newer
+builds of `clab` (after v0.20.0); with `clab` v0.20.0 the bundle goes as
+one JSON file: `clab export > bundle.json`, edit `roles[]` and `workflows[]`
+in it, `clab import --file bundle.json --dry-run`, then without
+`--dry-run`. `clab --version` tells which build you have.
 
 ## Do not
 

@@ -196,7 +196,9 @@ func TestKitDocuments(t *testing.T) {
 			"`.claude/skills`", "`.claude/agents`", "not skills or agents of Claude Code",
 			// откаты: сервер без documents и clab без флага
 			"A server of an older version sends no documents", "single document `main.md`",
-			"A `clab` of an older version does not know these flags", "take the output of plain `clab claim` as it is",
+			"A `clab` of an older version does not know `--instructions-dir`",
+			"v0.20.0 knows `--instructions-file` and lacks only `--instructions-dir`",
+			"take `--instructions-file` or the output of plain `clab claim` as it is",
 			"header line",
 		},
 		"skills/clab-run/SKILL.md": {
@@ -244,6 +246,55 @@ func TestKitDocuments(t *testing.T) {
 			if strings.Contains(body, s) {
 				t.Errorf("%s: устаревшая или опасная фраза %q", path, s)
 			}
+		}
+	}
+}
+
+// CLAB-348 (решение 0068, п. 3): цикл отбирает документы роли на статусе.
+// Исполнитель узнаёт, что получил только отобранное и что значит
+// document_warnings; справка объясняет отбор; clab-rules учит полям связки
+// и предупреждению проверки; откаты называют версию clab, где флагов --dir
+// ещё нет (решение человека по замечаниям тестировщика CLAB-349).
+func TestKitStatusDocuments(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := map[string]string{}
+	for _, f := range k.Files {
+		flat[f.Path] = strings.Join(strings.Fields(f.Content), " ")
+	}
+	want := map[string][]string{
+		"skills/clab-work/SKILL.md": {
+			"The cycle may narrow the set for a status", "only the picked documents, in the version's order",
+			"role.document_warnings", "all of the version's documents come",
+		},
+		"skills/clab-guide/SKILL.md": {
+			"Selection on a status", "role itself knows nothing about statuses",
+			"role.document_warnings", "role_document_missing",
+			"v0.20.0 and earlier",
+		},
+		"skills/clab-rules/SKILL.md": {
+			"role_documents", "reviewer_documents", "`{\"<reviewer key>\": [\"…\"]}`",
+			"No field — the stage gets all the role's documents", "role_document_missing",
+			"exist only in newer builds of `clab` (after v0.20.0)", "clab import --file bundle.json --dry-run",
+		},
+	}
+	for path, needles := range want {
+		body, ok := flat[path]
+		if !ok {
+			t.Fatalf("в наборе нет %s", path)
+		}
+		for _, s := range needles {
+			if !strings.Contains(body, s) {
+				t.Errorf("%s: нет %q", path, s)
+			}
+		}
+	}
+	// Прежняя формулировка отката ошибалась: v0.20.0 знает --instructions-file.
+	for path, body := range flat {
+		if strings.Contains(body, "does not know these flags") {
+			t.Errorf("%s: откат «не знает этих флагов» — v0.20.0 знает --instructions-file", path)
 		}
 	}
 }
