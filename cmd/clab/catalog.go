@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/importguide"
 )
 
 // Команды фазы 4: токены и участники, перенос правил, каталог репозиториев и
@@ -258,22 +260,48 @@ func cmdMembers(ctx context.Context, c *Client, args []string) error {
 // ── перенос правил ──────────────────────────────────────────────────────────
 
 func cmdExport(ctx context.Context, c *Client, args []string) error {
-	var projectFlag string
+	var projectFlag, dir string
+	var force bool
 	_, err := flags("export", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
+		fs.StringVar(&dir, "dir", "", "выгрузить каталогом: bundle.json и roles/<ключ роли>/ (role.json и документы <имя>.md)")
+		fs.BoolVar(&force, "force", false, "с --dir: заменить bundle.json и roles/ в непустом каталоге")
 	})
 	if err != nil {
 		return err
+	}
+	if force && dir == "" {
+		return fmt.Errorf("--force — только вместе с --dir")
 	}
 	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
-	var out any
-	if err := c.get(ctx, "/projects/"+key+"/export", nil, &out); err != nil {
+	if dir == "" {
+		var out any
+		if err := c.get(ctx, "/projects/"+key+"/export", nil, &out); err != nil {
+			return err
+		}
+		return print(out)
+	}
+
+	var raw json.RawMessage
+	if err := c.get(ctx, "/projects/"+key+"/export", nil, &raw); err != nil {
 		return err
 	}
-	return print(out)
+	plan, err := planBundleDir(raw)
+	if err != nil {
+		return err
+	}
+	if err := writeBundleDir(dir, plan, force); err != nil {
+		return err
+	}
+	written := map[string]any{"dir": dir, "project": key, "roles": plan.roles, "role_documents": plan.documents}
+	return emit(written, func() error {
+		fmt.Printf("Каталог связки %s: проект %s, ролей %d, документов ролей %d.\n", dir, key, plan.roles, plan.documents)
+		fmt.Printf("Проверить правки: clab import --dir %s --project %s --dry-run\n", dir, key)
+		return nil
+	})
 }
 
 // cmdImport применяет связку к проекту, а с --to — к нескольким сразу: связка
@@ -281,21 +309,45 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 // быть файл или проект-шаблон (--from) — тогда экспорт делается на месте, без
 // файла посередине.
 //
+// С --dir источник — каталог связки (CLAB-345): он читается один раз и до
+// первого запроса, а на сервер уходит та же JSON-связка, что из файла.
+//
 // Отчёт остаётся по проектам: `unchanged` против `new_version` показывает, где
 // команда ушла от шаблона. Сливать её правки с обновлением шаблона система не
 // берётся — это решение человека, и правила у него пока нет (§13).
 func cmdImport(ctx context.Context, c *Client, args []string) error {
-	var projectFlag, file, from, to string
+	var projectFlag, file, from, dir, to string
 	var dryRun bool
 	_, err := flags("import", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&file, "file", "", "связка JSON; - читает stdin")
 		fs.StringVar(&from, "from", "", "взять связку из проекта-шаблона вместо файла")
+		fs.StringVar(&dir, "dir", "", "каталог связки: bundle.json и roles/<ключ роли>/ (role.json и документы <имя>.md)")
 		fs.StringVar(&to, "to", "", "применить к нескольким проектам через запятую")
 		fs.BoolVar(&dryRun, "dry-run", false, "только отчёт, без изменений")
 	})
 	if err != nil {
 		return err
+	}
+	sources := 0
+	for _, s := range []string{file, from, dir} {
+		if s != "" {
+			sources++
+		}
+	}
+	if sources > 1 {
+		return fmt.Errorf("--file, --from и --dir вместе не задаются: источник связки один")
+	}
+
+	var bundle json.RawMessage
+	if dir != "" {
+		read, err := readBundleDir(dir)
+		if err != nil {
+			return err
+		}
+		if bundle, err = json.Marshal(read); err != nil {
+			return err
+		}
 	}
 
 	targets := splitCSV(to)
@@ -307,8 +359,8 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 		targets = []string{key}
 	}
 
-	var bundle json.RawMessage
 	switch {
+	case dir != "":
 	case from != "":
 		if err := c.get(ctx, "/projects/"+url.PathEscape(from)+"/export", nil, &bundle); err != nil {
 			return err
@@ -346,7 +398,7 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdImportGuide(_ context.Context, _ *Client, _ []string) error {
-	fmt.Println(importGuide)
+	fmt.Print(importguide.Text)
 	return nil
 }
 
@@ -753,24 +805,3 @@ func splitCSV(s string) []string {
 	}
 	return out
 }
-
-// importGuide дублирует текст MCP-тула sdlc_import_guide: CLI не ходит в MCP,
-// а агенту без MCP инструкция нужна та же.
-const importGuide = `Перенос правил команды в проект SDLC
-
-1. Найди в репозитории: CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules/*,
-   .github/copilot-instructions.md, CONTRIBUTING.md, docs/ARCHITECTURE.md,
-   docs/adr/*, глоссарии, реестры API, описания ролей и чек-листы ревью.
-2. Описание работы специалиста -> роль (roles[].instructions + output_contract).
-   Соглашения, архитектура, ADR, глоссарий -> документы (documents[]).
-   Репозитории проекта -> repositories[] с role_hint. Явные этапы с условиями
-   перехода -> workflow (придёт черновиком).
-3. Собери bundle.json:
-   {"version":1,
-    "repositories":[{"repository":"acme/api","role_hint":"backend"}],
-    "roles":[{"key":"reviewer","name":"Ревьюер","instructions":"...",
-              "output_contract":[{"kind":"review.verdict","format":"json","required":true}]}],
-    "documents":[{"kind":"guideline","title":"Соглашения","content":"..."}]}
-4. clab import --file bundle.json --dry-run  -> покажи отчёт человеку.
-5. clab import --file bundle.json            -> примени.
-Ничего не сочиняй: скажи, чего в репозитории не нашлось.`
