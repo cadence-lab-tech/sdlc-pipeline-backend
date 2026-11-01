@@ -214,7 +214,7 @@ func TestExportDirLayout(t *testing.T) {
 	}
 	var docs []roleDirDocument
 	_ = json.Unmarshal(fields["documents"], &docs)
-	want := []roleDirDocument{{"main.md", "instructions"}, {"crlf.md", "reference"}, {"bom.md", "instructions"}, {"nonl.md", "checklist"}}
+	want := []roleDirDocument{{Name: "main.md", Kind: "instructions"}, {Name: "crlf.md", Kind: "reference"}, {Name: "bom.md", Kind: "instructions"}, {Name: "nonl.md", Kind: "checklist"}}
 	if !reflect.DeepEqual(docs, want) {
 		t.Fatalf("documents %v, ждали %v", docs, want)
 	}
@@ -625,8 +625,18 @@ func TestRoleManifestCoversBundleRole(t *testing.T) {
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("поля role.json %v, у workflow.BundleRole %v", got, want)
 	}
-	if want, got := tags(reflect.TypeFor[workflow.BundleRoleDocument](), "content"), tags(reflect.TypeFor[roleDirDocument]()); !reflect.DeepEqual(want, got) {
+	// instruction_version — ссылка номером без содержимого (sdlc_put_role):
+	// в каталоге содержимое лежит файлом, и версия находится по его sha.
+	if want, got := tags(reflect.TypeFor[workflow.BundleRoleDocument](), "content", "instruction_version"), tags(reflect.TypeFor[roleDirDocument]()); !reflect.DeepEqual(want, got) {
 		t.Fatalf("строка documents %v, у workflow.BundleRoleDocument %v", got, want)
+	}
+	// Библиотека (CLAB-351): instruction.json несёт все поля инструкции и
+	// версии связки, кроме содержимого версии — оно лежит файлом v<N>.md.
+	if want, got := tags(reflect.TypeFor[workflow.BundleInstruction]()), tags(reflect.TypeFor[instructionManifest]()); !reflect.DeepEqual(want, got) {
+		t.Fatalf("поля instruction.json %v, у workflow.BundleInstruction %v", got, want)
+	}
+	if want, got := tags(reflect.TypeFor[workflow.BundleInstructionVersion](), "content"), tags(reflect.TypeFor[instructionDirVersion]()); !reflect.DeepEqual(want, got) {
+		t.Fatalf("версия в instruction.json %v, у workflow.BundleInstructionVersion %v", got, want)
 	}
 }
 

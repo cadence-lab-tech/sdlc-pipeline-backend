@@ -5,11 +5,14 @@ package workflow
 // их склейка для clab, раннера и реплик прежних версий.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
@@ -22,6 +25,26 @@ type RoleDocumentInput struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind,omitempty"`
 	Content string `json:"content"`
+	// Instruction — документ ссылкой на версию инструкции библиотеки
+	// (решение 0069): имя <ключ>.md, тип и байты берёт сервер, content
+	// пуст. Оба способа у одного документа — отказ.
+	Instruction *InstructionRef `json:"instruction,omitempty"`
+	// Unpin — не переносить закрепление прежней версии на этот документ,
+	// даже если текст тот же: «Отвязать» в форме роли. Клиент без
+	// библиотеки поля не шлёт, и перенос работает (решение 0069, п. 4).
+	Unpin bool `json:"unpin,omitempty"`
+
+	// matchContent — ссылка из связки: версия ищется по sha содержимого, а
+	// не по номеру (номера в связке справочные).
+	matchContent bool
+	// pin — разрешённое закрепление; ставит prepareDocuments.
+	pin *domain.RoleDocumentPin
+}
+
+// InstructionRef — ключ и номер версии инструкции.
+type InstructionRef struct {
+	Key     string `json:"key"`
+	Version int    `json:"version,omitempty"`
 }
 
 // MaxRoleDocuments — предохранитель, а не квота: роли CLAB разбиваются на
@@ -158,6 +181,7 @@ func documentsOf(docs []RoleDocumentInput) []domain.RoleDocument {
 		out[i] = domain.RoleDocument{
 			Name: d.Name, Kind: d.Kind, Position: i,
 			SHA256: hex.EncodeToString(sum[:]), SizeBytes: int64(len(d.Content)), Content: &text,
+			Instruction: d.pin,
 		}
 	}
 	return out
@@ -167,21 +191,176 @@ func storeDocuments(docs []RoleDocumentInput) []postgres.RoleDocumentInput {
 	out := make([]postgres.RoleDocumentInput, len(docs))
 	for i, d := range docs {
 		out[i] = postgres.RoleDocumentInput{Name: d.Name, Kind: d.Kind, Content: []byte(d.Content)}
+		if d.pin != nil {
+			id := d.pin.ID
+			out[i].InstructionVersionID = &id
+		}
 	}
 	return out
 }
 
 // sameDocuments — тот же набор по (name, kind, position, sha256)
-// (решение 0068, п. 5.5).
+// (решение 0068, п. 5.5) и закреплению (решение 0069): документ, ставший
+// закреплённым при тех же байтах, — новая версия роли.
 func sameDocuments(have, want []domain.RoleDocument) bool {
 	if len(have) != len(want) {
 		return false
 	}
 	for i := range have {
 		h, w := have[i], want[i]
-		if h.Name != w.Name || h.Kind != w.Kind || h.Position != w.Position || h.SHA256 != w.SHA256 {
+		if h.Name != w.Name || h.Kind != w.Kind || h.Position != w.Position || h.SHA256 != w.SHA256 ||
+			!samePin(h.Instruction, w.Instruction) {
 			return false
 		}
 	}
 	return true
+}
+
+func samePin(a, b *domain.RoleDocumentPin) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Key == b.Key && a.Version == b.Version
+}
+
+// InstructionDocumentName — имя закреплённого документа: всегда <ключ>.md
+// (решение 0069, п. 2). На нём держатся отбор документов на статусе и
+// «обновить в ролях».
+func InstructionDocumentName(key string) string { return key + ".md" }
+
+// prepareDocuments сводит вход версии роли к набору документов с
+// закреплениями (решения 0068 и 0069). Порядок важен: ссылки разрешаются в
+// имя, тип и байты до общей проверки набора — дубль имени и предел размера
+// ловятся одним правилом для обоих способов; перенос закрепления — после
+// неё, по уже проверенному набору. roleID — uuid.Nil у роли, которой ещё
+// нет: переносить не из чего.
+func (a *Authoring) prepareDocuments(ctx context.Context, q postgres.Querier, projectID, roleID uuid.UUID, in RoleVersionInput) ([]RoleDocumentInput, error) {
+	if in.Documents != nil && in.Instructions != "" {
+		return nil, apperr.InvalidInput("у версии роли либо instructions, либо documents, а не оба сразу")
+	}
+	if in.Documents == nil {
+		docs, err := roleDocuments(in, a.store.BlobLimit())
+		if err != nil {
+			return nil, err
+		}
+		return docs, a.carryPins(ctx, q, roleID, docs)
+	}
+	docs := make([]RoleDocumentInput, len(in.Documents))
+	copy(docs, in.Documents)
+	for i := range docs {
+		if docs[i].Instruction == nil {
+			continue
+		}
+		if err := a.resolvePin(ctx, q, projectID, i+1, &docs[i]); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkRoleDocuments(docs, a.store.BlobLimit()); err != nil {
+		return nil, err
+	}
+	return docs, a.carryPins(ctx, q, roleID, docs)
+}
+
+// resolvePin разрешает ссылку документа n на версию инструкции проекта.
+// Ссылка номером (REST, MCP, форма) — без содержимого; ссылка из связки
+// (matchContent) — с содержимым, версия ищется по его sha.
+func (a *Authoring) resolvePin(ctx context.Context, q postgres.Querier, projectID uuid.UUID, n int, d *RoleDocumentInput) error {
+	ref := d.Instruction
+	fail := func(format string, args ...any) error {
+		return apperr.InvalidInput("документ %d: "+format, append([]any{n}, args...)...).
+			WithDetails(map[string]any{"document": n, "instruction": ref.Key})
+	}
+	if strings.TrimSpace(ref.Key) == "" {
+		return fail("у ссылки на инструкцию нет ключа (instruction.key)")
+	}
+	name := InstructionDocumentName(ref.Key)
+	if d.Name != "" && d.Name != name {
+		return fail("закреплённый за инструкцией %s документ зовётся %s, а не %q", ref.Key, name, d.Name)
+	}
+	inst, err := a.store.GetInstructionByKey(ctx, q, projectID, ref.Key)
+	if apperr.As(err).Code == apperr.CodeNotFound {
+		return fail("инструкции %s нет в проекте", ref.Key)
+	}
+	if err != nil {
+		return err
+	}
+	var v domain.InstructionVersion
+	if d.matchContent {
+		v, err = a.store.FindInstructionVersionBySHA(ctx, q, inst.ID, sha256Hex(d.Content))
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return fail("%s: текст не совпадает ни с одной версией инструкции %s", name, ref.Key)
+		}
+		if err != nil {
+			return err
+		}
+	} else {
+		if d.Content != "" {
+			return fail("у документа либо content, либо instruction, а не оба сразу")
+		}
+		if ref.Version < 1 {
+			return fail("у ссылки на инструкцию %s нет номера версии (instruction.version)", ref.Key)
+		}
+		v, err = a.store.GetInstructionVersion(ctx, q, inst.ID, ref.Version, true)
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return fail("версии %d инструкции %s нет", ref.Version, ref.Key)
+		}
+		if err != nil {
+			return err
+		}
+		d.Content = deref(v.Content)
+	}
+	if d.Kind != "" && d.Kind != v.Kind {
+		return fail("тип закреплённого документа — тип версии инструкции (%s), а не %q", v.Kind, d.Kind)
+	}
+	d.Name, d.Kind = name, v.Kind
+	d.pin = &domain.RoleDocumentPin{ID: v.ID, Key: ref.Key, Version: v.Version}
+	return nil
+}
+
+// carryPins — перенос закрепления (решение 0069, п. 4): документ пришёл
+// содержимым, а в последней версии роли под тем же именем лежал
+// закреплённый документ с теми же типом и байтами — закрепление переходит в
+// новую версию. Так клиент, не знающий библиотеки, теряет закрепление
+// только у документа, который и правда изменил. Unpin — явный отказ.
+func (a *Authoring) carryPins(ctx context.Context, q postgres.Querier, roleID uuid.UUID, docs []RoleDocumentInput) error {
+	if roleID == uuid.Nil {
+		return nil
+	}
+	latest, err := a.store.LatestRoleVersion(ctx, q, roleID)
+	if apperr.As(err).Code == apperr.CodeNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	have := []domain.RoleVersion{latest}
+	if err := a.store.AttachRoleDocuments(ctx, q, have, false); err != nil {
+		return err
+	}
+	pinned := map[string]domain.RoleDocument{}
+	for _, d := range have[0].Documents {
+		if d.Instruction != nil {
+			pinned[d.Name] = d
+		}
+	}
+	if len(pinned) == 0 {
+		return nil
+	}
+	for i := range docs {
+		d := &docs[i]
+		if d.pin != nil || d.Unpin {
+			continue
+		}
+		prev, ok := pinned[d.Name]
+		if ok && prev.Kind == d.Kind && prev.SHA256 == sha256Hex(d.Content) {
+			pin := *prev.Instruction
+			d.pin = &pin
+		}
+	}
+	return nil
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

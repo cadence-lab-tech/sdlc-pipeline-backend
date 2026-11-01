@@ -27,6 +27,13 @@ Two kinds of documents, do not mix them up:
 - **project documents** — `documents` at the top of the bundle (guidelines,
   architecture, ADRs): read by every role.
 
+A rule shared by several roles (git, the delivery section, a report
+format) can live once in the project's **instruction library**: an
+instruction has a key (`git`), immutable versions, and a role takes it as
+the document `<key>.md` pinned to one version. A new instruction version
+changes no role: roles move to it only through "update in roles"
+(`clab instruction apply`), which creates a new version of each chosen role.
+
 The rules of the import format (names, types, what is refused) are in
 `clab import-guide`; run it and follow it instead of copying its text here.
 
@@ -40,7 +47,13 @@ The rules of the import format (names, types, what is refused) are in
    - `rules/roles/<role key>/role.json` — the role's fields without document
      content, and `documents` as a list of `{name, kind}` in delivery order;
    - `rules/roles/<role key>/<name>.md` — the content of a role document,
-     byte for byte.
+     byte for byte;
+   - `rules/instructions/<key>/instruction.json` and `v<N>.md` — the
+     instruction library: the instruction's fields and `versions`
+     (`{version, kind, changelog}`), and the content of each exported version
+     (those pinned by roles and the latest). A role document pinned to the
+     library has `"instruction": "<key>"` in its `role.json` line; its
+     `<key>.md` file stays next to the others.
 
    Import applies everything in the directory: remove the repositories and
    project documents from `bundle.json` unless you meant to change them.
@@ -51,6 +64,11 @@ The rules of the import format (names, types, what is refused) are in
      and the line. The order of lines is the order of delivery. A file
      without a line or a line without a file is refused before anything is
      sent.
+   - A pinned document (`"instruction": "<key>"`) must keep the exact text
+     of one version of that instruction, otherwise import is refused. To
+     change the text for every role, change the instruction (see below); to
+     change it in one role only, drop `"instruction"` from its line and edit
+     the file.
    - The role's other fields live in `role.json`: the contract
      (`output_contract[]` with `kind`, `title`, `format`, `required`), inputs
      (`input_kinds`), the model level.
@@ -121,6 +139,26 @@ not touch keep their content. No change — no new version. A role of one
 document can also be put as `clab role put --key <key> --file main.md …`;
 that makes the version a single `main.md`, so do not use it on a role with
 several documents.
+
+The instruction library has its own commands:
+
+```bash
+clab instruction list                       # key, latest version, pinned, lagging
+clab instruction show <key> [--version N]   # versions, where used, the text
+clab instruction put --key <key> --file rule.md --changelog "what changed"
+clab instruction apply <key> --role <role> [--role <role>] [--version N]
+```
+
+`put` creates the instruction (version 1) or its next version; the same
+text and type as the latest version is refused. `apply` gives every listed
+role a new version where `<key>.md` is pinned to the chosen version (the
+latest by default), everything else as in the role's latest version; a role
+already on that version is left unchanged, a role without `<key>.md` or
+archived refuses the whole call. Adding the instruction to a role that has
+no `<key>.md` yet is a role edit: add the line with `"instruction"` and the
+file, or `{"instruction": "<key>", "instruction_version": N}` through
+`sdlc_put_role`. These commands exist only in builds of `clab` newer than
+v0.20.0; an older server answers that it does not know the library.
 
 A bundle written as one JSON file (`clab export > bundle.json`,
 `clab import --file bundle.json`) still works and suits carrying the whole

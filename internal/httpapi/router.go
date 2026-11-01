@@ -232,6 +232,18 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/projects/:projectKey/roles/:roleKey/versions", maintainer, s.createRoleVersion)
 		v1.GET("/projects/:projectKey/roles/:roleKey/versions/:version", viewer, s.getRoleVersion)
 
+		// Библиотека инструкций (решение 0069). Версия иммутабельна, как у
+		// роли: маршрута правки версии нет, PATCH меняет только вывеску.
+		// Права — как у авторинга ролей; токену задачи открыто только
+		// чтение (executor.go).
+		v1.GET("/projects/:projectKey/instructions", viewer, s.listInstructions)
+		v1.POST("/projects/:projectKey/instructions", maintainer, s.createInstruction)
+		v1.GET("/projects/:projectKey/instructions/:instructionKey", viewer, s.getInstruction)
+		v1.PATCH("/projects/:projectKey/instructions/:instructionKey", maintainer, s.updateInstruction)
+		v1.POST("/projects/:projectKey/instructions/:instructionKey/versions", maintainer, s.createInstructionVersion)
+		v1.GET("/projects/:projectKey/instructions/:instructionKey/versions/:version", viewer, s.getInstructionVersion)
+		v1.POST("/projects/:projectKey/instructions/:instructionKey/apply", maintainer, s.applyInstruction)
+
 		// Версии цикла. Редактируется только черновик; активация переключает
 		// проект на него целиком.
 		v1.GET("/projects/:projectKey/workflows", viewer, s.listWorkflows)

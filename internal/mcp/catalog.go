@@ -46,14 +46,19 @@ func (s *Server) registerCatalogTools() {
 			"Версия — упорядоченный набор документов (documents: [{name, kind, content}], имя вида git.md); "+
 			"instructions строкой — один документ main.md; оба поля сразу — ошибка. "+
 			"Версия иммутабельна: правка любого документа — новая версия со всем набором, "+
-			"тот же набор и поля — unchanged. model_level — уровень модели "+
+			"тот же набор и поля — unchanged. Документ из библиотеки инструкций — ссылкой: "+
+			"{instruction: \"git\", instruction_version: 2} без content и name (имя станет git.md, тип и текст — "+
+			"из версии); документ содержимым с тем же текстом, что у закреплённого в прошлой версии, "+
+			"закрепление сохраняет. model_level — уровень модели "+
 			"роли по умолчанию (low, medium, high); уровень задачи и этапа его перекрывают. "+
 			"model_hint устарел: строка модели для раннера прежних версий, вместо него — model_level.",
 		s.putRole)
 	add(s, "sdlc_get_role",
 		"Роль с последней версией: документы инструкции по порядку (latest_version.documents) "+
-			"и контракт вывода.",
+			"и контракт вывода. У документа, закреплённого за библиотекой, — instruction {key, version}; "+
+			"у роли, отстающей от библиотеки, — role.instruction_lag.",
 		s.getRole)
+	s.registerInstructionTools()
 	add(s, "sdlc_put_document",
 		"Положить проектный документ: содержимым, ссылкой или путём в репозитории. "+
 			"Тот же kind и title — обновление.",
@@ -176,7 +181,7 @@ type putRoleInput struct {
 	Name           string                        `json:"name,omitempty"`
 	Summary        string                        `json:"summary,omitempty"`
 	Instructions   string                        `json:"instructions,omitempty" jsonschema:"инструкция одной строкой (markdown) — станет документом main.md; либо documents"`
-	Documents      []workflow.BundleRoleDocument `json:"documents,omitempty" jsonschema:"документы версии по порядку отдачи: name (строчные, .md, до 64 символов), kind (instructions по умолчанию, checklist, reference…), content (markdown); либо instructions"`
+	Documents      []workflow.BundleRoleDocument `json:"documents,omitempty" jsonschema:"документы версии по порядку отдачи: name (строчные, .md, до 64 символов), kind (instructions по умолчанию, checklist, reference…), content (markdown); из библиотеки — instruction (ключ) и instruction_version без content; либо instructions"`
 	InputKinds     []string                      `json:"input_kinds,omitempty" jsonschema:"артефакты предыдущих этапов на вход"`
 	OutputContract json.RawMessage               `json:"output_contract,omitempty" jsonschema:"[{kind,title,format,required,schema}]"`
 	ToolPolicy     json.RawMessage               `json:"tool_policy,omitempty"`

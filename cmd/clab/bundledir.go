@@ -46,9 +46,10 @@ type bundleDirEntry struct {
 
 // bundleDirPlan — каталог связки целиком, до первой записи на диск.
 type bundleDirPlan struct {
-	files     []bundleDirEntry
-	roles     int
-	documents int
+	files        []bundleDirEntry
+	roles        int
+	documents    int
+	instructions int
 }
 
 // planBundleDir раскладывает ответ экспорта по файлам. Всё проверяется
@@ -68,6 +69,12 @@ func planBundleDir(raw []byte) (bundleDirPlan, error) {
 	if version < bundleDirFormat {
 		return plan, errOldBundleFormat(version)
 	}
+
+	instFiles, instCount, err := planInstructions(top["instructions"])
+	if err != nil {
+		return plan, err
+	}
+	delete(top, "instructions")
 
 	rawRoles, ok := top["roles"].([]any)
 	if !ok && top["roles"] != nil {
@@ -121,6 +128,8 @@ func planBundleDir(raw []byte) (bundleDirPlan, error) {
 		return plan, err
 	}
 	plan.files = append(plan.files, bundleDirEntry{path: bundleDirManifest, body: body})
+	plan.files = append(plan.files, instFiles...)
+	plan.instructions = instCount
 	for _, r := range roles {
 		manifest, err := encodeIndented(r.manifest)
 		if err != nil {
@@ -171,6 +180,7 @@ func planRole(key string, fields map[string]any) (roleManifest, []bundleDirEntry
 		}
 		name, _ := d["name"].(string)
 		kind, _ := d["kind"].(string)
+		instruction, _ := d["instruction"].(string)
 		content, ok := d["content"].(string)
 		// Имя станет именем файла: форма сервера не даёт ему выйти за каталог.
 		if !roleDirName.MatchString(name) {
@@ -183,7 +193,7 @@ func planRole(key string, fields map[string]any) (roleManifest, []bundleDirEntry
 			return manifest, nil, fmt.Errorf("роль %s: у документа %s нет содержимого", key, name)
 		}
 		seen[name] = true
-		manifest.Documents = append(manifest.Documents, roleDirDocument{Name: name, Kind: kind})
+		manifest.Documents = append(manifest.Documents, roleDirDocument{Name: name, Kind: kind, Instruction: instruction})
 		docs = append(docs, bundleDirEntry{path: bundleDirRoles + "/" + key + "/" + name, body: []byte(content)})
 	}
 	return manifest, docs, nil
@@ -337,7 +347,7 @@ func writeBundleDir(dir string, plan bundleDirPlan, force bool) error {
 			return fmt.Errorf("каталог связки: %w", err)
 		}
 		if len(entries) > 0 && !force {
-			return fmt.Errorf("каталог %s не пуст: --force заменит в нём bundle.json и roles/ целиком, "+
+			return fmt.Errorf("каталог %s не пуст: --force заменит в нём bundle.json, roles/ и instructions/ целиком, "+
 				"остальные файлы не тронет", dir)
 		}
 	}
@@ -357,12 +367,14 @@ func writeBundleDir(dir string, plan bundleDirPlan, force bool) error {
 		}
 	}
 
-	rolesPath := filepath.Join(dir, bundleDirRoles)
-	if err := os.RemoveAll(rolesPath); err != nil {
-		return fmt.Errorf("каталог связки: прежний %s: %w", rolesPath, err)
-	}
-	if err := os.Rename(filepath.Join(staging, bundleDirRoles), rolesPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("каталог связки: %w", err)
+	for _, sub := range []string{bundleDirRoles, bundleDirInstructions} {
+		path := filepath.Join(dir, sub)
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("каталог связки: прежний %s: %w", path, err)
+		}
+		if err := os.Rename(filepath.Join(staging, sub), path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("каталог связки: %w", err)
+		}
 	}
 	if err := os.Rename(filepath.Join(staging, bundleDirManifest), filepath.Join(dir, bundleDirManifest)); err != nil {
 		return fmt.Errorf("каталог связки: %w", err)
@@ -401,6 +413,10 @@ func readBundleDir(dir string) (map[string]any, error) {
 			return nil, fmt.Errorf("%s: поля roles в каталоге связки не бывает — роли лежат в %s/<ключ>/ (role.json и документы)",
 				manifestPath, bundleDirRoles)
 		}
+		if _, ok := top["instructions"]; ok {
+			return nil, fmt.Errorf("%s: поля instructions в каталоге связки не бывает — инструкции лежат в %s/<ключ>/ (%s и v<N>.md)",
+				manifestPath, bundleDirInstructions, instructionDirManifest)
+		}
 		if v, ok := top["version"]; ok {
 			if err := json.Unmarshal(v, &version); err != nil {
 				return nil, fmt.Errorf("%s: version — не целое число: %s", manifestPath, v)
@@ -416,11 +432,19 @@ func readBundleDir(dir string) (map[string]any, error) {
 	// есть: сервер, который его не знает, откажет своим текстом.
 	bundle["version"] = max(version, bundleDirFormat)
 
+	instructions, err := readInstructionsDir(filepath.Join(dir, bundleDirInstructions))
+	if err != nil {
+		return nil, err
+	}
+	if len(instructions) > 0 {
+		bundle["instructions"] = instructions
+	}
+
 	rolesPath := filepath.Join(dir, bundleDirRoles)
 	rolesInfo, err := os.Lstat(rolesPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if !hasManifest {
+		if !hasManifest && len(instructions) == 0 {
 			return nil, fmt.Errorf("%s не похоже на каталог связки: нет ни %s, ни %s/", dir, bundleDirManifest, bundleDirRoles)
 		}
 		return bundle, nil

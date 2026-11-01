@@ -93,7 +93,7 @@ func (a *Authoring) CreateRole(ctx context.Context, projectKey string, actor uui
 		if in.Version == nil {
 			return nil
 		}
-		rv, err := a.addVersion(ctx, tx, role.ID, actor, *in.Version)
+		rv, err := a.addVersion(ctx, tx, project.ID, role.ID, actor, *in.Version)
 		if err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func (a *Authoring) AddRoleVersion(ctx context.Context, projectKey, roleKey stri
 		if err != nil {
 			return err
 		}
-		out, err = a.addVersion(ctx, tx, role.ID, actor, in)
+		out, err = a.addVersion(ctx, tx, role.ProjectID, role.ID, actor, in)
 		return err
 	})
 
@@ -124,9 +124,11 @@ func (a *Authoring) AddRoleVersion(ctx context.Context, projectKey, roleKey stri
 // addVersion — единственная точка заведения версии роли: REST, MCP, связка
 // и clab role put приходят сюда. Версия, документы и колонка instructions
 // (склейка) пишутся на одной транзакции tx; через эту точку CLAB-307
-// проведёт черновик версии с апрувом.
-func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, roleID uuid.UUID, actor uuid.UUID, in RoleVersionInput) (domain.RoleVersion, error) {
-	docs, err := roleDocuments(in, a.store.BlobLimit())
+// проведёт черновик версии с апрувом. Ссылки на инструкции библиотеки и
+// перенос закрепления разрешаются здесь же (prepareDocuments, решение
+// 0069): «обновить в ролях» и импорт связки другой точки не имеют.
+func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, projectID, roleID uuid.UUID, actor uuid.UUID, in RoleVersionInput) (domain.RoleVersion, error) {
+	docs, err := a.prepareDocuments(ctx, tx, projectID, roleID, in)
 	if err != nil {
 		return domain.RoleVersion{}, err
 	}
@@ -196,6 +198,11 @@ func (a *Authoring) GetRole(ctx context.Context, projectKey, roleKey string) (Ro
 		return out, err
 	}
 	out.Role = role
+	lag := []domain.Role{role}
+	if err := a.attachLags(ctx, q, role.ProjectID, lag); err != nil {
+		return out, err
+	}
+	out.Role = lag[0]
 	// Список — документы без содержимого, последняя версия — с ним
 	// (контракт CLAB-343 для страницы «Пайплайн»).
 	if out.Versions, err = a.store.ListRoleVersions(ctx, q, role.ID); err != nil {
@@ -301,7 +308,11 @@ func (a *Authoring) ListRoles(ctx context.Context, projectKey string, includeArc
 	if err != nil {
 		return nil, err
 	}
-	return a.store.ListRoles(ctx, q, project.ID, includeArchived)
+	roles, err := a.store.ListRoles(ctx, q, project.ID, includeArchived)
+	if err != nil {
+		return nil, err
+	}
+	return roles, a.attachLags(ctx, q, project.ID, roles)
 }
 
 func (a *Authoring) role(ctx context.Context, q postgres.Querier, projectKey, roleKey string) (domain.Role, error) {

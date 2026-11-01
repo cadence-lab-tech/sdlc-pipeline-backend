@@ -41,8 +41,12 @@ type Bundle struct {
 	Project      *BundleProject     `json:"project,omitempty"`
 	Repositories []BundleRepository `json:"repositories,omitempty"`
 	Roles        []BundleRole       `json:"roles,omitempty"`
-	Documents    []BundleDocument   `json:"documents,omitempty"`
-	Workflows    []BundleWorkflow   `json:"workflows,omitempty"`
+	// Библиотека инструкций (решение 0069, п. 7): необязательное поле
+	// формата 3. Сервер без библиотеки его теряет, и роли приходят обычными
+	// документами — содержимое у документа роли остаётся в связке.
+	Instructions []BundleInstruction `json:"instructions,omitempty"`
+	Documents    []BundleDocument    `json:"documents,omitempty"`
+	Workflows    []BundleWorkflow    `json:"workflows,omitempty"`
 	// Связка первой версии несла ровно один цикл. Поле читается на импорте,
 	// чтобы старые связки продолжали применяться; экспорт его не пишет.
 	Workflow *BundleWorkflow `json:"workflow,omitempty"`
@@ -88,11 +92,35 @@ type BundleRole struct {
 }
 
 // BundleRoleDocument — документ роли в связке, в порядке отдачи агенту.
-// Пустой kind — instructions.
+// Пустой kind — instructions. Имя и содержимое необязательны в схеме
+// только ради ссылки на инструкцию (тогда их берёт сервер); у обычного
+// документа пустые — отказ проверки набора.
 type BundleRoleDocument struct {
-	Name    string `json:"name"`
+	Name    string `json:"name,omitempty"`
 	Kind    string `json:"kind,omitempty"`
-	Content string `json:"content"`
+	Content string `json:"content,omitempty"`
+	// Instruction — ключ инструкции, за версией которой закреплён документ
+	// (решение 0069): версия ищется по sha содержимого. Без содержимого —
+	// ссылка номером InstructionVersion (путь sdlc_put_role).
+	Instruction        string `json:"instruction,omitempty"`
+	InstructionVersion int    `json:"instruction_version,omitempty"`
+}
+
+// BundleInstruction — инструкция библиотеки в связке: версии по
+// возрастанию номера. Номера справочные: импорт дописывает новые тексты
+// следующими номерами проекта, а узнаёт версии по sha.
+type BundleInstruction struct {
+	Key      string                     `json:"key"`
+	Name     string                     `json:"name"`
+	Summary  string                     `json:"summary,omitempty"`
+	Versions []BundleInstructionVersion `json:"versions"`
+}
+
+type BundleInstructionVersion struct {
+	Version   int    `json:"version"`
+	Kind      string `json:"kind,omitempty"`
+	Content   string `json:"content"`
+	Changelog string `json:"changelog,omitempty"`
 }
 
 type BundleDocument struct {
@@ -215,6 +243,8 @@ type ImportReport struct {
 	DryRun       bool          `json:"dry_run"`
 	Repositories []ImportEntry `json:"repositories"`
 	Roles        []ImportEntry `json:"roles"`
+	// Инструкции библиотеки; ключа нет, если связка их не несла.
+	Instructions []ImportEntry `json:"instructions,omitempty"`
 	Documents    []ImportEntry `json:"documents"`
 	Workflows    []ImportEntry `json:"workflows,omitempty"`
 	// Проверка каждого пришедшего цикла как графа, в том же порядке.
@@ -275,6 +305,15 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 				return fmt.Errorf("репозиторий %q: %w", r.Repository, err)
 			}
 			report.Repositories = append(report.Repositories, entry)
+		}
+		// Библиотека — до ролей: закрепление документа роли разрешается по
+		// уже импортированным версиям.
+		for _, in := range b.Instructions {
+			entry, err := a.importInstruction(ctx, tx, project.ID, actor, in)
+			if err != nil {
+				return fmt.Errorf("инструкция %q: %w", in.Key, err)
+			}
+			report.Instructions = append(report.Instructions, entry)
 		}
 		for _, r := range b.Roles {
 			entry, err := a.importRole(ctx, tx, project.ID, actor, r)
@@ -373,7 +412,7 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 		if err != nil {
 			return ImportEntry{}, err
 		}
-		if _, err := a.addVersion(ctx, tx, role.ID, actor, version); err != nil {
+		if _, err := a.addVersion(ctx, tx, projectID, role.ID, actor, version); err != nil {
 			return ImportEntry{}, err
 		}
 		return ImportEntry{Key: r.Key, Outcome: "created", ID: role.ID.String()}, nil
@@ -395,7 +434,7 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 
 	// Набор проверяется до сравнения: неверный документ — отказ связки, а
 	// не «unchanged» по совпадению sha.
-	docs, err := roleDocuments(version, a.store.BlobLimit())
+	docs, err := a.prepareDocuments(ctx, tx, projectID, role.ID, version)
 	if err != nil {
 		return ImportEntry{}, err
 	}
@@ -416,7 +455,7 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 	if version.Changelog == nil {
 		version.Changelog = optional("импорт связки")
 	}
-	rv, err := a.addVersion(ctx, tx, role.ID, actor, version)
+	rv, err := a.addVersion(ctx, tx, projectID, role.ID, actor, version)
 	if err != nil {
 		return ImportEntry{}, err
 	}
@@ -433,8 +472,78 @@ func bundleDocumentsIn(docs []BundleRoleDocument) []RoleDocumentInput {
 	out := make([]RoleDocumentInput, len(docs))
 	for i, d := range docs {
 		out[i] = RoleDocumentInput{Name: d.Name, Kind: d.Kind, Content: d.Content}
+		if d.Instruction != "" {
+			out[i].Instruction = &InstructionRef{Key: d.Instruction, Version: d.InstructionVersion}
+			out[i].matchContent = d.Content != ""
+		}
 	}
 	return out
+}
+
+// importInstruction заводит инструкцию или дописывает ей версии, которых
+// нет по sha (решение 0069, п. 7). Та же связка второй раз — unchanged.
+func (a *Authoring) importInstruction(ctx context.Context, tx pgx.Tx, projectID, actor uuid.UUID, b BundleInstruction) (ImportEntry, error) {
+	if err := checkInstructionKey(b.Key); err != nil {
+		return ImportEntry{}, err
+	}
+	if len(b.Versions) == 0 {
+		return ImportEntry{}, apperr.InvalidInput("у инструкции в связке нет ни одной версии")
+	}
+	versions := append([]BundleInstructionVersion(nil), b.Versions...)
+	sort.SliceStable(versions, func(i, j int) bool { return versions[i].Version < versions[j].Version })
+	name := strings.TrimSpace(b.Name)
+	if name == "" {
+		name = b.Key
+	}
+
+	inst, err := a.store.GetInstructionByKey(ctx, tx, projectID, b.Key)
+	created := false
+	switch {
+	case apperr.As(err).Code == apperr.CodeNotFound:
+		if inst, err = a.store.CreateInstruction(ctx, tx, postgres.CreateInstructionInput{
+			ProjectID: projectID, Key: b.Key, Name: name, Summary: optional(b.Summary), CreatedBy: actor,
+		}); err != nil {
+			return ImportEntry{}, err
+		}
+		created = true
+	case err != nil:
+		return ImportEntry{}, err
+	default:
+		if inst.Name != name || !eqOptional(inst.Summary, b.Summary) {
+			if err := a.store.UpdateInstruction(ctx, tx, inst.ID, &name, optional(b.Summary)); err != nil {
+				return ImportEntry{}, err
+			}
+		}
+	}
+
+	var added []string
+	for _, v := range versions {
+		if _, err := a.store.FindInstructionVersionBySHA(ctx, tx, inst.ID, sha256Hex(v.Content)); err == nil {
+			continue
+		} else if apperr.As(err).Code != apperr.CodeNotFound {
+			return ImportEntry{}, err
+		}
+		got, err := a.addInstructionVersion(ctx, tx, inst, actor, InstructionInput{
+			Kind: v.Kind, Content: v.Content, Changelog: optional(v.Changelog),
+		}, false)
+		if err != nil {
+			return ImportEntry{}, fmt.Errorf("версия %d: %w", v.Version, err)
+		}
+		inst.LatestVersion = got.Version
+		added = append(added, fmt.Sprintf("v%d", got.Version))
+	}
+	entry := ImportEntry{Key: b.Key, ID: inst.ID.String()}
+	switch {
+	case created:
+		entry.Outcome, entry.Detail = "created", "версии "+strings.Join(added, ", ")
+	case len(added) > 0:
+		entry.Outcome, entry.Detail = "new_version", "дописаны "+strings.Join(added, ", ")
+	case inst.Name != name || !eqOptional(inst.Summary, b.Summary):
+		entry.Outcome = "updated"
+	default:
+		entry.Outcome, entry.Detail = "unchanged", fmt.Sprintf("все версии уже есть (последняя v%d)", inst.LatestVersion)
+	}
+	return entry, nil
 }
 
 // sameWorkflow — совпадает ли версия цикла (в виде связки) с тем, что
@@ -720,6 +829,9 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 	if err != nil {
 		return out, err
 	}
+	// Версии инструкций, закреплённые экспортируемыми ролями: связка несёт
+	// их и последнюю (решение 0069, п. 7).
+	pinned := map[string][]int{}
 	for _, r := range roles {
 		if r.LatestVersion == nil {
 			continue
@@ -732,6 +844,10 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 		docs := make([]BundleRoleDocument, len(v.Documents))
 		for i, d := range v.Documents {
 			docs[i] = BundleRoleDocument{Name: d.Name, Kind: d.Kind, Content: content(d)}
+			if d.Instruction != nil {
+				docs[i].Instruction = d.Instruction.Key
+				pinned[d.Instruction.Key] = append(pinned[d.Instruction.Key], d.Instruction.Version)
+			}
 		}
 		out.Roles = append(out.Roles, BundleRole{
 			Key: r.Key, Name: r.Name, Summary: deref(r.Summary),
@@ -740,6 +856,10 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 			ModelHint: deref(v.ModelHint), ModelLevel: deref(v.ModelLevel),
 			RepoScope: v.RepoScope, ContextBudget: v.ContextBudget,
 		})
+	}
+
+	if out.Instructions, err = a.exportInstructions(ctx, q, project.ID, pinned); err != nil {
+		return out, err
 	}
 
 	docs, err := a.store.ListProjectDocuments(ctx, q, project.ID)
@@ -772,6 +892,40 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 			return out, err
 		}
 		out.Workflows = append(out.Workflows, *exportWorkflow(wf))
+	}
+	return out, nil
+}
+
+// exportInstructions — инструкции проекта с закреплёнными и последней
+// версиями по возрастанию номера. Проект без библиотеки — nil: связка
+// остаётся байт в байт прежней.
+func (a *Authoring) exportInstructions(ctx context.Context, q postgres.Querier, projectID uuid.UUID, pinned map[string][]int) ([]BundleInstruction, error) {
+	list, err := a.store.ListInstructions(ctx, q, projectID)
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	out := make([]BundleInstruction, 0, len(list))
+	for _, inst := range list {
+		want := map[int]bool{inst.LatestVersion: true}
+		for _, v := range pinned[inst.Key] {
+			want[v] = true
+		}
+		numbers := make([]int, 0, len(want))
+		for v := range want {
+			numbers = append(numbers, v)
+		}
+		sort.Ints(numbers)
+		bi := BundleInstruction{Key: inst.Key, Name: inst.Name, Summary: deref(inst.Summary)}
+		for _, n := range numbers {
+			v, err := a.store.GetInstructionVersion(ctx, q, inst.ID, n, true)
+			if err != nil {
+				return nil, err
+			}
+			bi.Versions = append(bi.Versions, BundleInstructionVersion{
+				Version: v.Version, Kind: v.Kind, Content: deref(v.Content), Changelog: deref(v.Changelog),
+			})
+		}
+		out = append(out, bi)
 	}
 	return out, nil
 }
