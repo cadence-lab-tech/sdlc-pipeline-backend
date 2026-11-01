@@ -48,6 +48,7 @@ func init() {
 		"sdlc_get_drift", "sdlc_search_context",
 		// Чтение правил.
 		"sdlc_get_role", "sdlc_list_documents", "sdlc_get_document",
+		"sdlc_list_instructions", "sdlc_get_instruction",
 		// Запись в круг своей задачи (RequireWriteCircle, RequireLink).
 		"sdlc_update_task", "sdlc_link_tasks", "sdlc_assign_task",
 		// Им стартует раннер.
@@ -59,6 +60,11 @@ func init() {
 		RESTAction("GET", "/v1/projects/:projectKey"),
 		RESTAction("GET", "/v1/projects/:projectKey/roles"),
 		RESTAction("GET", "/v1/projects/:projectKey/roles/:roleKey"),
+		// Библиотека инструкций — чтение правил (решение 0069); запись
+		// закрыта, как у ролей (0049).
+		RESTAction("GET", "/v1/projects/:projectKey/instructions"),
+		RESTAction("GET", "/v1/projects/:projectKey/instructions/:instructionKey"),
+		RESTAction("GET", "/v1/projects/:projectKey/instructions/:instructionKey/versions/:version"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents/:documentID"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents/:documentID/content"),

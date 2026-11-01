@@ -404,6 +404,18 @@ type Role struct {
 	// Номер последней версии; заполняется в списках, чтобы UI не ходил
 	// за версиями отдельным запросом на каждую роль.
 	LatestVersion *int `json:"latest_version,omitempty"`
+	// Отставание по библиотеке (решение 0069): закрепления последней
+	// версии роли, чья версия инструкции ниже последней. Заполняют список
+	// ролей и GET роли; пусто — ключа нет.
+	InstructionLag []InstructionLag `json:"instruction_lag,omitempty"`
+}
+
+// InstructionLag — «есть новее»: последняя версия роли закрепляет версию
+// Pinned инструкции Key, а в библиотеке уже Latest.
+type InstructionLag struct {
+	Key    string `json:"key"`
+	Pinned int    `json:"pinned_version"`
+	Latest int    `json:"latest_version"`
 }
 
 type RoleVersion struct {
@@ -439,6 +451,65 @@ type RoleDocument struct {
 	SHA256    string  `json:"sha256"`
 	SizeBytes int64   `json:"size_bytes"`
 	Content   *string `json:"content,omitempty"`
+	// Закрепление за версией инструкции библиотеки (решение 0069). Отдают
+	// только пути авторинга; ответ захвата его не несёт — агенту важны
+	// байты, а они те же.
+	Instruction *RoleDocumentPin `json:"instruction,omitempty"`
+}
+
+// RoleDocumentPin — ключ и номер версии инструкции, за которой закреплён
+// документ; ID — строка instruction_versions, наружу не отдаётся.
+type RoleDocumentPin struct {
+	ID      uuid.UUID `json:"-"`
+	Key     string    `json:"key"`
+	Version int       `json:"version"`
+}
+
+// Instruction — инструкция библиотеки проекта (решение 0069): общее
+// правило, которое роли берут версией. Ключ неизменен: документ в роли
+// зовётся <ключ>.md.
+type Instruction struct {
+	ID        uuid.UUID  `json:"id"`
+	ProjectID uuid.UUID  `json:"project_id"`
+	Key       string     `json:"key"`
+	Name      string     `json:"name"`
+	Summary   *string    `json:"summary,omitempty"`
+	CreatedBy *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	// Номер последней версии; у инструкции версия есть всегда.
+	LatestVersion int `json:"latest_version"`
+	// Сводка по последним версиям ролей проекта: сколько закрепили и
+	// сколько из них отстают от последней версии.
+	PinnedRoles  int `json:"pinned_roles"`
+	LaggingRoles int `json:"lagging_roles"`
+}
+
+// InstructionVersion — иммутабельная версия инструкции. Content — только
+// там, где его просили.
+type InstructionVersion struct {
+	ID            uuid.UUID  `json:"id"`
+	InstructionID uuid.UUID  `json:"instruction_id"`
+	Version       int        `json:"version"`
+	Kind          string     `json:"kind"`
+	SHA256        string     `json:"sha256"`
+	SizeBytes     int64      `json:"size_bytes"`
+	Changelog     *string    `json:"changelog,omitempty"`
+	CreatedBy     *uuid.UUID `json:"created_by,omitempty"`
+	CreatedByName *string    `json:"created_by_handle,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	Content       *string    `json:"content,omitempty"`
+}
+
+// InstructionUsage — «где используется»: последняя версия роли, у которой
+// есть документ <ключ>.md; Pinned — закреплённая версия, nil — обычный
+// документ. SHA256 — байты документа: по ним интерфейс говорит «текст тот
+// же» или «текст заменится» без второго запроса.
+type InstructionUsage struct {
+	RoleKey     string `json:"role_key"`
+	RoleName    string `json:"role_name"`
+	RoleVersion int    `json:"role_version"`
+	Pinned      *int   `json:"pinned_version"`
+	SHA256      string `json:"sha256"`
 }
 
 // DefaultRoleDocumentKind — тип документа по умолчанию и тип main.md, в

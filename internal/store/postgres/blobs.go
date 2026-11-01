@@ -20,18 +20,21 @@ type BlobRef struct {
 	ExternalURI string
 }
 
-// blobRefsExist — четыре ссылки на blobs(sha256), какие есть в схеме, и
-// других нет: артефакты, файлы прогонов индексации, документы проекта и
-// документы версий ролей (000038, решение 0068). Считаются по всему
+// blobRefsExist — пять ссылок на blobs(sha256), какие есть в схеме, и
+// других нет: артефакты, файлы прогонов индексации, документы проекта,
+// документы версий ролей (000038, решение 0068) и версии инструкций
+// библиотеки (000040, решение 0069): блоб инструкции, которую не закрепила
+// ни одна роль, живёт, пока жива версия. Считаются по всему
 // инстансу, без project_id и team_id: блобы разделяются между арендаторами
 // намеренно (docs/SAAS.md §8), и осиротевший у одного может быть живым у
-// другого. Появится пятая ссылка — её сюда, и проверить, что под неё есть
-// индекс по blob_sha (миграции 000022 и 000038).
+// другого. Появится шестая ссылка — её сюда, и проверить, что под неё есть
+// индекс по blob_sha (миграции 000022, 000038 и 000040).
 const blobRefsExist = `
 	    NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.blob_sha = b.sha256)
 	AND NOT EXISTS (SELECT 1 FROM code_files f WHERE f.blob_sha = b.sha256)
 	AND NOT EXISTS (SELECT 1 FROM project_documents d WHERE d.blob_sha = b.sha256)
-	AND NOT EXISTS (SELECT 1 FROM role_version_documents rd WHERE rd.blob_sha = b.sha256)`
+	AND NOT EXISTS (SELECT 1 FROM role_version_documents rd WHERE rd.blob_sha = b.sha256)
+	AND NOT EXISTS (SELECT 1 FROM instruction_versions iv WHERE iv.blob_sha = b.sha256)`
 
 // blobLockKey — ключ advisory-замка по sha, подставляется в запрос выражением
 // над $1: sha обязан быть первым параметром. Первые 16 шестнадцатеричных цифр

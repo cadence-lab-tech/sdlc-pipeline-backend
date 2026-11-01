@@ -47,6 +47,10 @@ var roleDirName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,60}\.md$`)
 type roleDirDocument struct {
 	Name string `json:"name"`
 	Kind string `json:"kind,omitempty"`
+	// Instruction — ключ инструкции библиотеки, за версией которой
+	// закреплён документ (решение 0069); файл <ключ>.md роли остаётся, и
+	// сервер находит версию по его sha.
+	Instruction string `json:"instruction,omitempty"`
 }
 
 // roleManifest — role.json: все поля роли связки (workflow.BundleRole), кроме
@@ -156,7 +160,7 @@ func readRoleDir(dir string) (map[string]any, error) {
 		dec := json.NewDecoder(bytes.NewReader(rawDocs))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&docs); err != nil {
-			return nil, fmt.Errorf("%s: documents — список [{\"name\": \"main.md\", \"kind\": \"instructions\"}]: %w",
+			return nil, fmt.Errorf("%s: documents — список [{\"name\": \"main.md\", \"kind\": \"instructions\", \"instruction\": \"<ключ>\"}]: %w",
 				manifestPath, err)
 		}
 	}
@@ -223,6 +227,9 @@ func readRoleDir(dir string) (map[string]any, error) {
 		doc := map[string]any{"name": d.Name, "content": string(content)}
 		if d.Kind != "" {
 			doc["kind"] = d.Kind
+		}
+		if d.Instruction != "" {
+			doc["instruction"] = d.Instruction
 		}
 		out = append(out, doc)
 	}

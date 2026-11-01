@@ -169,6 +169,9 @@ type RoleDocumentInput struct {
 	Name    string
 	Kind    string
 	Content []byte
+	// Закрепление за версией инструкции (000040); nil — обычный документ.
+	// Байты обязаны совпадать с версией: это держит внешний ключ схемы.
+	InstructionVersionID *uuid.UUID
 }
 
 type CreateRoleVersionInput struct {
@@ -234,8 +237,9 @@ func (s *Store) CreateRoleVersion(ctx context.Context, q Querier, in CreateRoleV
 	rv.Documents = make([]domain.RoleDocument, 0, len(in.Documents))
 	for i, d := range in.Documents {
 		if _, err := q.Exec(ctx, `
-			INSERT INTO role_version_documents (role_version_id, position, name, kind, blob_sha)
-			VALUES ($1, $2, $3, $4, $5)`, rv.ID, i, d.Name, d.Kind, shas[i]); err != nil {
+			INSERT INTO role_version_documents (role_version_id, position, name, kind, blob_sha,
+			            instruction_version_id)
+			VALUES ($1, $2, $3, $4, $5, $6)`, rv.ID, i, d.Name, d.Kind, shas[i], d.InstructionVersionID); err != nil {
 			return rv, translate(err)
 		}
 		content := string(d.Content)
@@ -244,7 +248,9 @@ func (s *Store) CreateRoleVersion(ctx context.Context, q Querier, in CreateRoleV
 			SizeBytes: int64(len(d.Content)), Content: &content,
 		})
 	}
-	return rv, nil
+	// Ключ и номер закреплений — чтением, а не со входа: ответ заведения
+	// тот же, что у GET версии.
+	return rv, s.attachPins(ctx, q, rv.ID, rv.Documents)
 }
 
 // putRoleDocumentBlobs кладёт содержимое документов в blobs и отдаёт sha по
@@ -319,9 +325,12 @@ func (s *Store) AttachRoleDocuments(ctx context.Context, q Querier, versions []d
 	}
 	rows, err := q.Query(ctx, `
 		SELECT d.role_version_id, d.position, d.name, d.kind, d.blob_sha, b.size_bytes,
-		       CASE WHEN $2 AND b.storage = 'inline' THEN b.content END, b.storage
+		       CASE WHEN $2 AND b.storage = 'inline' THEN b.content END, b.storage,
+		       iv.id, i.key, iv.version
 		FROM role_version_documents d
 		JOIN blobs b ON b.sha256 = d.blob_sha
+		LEFT JOIN instruction_versions iv ON iv.id = d.instruction_version_id
+		LEFT JOIN instructions i ON i.id = iv.instruction_id
 		WHERE d.role_version_id = ANY($1)
 		ORDER BY d.role_version_id, d.position`, ids, withContent)
 	if err != nil {
@@ -338,9 +347,16 @@ func (s *Store) AttachRoleDocuments(ctx context.Context, q Querier, versions []d
 		var d domain.RoleDocument
 		var content []byte
 		var storage string
-		if err := rows.Scan(&id, &d.Position, &d.Name, &d.Kind, &d.SHA256, &d.SizeBytes, &content, &storage); err != nil {
+		var pinID *uuid.UUID
+		var pinKey *string
+		var pinVersion *int
+		if err := rows.Scan(&id, &d.Position, &d.Name, &d.Kind, &d.SHA256, &d.SizeBytes, &content, &storage,
+			&pinID, &pinKey, &pinVersion); err != nil {
 			rows.Close()
 			return translate(err)
+		}
+		if pinID != nil {
+			d.Instruction = &domain.RoleDocumentPin{ID: *pinID, Key: *pinKey, Version: *pinVersion}
 		}
 		if withContent {
 			if storage == "inline" {
@@ -391,4 +407,41 @@ func mainFromColumn(instructions string, withContent bool) domain.RoleDocument {
 		d.Content = &text
 	}
 	return d
+}
+
+// attachPins проставляет закрепления документам только что заведённой
+// версии по позиции.
+func (s *Store) attachPins(ctx context.Context, q Querier, versionID uuid.UUID, docs []domain.RoleDocument) error {
+	rows, err := q.Query(ctx, `
+		SELECT d.position, iv.id, i.key, iv.version
+		FROM role_version_documents d
+		JOIN instruction_versions iv ON iv.id = d.instruction_version_id
+		JOIN instructions i ON i.id = iv.instruction_id
+		WHERE d.role_version_id = $1`, versionID)
+	if err != nil {
+		return translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pos int
+		var pin domain.RoleDocumentPin
+		if err := rows.Scan(&pos, &pin.ID, &pin.Key, &pin.Version); err != nil {
+			return translate(err)
+		}
+		if pos >= 0 && pos < len(docs) {
+			p := pin
+			docs[pos].Instruction = &p
+		}
+	}
+	return translate(rows.Err())
+}
+
+// LockRole берёт строку роли под FOR UPDATE до конца транзакции: «обновить
+// в ролях» сверяет «от какой версии считал» с последней и заводит
+// следующую, и параллельная правка роли между этими шагами иначе прошла бы
+// незамеченной.
+func (s *Store) LockRole(ctx context.Context, q Querier, roleID uuid.UUID) error {
+	var id uuid.UUID
+	err := q.QueryRow(ctx, `SELECT id FROM roles WHERE id = $1 FOR UPDATE`, roleID).Scan(&id)
+	return notFound(err, "роль не найдена")
 }

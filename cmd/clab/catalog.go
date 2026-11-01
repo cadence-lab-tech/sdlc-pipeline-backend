@@ -264,8 +264,8 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 	var force bool
 	_, err := flags("export", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
-		fs.StringVar(&dir, "dir", "", "выгрузить каталогом: bundle.json и roles/<ключ роли>/ (role.json и документы <имя>.md)")
-		fs.BoolVar(&force, "force", false, "с --dir: заменить bundle.json и roles/ в непустом каталоге")
+		fs.StringVar(&dir, "dir", "", "выгрузить каталогом: bundle.json, roles/<ключ роли>/ (role.json и документы <имя>.md) и instructions/<ключ>/ (instruction.json и v<N>.md)")
+		fs.BoolVar(&force, "force", false, "с --dir: заменить bundle.json, roles/ и instructions/ в непустом каталоге")
 	})
 	if err != nil {
 		return err
@@ -296,9 +296,14 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 	if err := writeBundleDir(dir, plan, force); err != nil {
 		return err
 	}
-	written := map[string]any{"dir": dir, "project": key, "roles": plan.roles, "role_documents": plan.documents}
+	written := map[string]any{"dir": dir, "project": key, "roles": plan.roles, "role_documents": plan.documents,
+		"instructions": plan.instructions}
 	return emit(written, func() error {
-		fmt.Printf("Каталог связки %s: проект %s, ролей %d, документов ролей %d.\n", dir, key, plan.roles, plan.documents)
+		fmt.Printf("Каталог связки %s: проект %s, ролей %d, документов ролей %d", dir, key, plan.roles, plan.documents)
+		if plan.instructions > 0 {
+			fmt.Printf(", инструкций библиотеки %d", plan.instructions)
+		}
+		fmt.Println(".")
 		fmt.Printf("Проверить правки: clab import --dir %s --project %s --dry-run\n", dir, key)
 		return nil
 	})

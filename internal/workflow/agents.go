@@ -705,6 +705,12 @@ func (e *Engine) roleView(ctx context.Context, q postgres.Querier, statusID, rol
 	if err != nil {
 		return nil, err
 	}
+	// Закрепление за библиотекой — сведения авторинга: агенту важны байты,
+	// а они те же, и ответ захвата не меняется от введения библиотеки
+	// (решение 0069, п. 6).
+	for i := range versions[0].Documents {
+		versions[0].Documents[i].Instruction = nil
+	}
 	docs, missing := selectDocuments(versions[0].Documents, names)
 	return &RoleView{
 		Key: key, Name: name, Version: rv.Version,
