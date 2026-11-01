@@ -644,16 +644,28 @@ func (s *Store) SetTaskStatus(ctx context.Context, tx pgx.Tx, taskID, statusID u
 	return updatedAt, closedAt, translate(err)
 }
 
-// UpdateTaskProperties пишет свойства задачи целиком.
+// UpdateTaskProperties сливает присланные свойства с текущими и возвращает
+// итог. Не названные ключи не меняются, ключ со значением null снимается
+// (только верхнего уровня: свойства плоские). Замена целиком стирала бы
+// системное `type` у того, кто присылает один ключ, — так делает карточка
+// задачи, правя свойства по одному (CLAB-353).
 //
 // Проверку "multi_repo выключили, а в области два репозитория" делает не этот
 // метод, а отложенный триггер enforce_task_repo_scope() — он сработает на
 // коммите и увидит согласованное состояние, даже если флаг и репозитории
 // меняются одной транзакцией.
-func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, props json.RawMessage) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE tasks SET properties = $2, updated_at = now() WHERE id = $1`, taskID, props)
-	return translate(err)
+func (s *Store) UpdateTaskProperties(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, patch json.RawMessage) (json.RawMessage, error) {
+	var merged json.RawMessage
+	err := tx.QueryRow(ctx, `
+		UPDATE tasks
+		SET properties = (
+		        SELECT coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+		        FROM jsonb_each(tasks.properties || $2::jsonb) AS e
+		        WHERE e.value <> 'null'::jsonb),
+		    updated_at = now()
+		WHERE id = $1
+		RETURNING properties`, taskID, patch).Scan(&merged)
+	return merged, translate(err)
 }
 
 // UpdateTaskFieldsInput — постановка задачи: заголовок, описание, приоритет,

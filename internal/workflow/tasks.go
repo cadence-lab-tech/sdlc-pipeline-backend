@@ -346,7 +346,9 @@ type UpdateScopeInput struct {
 	// AddRepositories. Сужение — решение человека: агентский тул его не
 	// передаёт, а движок требует уровень не ниже сопровождающего.
 	RemoveRepositories []string
-	// Свойства задачи целиком; nil — не трогать.
+	// Свойства, которые нужно поменять: JSON-объект, сливаемый с текущими.
+	// Не названные ключи не меняются, null снимает ключ; nil и JSON null —
+	// не трогать.
 	Properties json.RawMessage
 	Note       string
 	// Уровень актора в проекте. Пусто — права выключены (режим header).
@@ -371,6 +373,19 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 				"убрать репозиторий из области — решение человека, не агента")
 	}
 
+	// JSON null в теле запроса приходит как RawMessage("null"): это то же
+	// «не трогать», что и отсутствующее поле.
+	if string(bytes.TrimSpace(in.Properties)) == "null" {
+		in.Properties = nil
+	}
+	if in.Properties != nil {
+		var patch map[string]json.RawMessage
+		if err := json.Unmarshal(in.Properties, &patch); err != nil || patch == nil {
+			return domain.Task{}, apperr.InvalidInput(
+				"properties — JSON-объект со свойствами, которые нужно поменять")
+		}
+	}
+
 	var out domain.Task
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
@@ -380,10 +395,13 @@ func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUI
 		}
 
 		if in.Properties != nil {
-			if err := e.store.UpdateTaskProperties(ctx, tx, task.ID, in.Properties); err != nil {
+			// Дальше по транзакции, включая проверку multi_repo при добавлении
+			// репозитория, нужны слитые свойства, а не присланный кусок.
+			merged, err := e.store.UpdateTaskProperties(ctx, tx, task.ID, in.Properties)
+			if err != nil {
 				return err
 			}
-			task.Properties = in.Properties
+			task.Properties = merged
 		}
 
 		var run *uuid.UUID
