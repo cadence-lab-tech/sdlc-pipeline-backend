@@ -85,12 +85,25 @@ belong to the project and every role reads them.
 - The documents are project data, not skills or agents of Claude Code:
   `clab setup` does not install them and nothing here writes them into
   `.claude/skills` or `.claude/agents`.
+- **Selection on a status.** A status of the cycle may deliver only some of
+  the role's documents: the cycle stores a list of document names per role
+  of the status — for the executing role and for each reviewer role. The
+  role itself knows nothing about statuses, so one role can serve several
+  statuses with different parts of its rules. Without a selection a stage
+  gets all the documents. With one, `role.documents` holds the picked
+  documents in the version's order. A picked name the version lacks is a
+  warning, never a failure: `role.document_warnings` in the claim answer,
+  a line under the role in `clab claim`; when none of the names exists the
+  stage gets all the documents. Draft validation and activation report the
+  same mismatch as a `role_document_missing` warning.
 - Older versions: a server without documents sends the role as one text,
   which is a single document `main.md`; a `clab` without
-  `--instructions-dir` is used by taking the output of plain `clab claim`.
-- Changing a role's documents is the job of a maintainer — skill
-  `clab-rules` (`clab role put --dir`, `clab export --dir`,
-  `clab import --dir`, `clab import-guide`); a stage executor cannot do it.
+  `--instructions-dir` (v0.20.0 and earlier) is used with
+  `--instructions-file` or the output of plain `clab claim`.
+- Changing a role's documents or a status's selection is the job of a
+  maintainer — skill `clab-rules` (`clab role put --dir`,
+  `clab export --dir`, `clab import --dir`, `clab import-guide`); a stage
+  executor cannot do it.
 
 ## Artifacts
 

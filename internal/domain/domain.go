@@ -339,6 +339,10 @@ type StatusRole struct {
 	RoleName  string    `json:"role_name"`
 	IsPrimary bool      `json:"is_primary"`
 	Position  int       `json:"position"`
+	// Отбор документов роли на этом статусе (решение 0068, п. 3): имена
+	// документов версии роли, которые получит этап. nil — отбора нет, этап
+	// получает все документы; ключ тогда не отдаётся.
+	DocumentNames []string `json:"document_names,omitempty"`
 }
 
 // Transition. FromStatusID == nil означает «доступен из любого статуса».

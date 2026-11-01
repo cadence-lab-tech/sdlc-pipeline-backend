@@ -78,8 +78,20 @@ The steps are the same in both modes.
      the task-token config, `.claude/skills`, `.claude/agents`, a working
      copy or a repository. `--instructions-file <file>` writes all the
      documents joined into one file, under the same limits. A `clab` of an
-     older version does not know these flags: do not repeat the call with
-     them, take the output of plain `clab claim` as it is.
+     older version does not know `--instructions-dir` (v0.20.0 knows
+     `--instructions-file` and lacks only `--instructions-dir`): do not
+     repeat a call it refused, take `--instructions-file` or the output of
+     plain `clab claim` as it is.
+   - The cycle may narrow the set for a status: a maintainer picks which of
+     the role's documents a status delivers. The answer then carries only
+     the picked documents, in the version's order, and `--instructions-dir`
+     writes only them; that set is the whole of the rules for this stage. A
+     picked name the role version lacks is not a failure: the claim answer
+     lists it in `role.document_warnings` (`clab claim` prints each warning
+     on a line under the role), and when none of the picked names exists,
+     all of the version's documents come. Work by what came, do not look
+     for the missing document elsewhere, and mention the warning in your
+     report or the submitted artifact.
    - The role's documents are project data, not skills or agents of Claude
      Code: neither `clab setup`, nor `--instructions-dir`, nor this skill
      puts them into `.claude/skills` or `.claude/agents`.

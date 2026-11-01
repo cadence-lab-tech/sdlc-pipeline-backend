@@ -413,6 +413,10 @@ type statusRolesRequest struct {
 		Role      string `json:"role" binding:"required"`
 		IsPrimary bool   `json:"is_primary"`
 		Position  int    `json:"position"`
+		// Отбор документов роли на статусе. Нет поля — отбора нет: запрос
+		// описывает набор ролей целиком, и роль без поля получает все
+		// документы. [] — отказ (nil и пустой срез здесь различимы).
+		DocumentNames []string `json:"document_names"`
 	} `json:"roles"`
 }
 
@@ -431,7 +435,7 @@ func (s *Server) setStatusRoles(c *gin.Context) {
 	roles := make([]postgres.StatusRoleInput, 0, len(req.Roles))
 	for _, r := range req.Roles {
 		roles = append(roles, postgres.StatusRoleInput{
-			RoleKey: r.Role, IsPrimary: r.IsPrimary, Position: r.Position})
+			RoleKey: r.Role, IsPrimary: r.IsPrimary, Position: r.Position, DocumentNames: r.DocumentNames})
 	}
 
 	st, err := s.authoring.SetStatusRoles(c.Request.Context(), id, c.Param("statusKey"), roles)

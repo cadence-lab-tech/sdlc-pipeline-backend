@@ -132,6 +132,58 @@ type BundleStatus struct {
 	Color            string   `json:"color,omitempty"`
 	Role             string   `json:"role,omitempty"`
 	Reviewers        []string `json:"reviewers,omitempty"`
+	// Отбор документов на статусе (решение 0068, пп. 3 и 5.6): у основной
+	// роли — RoleDocuments, у проверяющих — ReviewerDocuments по ключу
+	// роли. Нет поля — отбора нет; экспорт пишет поля, только когда отбор
+	// есть, поэтому связка цикла без отбора остаётся байт в байт прежней.
+	// Формат связки не растёт: сервер прежней версии поля теряет, и этап
+	// получает все документы — безопасная сторона.
+	RoleDocuments     []string            `json:"role_documents,omitempty"`
+	ReviewerDocuments map[string][]string `json:"reviewer_documents,omitempty"`
+}
+
+// checkSelection — отбор документов статуса связки до первой записи: отбор у
+// статуса без роли, ключ проверяющего не из reviewers и форма имён
+// (checkDocumentNames) отбивают импорт целиком.
+func (s BundleStatus) checkSelection() error {
+	fail := func(format string, args ...any) error {
+		return apperr.InvalidInput("статус %q: "+format, append([]any{s.Key}, args...)...).
+			WithDetails(map[string]any{"status": s.Key})
+	}
+	if s.RoleDocuments != nil {
+		if s.Role == "" {
+			return fail("role_documents без роли (role)")
+		}
+		if err := checkDocumentNames(s.RoleDocuments); err != nil {
+			return fail("role_documents: %s", apperr.As(err).Message)
+		}
+	}
+	if len(s.ReviewerDocuments) == 0 {
+		return nil
+	}
+	reviewers := make(map[string]bool, len(s.Reviewers))
+	for _, r := range s.Reviewers {
+		reviewers[r] = true
+	}
+	keys := make([]string, 0, len(s.ReviewerDocuments))
+	for k := range s.ReviewerDocuments {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !reviewers[k] {
+			return fail("reviewer_documents: роли %q нет среди проверяющих (reviewers)", k)
+		}
+		names := s.ReviewerDocuments[k]
+		if names == nil {
+			// null в JSON — то же, что пустой список: отбора «никакого» нет.
+			names = []string{}
+		}
+		if err := checkDocumentNames(names); err != nil {
+			return fail("reviewer_documents[%q]: %s", k, apperr.As(err).Message)
+		}
+	}
+	return nil
 }
 
 // enabledByDefault — умолчание этапа с учётом отсутствующего поля.
@@ -198,6 +250,16 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 		if r.Instructions != "" && r.Documents != nil {
 			return report, apperr.InvalidInput(
 				"роль %q: у роли в связке либо instructions, либо documents, а не оба сразу", r.Key)
+		}
+	}
+	// Отбор документов на статусах — тоже до транзакции: ни одного черновика
+	// цикла из связки с неверным отбором.
+	for _, w := range b.workflows() {
+		for _, st := range w.Statuses {
+			if err := st.checkSelection(); err != nil {
+				e := apperr.As(err)
+				return report, apperr.New(e.Code, "цикл %q: %s", w.Name, e.Message).WithDetails(e.Details)
+			}
 		}
 	}
 
@@ -391,7 +453,9 @@ func sameWorkflow(have, want BundleWorkflow) bool {
 			h.Category != w.Category || h.IsInitial != w.IsInitial || h.IsTerminal != w.IsTerminal ||
 			h.IsOptional != w.IsOptional || h.enabledByDefault() != w.enabledByDefault() ||
 			!eqIntPtr(h.WipLimit, w.WipLimit) || h.Color != w.Color ||
-			h.Role != w.Role || !eqStrings(h.Reviewers, w.Reviewers) {
+			h.Role != w.Role || !eqStrings(h.Reviewers, w.Reviewers) ||
+			!eqSelection(h.RoleDocuments, w.RoleDocuments) ||
+			!eqReviewerSelection(h.ReviewerDocuments, w.ReviewerDocuments) {
 			return false
 		}
 	}
@@ -419,6 +483,29 @@ func eqIntPtr(a, b *int) bool {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+// eqSelection — тот же отбор документов: оба без отбора либо оба с
+// одинаковым множеством имён (порядок отбора ничего не значит).
+func eqSelection(a, b []string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return eqStringSet(a, b)
+}
+
+// eqReviewerSelection — отборы проверяющих по ключу роли.
+func eqReviewerSelection(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || !eqSelection(av, bv) {
+			return false
+		}
+	}
+	return true
 }
 
 // eqStringSet — те же элементы без учёта порядка; пусто и nil равны.
@@ -516,7 +603,8 @@ func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, ac
 		}
 		entry := ImportEntry{Key: w.Name, Outcome: "unchanged", ID: head.ID.String(),
 			Detail: fmt.Sprintf("совпадает с версией %d (%s)", head.Version, head.State)}
-		return entry, validateWorkflow(full, a.engine.implemented, a.engine.strict), nil
+		v, err := a.validate(ctx, tx, full)
+		return entry, v, err
 	}
 	wf, err := a.store.CreateWorkflow(ctx, tx, projectID, w.Name, w.TaskTypes, actor)
 	if err != nil {
@@ -544,10 +632,12 @@ func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, ac
 		}
 		roles := []postgres.StatusRoleInput{}
 		if st.Role != "" {
-			roles = append(roles, postgres.StatusRoleInput{RoleKey: st.Role, IsPrimary: true})
+			roles = append(roles, postgres.StatusRoleInput{
+				RoleKey: st.Role, IsPrimary: true, DocumentNames: st.RoleDocuments})
 		}
 		for j, rk := range st.Reviewers {
-			roles = append(roles, postgres.StatusRoleInput{RoleKey: rk, Position: j + 1})
+			roles = append(roles, postgres.StatusRoleInput{
+				RoleKey: rk, Position: j + 1, DocumentNames: st.ReviewerDocuments[rk]})
 		}
 		if len(roles) > 0 {
 			status, err := a.store.GetStatusByKey(ctx, tx, wf.ID, st.Key)
@@ -587,7 +677,10 @@ func (a *Authoring) importWorkflow(ctx context.Context, tx pgx.Tx, projectID, ac
 	if err != nil {
 		return ImportEntry{}, Validation{}, err
 	}
-	validation := validateWorkflow(full, a.engine.implemented, a.engine.strict)
+	validation, err := a.validate(ctx, tx, full)
+	if err != nil {
+		return ImportEntry{}, Validation{}, err
+	}
 	entry := ImportEntry{Key: w.Name, Outcome: "draft_created", ID: wf.ID.String(),
 		Detail: fmt.Sprintf("версия %d, черновик; активируйте после проверки", wf.Version)}
 	return entry, validation, nil
@@ -714,8 +807,15 @@ func exportWorkflow(wf domain.Workflow) *BundleWorkflow {
 		for _, r := range st.Roles {
 			if r.IsPrimary {
 				bs.Role = r.RoleKey
-			} else {
-				bs.Reviewers = append(bs.Reviewers, r.RoleKey)
+				bs.RoleDocuments = r.DocumentNames
+				continue
+			}
+			bs.Reviewers = append(bs.Reviewers, r.RoleKey)
+			if r.DocumentNames != nil {
+				if bs.ReviewerDocuments == nil {
+					bs.ReviewerDocuments = map[string][]string{}
+				}
+				bs.ReviewerDocuments[r.RoleKey] = r.DocumentNames
 			}
 		}
 		bw.Statuses = append(bw.Statuses, bs)

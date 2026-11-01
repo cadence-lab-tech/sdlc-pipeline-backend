@@ -568,6 +568,11 @@ func (a *Authoring) SetStatusRoles(ctx context.Context, id uuid.UUID, statusKey 
 		if primary > 1 {
 			return apperr.InvalidInput("на статусе может быть только одна основная роль")
 		}
+		for _, r := range roles {
+			if err := checkDocumentNames(r.DocumentNames); err != nil {
+				return apperr.InvalidInput("роль %q: %s", r.RoleKey, apperr.As(err).Message)
+			}
+		}
 
 		st, err := a.store.GetStatusByKey(ctx, tx, wf.ID, statusKey)
 		if err != nil {
@@ -671,11 +676,73 @@ func (a *Authoring) DeleteGate(ctx context.Context, id uuid.UUID, transitionKey,
 // ── проверка и активация ────────────────────────────────────────────────────
 
 func (a *Authoring) Validate(ctx context.Context, id uuid.UUID) (Validation, error) {
-	wf, err := a.store.GetWorkflow(ctx, a.store.DB(), id)
+	q := a.store.DB()
+	wf, err := a.store.GetWorkflow(ctx, q, id)
 	if err != nil {
 		return Validation{}, err
 	}
-	return validateWorkflow(wf, a.engine.implemented, a.engine.strict), nil
+	return a.validate(ctx, q, wf)
+}
+
+// validate — проверка цикла целиком: граф (validateWorkflow, чистая
+// функция) и отбор документов на статусах против последних версий ролей.
+// Вторая половина ходит в базу, поэтому живёт здесь, а не в графовой
+// проверке. Её зовут проверка черновика, активация и импорт связки — у
+// всех трёх одни предупреждения.
+func (a *Authoring) validate(ctx context.Context, q postgres.Querier, wf domain.Workflow) (Validation, error) {
+	v := validateWorkflow(wf, a.engine.implemented, a.engine.strict)
+	warnings, err := a.roleDocumentWarnings(ctx, q, wf)
+	if err != nil {
+		return v, err
+	}
+	v.Warnings = append(v.Warnings, warnings...)
+	return v, nil
+}
+
+// roleDocumentWarnings сверяет отбор документов на статусах с последней
+// версией каждой роли (решение 0068, пп. 1.8 и 3.6): той же, что получит
+// прогон, открытый сейчас. Сверка с последней, а не с конкретной версией:
+// версию прогона определит момент входа в статус, а проверка говорит о
+// том, что этап получит, если войти в него сейчас.
+func (a *Authoring) roleDocumentWarnings(ctx context.Context, q postgres.Querier, wf domain.Workflow) ([]Problem, error) {
+	type latest struct {
+		version int
+		docs    []domain.RoleDocument
+		ok      bool
+	}
+	cache := map[uuid.UUID]latest{}
+	out := []Problem{}
+	for _, st := range wf.Statuses {
+		for _, r := range st.Roles {
+			if r.DocumentNames == nil {
+				continue
+			}
+			l, seen := cache[r.RoleID]
+			if !seen {
+				rv, err := a.store.LatestRoleVersion(ctx, q, r.RoleID)
+				switch {
+				case err != nil && apperr.As(err).Code == apperr.CodeNotFound:
+					// Роль без версий: этапа не будет вовсе, и про документы
+					// предупреждать не о чем.
+				case err != nil:
+					return nil, err
+				default:
+					versions := []domain.RoleVersion{rv}
+					if err := a.store.AttachRoleDocuments(ctx, q, versions, false); err != nil {
+						return nil, err
+					}
+					l = latest{version: rv.Version, docs: versions[0].Documents, ok: true}
+				}
+				cache[r.RoleID] = l
+			}
+			if !l.ok {
+				continue
+			}
+			_, missing := selectDocuments(l.docs, r.DocumentNames)
+			out = append(out, selectionWarnings(st.Key, r.RoleKey, l.version, r.DocumentNames, missing)...)
+		}
+	}
+	return out, nil
 }
 
 // ActivationResult — что стало с циклом проекта после активации.
@@ -724,7 +791,10 @@ func (a *Authoring) Activate(ctx context.Context, id uuid.UUID, actor uuid.UUID)
 			return err
 		}
 
-		v := validateWorkflow(full, a.engine.implemented, a.engine.strict)
+		v, err := a.validate(ctx, tx, full)
+		if err != nil {
+			return err
+		}
 		if !v.Valid {
 			return apperr.InvalidInput("цикл нельзя активировать: %d проблем(ы)", len(v.Problems)).
 				WithDetails(map[string]any{"problems": v.Problems, "warnings": v.Warnings})

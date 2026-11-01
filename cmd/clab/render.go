@@ -110,6 +110,10 @@ type stateView struct {
 		// Документы роли (решение 0068); сервер прежней версии их не
 		// отдаёт — тогда роль одна строка instructions.
 		Documents []roleDocView `json:"documents"`
+		// Предупреждения отбора документов на статусе (CLAB-348): имена из
+		// отбора, которых нет в версии роли. Сервер прежней версии ключа
+		// не отдаёт, и без отбора его нет.
+		DocumentWarnings []string `json:"document_warnings"`
 		// Сырым: форму контракта проверяет сервер, а show не должен падать
 		// из-за поля, которое он не печатает.
 		OutputContract json.RawMessage `json:"output_contract"`
@@ -197,6 +201,9 @@ func printSummary(s stateView, rejectionLine bool) {
 			role += "; документы: " + documentsLine(s.Role.Documents)
 		}
 		pairs = append(pairs, "Роль:", role)
+		for _, w := range s.Role.DocumentWarnings {
+			pairs = append(pairs, "Отбор:", w)
+		}
 	}
 	run := dash(short(s.StageRunID))
 	if s.Kind != "" {

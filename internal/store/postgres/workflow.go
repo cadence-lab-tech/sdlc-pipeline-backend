@@ -89,7 +89,7 @@ func (s *Store) ListStatuses(ctx context.Context, q Querier, workflowID uuid.UUI
 	}
 
 	roleRows, err := q.Query(ctx, `
-		SELECT sr.status_id, sr.role_id, r.key, r.name, sr.is_primary, sr.position
+		SELECT sr.status_id, sr.role_id, r.key, r.name, sr.is_primary, sr.position, sr.document_names
 		FROM status_roles sr
 		JOIN roles r ON r.id = sr.role_id
 		JOIN workflow_statuses ws ON ws.id = sr.status_id
@@ -104,7 +104,7 @@ func (s *Store) ListStatuses(ctx context.Context, q Querier, workflowID uuid.UUI
 		var statusID uuid.UUID
 		var role domain.StatusRole
 		if err := roleRows.Scan(&statusID, &role.RoleID, &role.RoleKey, &role.RoleName,
-			&role.IsPrimary, &role.Position); err != nil {
+			&role.IsPrimary, &role.Position, &role.DocumentNames); err != nil {
 			return nil, translate(err)
 		}
 		if idx, ok := byID[statusID]; ok {
