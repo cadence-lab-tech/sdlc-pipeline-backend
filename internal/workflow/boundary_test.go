@@ -39,6 +39,7 @@ func fullClaimResult() ClaimResult {
 			OptionalStages: json.RawMessage(`{"design":false}`),
 		},
 		Role: &RoleView{Key: "developer", Name: "Разработчик", Version: 1, Instructions: "…",
+			Documents:  []domain.RoleDocument{{Name: "main.md", Kind: "instructions", SHA256: "abc", SizeBytes: 3, Content: str("…")}},
 			InputKinds: []string{"analysis.requirements"}, OutputContract: json.RawMessage(`[]`),
 			ToolPolicy: json.RawMessage(`{}`), ModelLevel: str("low"), ModelHint: str("opus"), ContextBudget: json.RawMessage(`{}`)},
 		Context: ClaimContext{
