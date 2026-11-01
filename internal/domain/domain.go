@@ -419,7 +419,32 @@ type RoleVersion struct {
 	ContextBudget json.RawMessage `json:"context_budget"`
 	Changelog     *string         `json:"changelog,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
+	// Документы версии по возрастанию position (решение 0068). Заполняют
+	// только пути авторинга (GET и POST версий роли, связка, MCP); движок
+	// читает версию без них, поэтому у его ответов ключа нет.
+	Documents []RoleDocument `json:"documents,omitempty"`
 }
+
+// RoleDocument — документ версии роли: имя, тип и позиция — на ссылке,
+// размер и sha — свойства байтов в blobs. Content — указатель: в списках
+// версий ключа нет вовсе, а не пустая строка.
+type RoleDocument struct {
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	Position  int     `json:"position"`
+	SHA256    string  `json:"sha256"`
+	SizeBytes int64   `json:"size_bytes"`
+	Content   *string `json:"content,omitempty"`
+}
+
+// DefaultRoleDocumentKind — тип документа по умолчанию и тип main.md, в
+// который превращается инструкция одной строкой.
+const DefaultRoleDocumentKind = "instructions"
+
+// MainRoleDocument — имя единственного документа версии, заведённой одной
+// строкой instructions, перенесённой миграцией или записанной репликой
+// прежней версии без строк документов.
+const MainRoleDocument = "main.md"
 
 type Task struct {
 	ID         uuid.UUID `json:"id"`

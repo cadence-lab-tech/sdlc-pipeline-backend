@@ -40,12 +40,16 @@ func (s *Server) registerCatalogTools() {
 		s.addRepository)
 	add(s, "sdlc_put_role",
 		"Завести роль специалиста или добавить версию инструкции существующей. "+
-			"Версия иммутабельна: правка — всегда новая версия. model_level — уровень модели "+
+			"Версия — упорядоченный набор документов (documents: [{name, kind, content}], имя вида git.md); "+
+			"instructions строкой — один документ main.md; оба поля сразу — ошибка. "+
+			"Версия иммутабельна: правка любого документа — новая версия со всем набором, "+
+			"тот же набор и поля — unchanged. model_level — уровень модели "+
 			"роли по умолчанию (low, medium, high); уровень задачи и этапа его перекрывают. "+
 			"model_hint устарел: строка модели для раннера прежних версий, вместо него — model_level.",
 		s.putRole)
 	add(s, "sdlc_get_role",
-		"Роль с последней версией инструкции и контрактом вывода.",
+		"Роль с последней версией: документы инструкции по порядку (latest_version.documents) "+
+			"и контракт вывода.",
 		s.getRole)
 	add(s, "sdlc_put_document",
 		"Положить проектный документ: содержимым, ссылкой или путём в репозитории. "+
@@ -165,18 +169,19 @@ func (s *Server) addRepository(ctx context.Context, in addRepositoryInput) (*sdk
 }
 
 type putRoleInput struct {
-	Key            string          `json:"key" jsonschema:"ключ роли: analyst, developer, reviewer"`
-	Name           string          `json:"name,omitempty"`
-	Summary        string          `json:"summary,omitempty"`
-	Instructions   string          `json:"instructions" jsonschema:"markdown: что делает, что проверяет, чего не делает"`
-	InputKinds     []string        `json:"input_kinds,omitempty" jsonschema:"артефакты предыдущих этапов на вход"`
-	OutputContract json.RawMessage `json:"output_contract,omitempty" jsonschema:"[{kind,title,format,required,schema}]"`
-	ToolPolicy     json.RawMessage `json:"tool_policy,omitempty"`
-	ModelLevel     string          `json:"model_level,omitempty" jsonschema:"уровень модели роли по умолчанию: low, medium, high; пусто — не задан"`
-	ModelHint      string          `json:"model_hint,omitempty" jsonschema:"устарел (решение 0060): строка модели для раннера прежних версий; используйте model_level"`
-	RepoScope      []string        `json:"repo_scope,omitempty"`
-	ContextBudget  json.RawMessage `json:"context_budget,omitempty"`
-	Changelog      string          `json:"changelog,omitempty" jsonschema:"что изменилось относительно прошлой версии"`
+	Key            string                        `json:"key" jsonschema:"ключ роли: analyst, developer, reviewer"`
+	Name           string                        `json:"name,omitempty"`
+	Summary        string                        `json:"summary,omitempty"`
+	Instructions   string                        `json:"instructions,omitempty" jsonschema:"инструкция одной строкой (markdown) — станет документом main.md; либо documents"`
+	Documents      []workflow.BundleRoleDocument `json:"documents,omitempty" jsonschema:"документы версии по порядку отдачи: name (строчные, .md, до 64 символов), kind (instructions по умолчанию, checklist, reference…), content (markdown); либо instructions"`
+	InputKinds     []string                      `json:"input_kinds,omitempty" jsonschema:"артефакты предыдущих этапов на вход"`
+	OutputContract json.RawMessage               `json:"output_contract,omitempty" jsonschema:"[{kind,title,format,required,schema}]"`
+	ToolPolicy     json.RawMessage               `json:"tool_policy,omitempty"`
+	ModelLevel     string                        `json:"model_level,omitempty" jsonschema:"уровень модели роли по умолчанию: low, medium, high; пусто — не задан"`
+	ModelHint      string                        `json:"model_hint,omitempty" jsonschema:"устарел (решение 0060): строка модели для раннера прежних версий; используйте model_level"`
+	RepoScope      []string                      `json:"repo_scope,omitempty"`
+	ContextBudget  json.RawMessage               `json:"context_budget,omitempty"`
+	Changelog      string                        `json:"changelog,omitempty" jsonschema:"что изменилось относительно прошлой версии"`
 }
 
 func (s *Server) putRole(ctx context.Context, in putRoleInput) (*sdk.CallToolResult, any, error) {
@@ -188,6 +193,7 @@ func (s *Server) putRole(ctx context.Context, in putRoleInput) (*sdk.CallToolRes
 		Version: workflow.BundleVersion,
 		Roles: []workflow.BundleRole{{
 			Key: in.Key, Name: in.Name, Summary: in.Summary, Instructions: in.Instructions,
+			Documents:  in.Documents,
 			InputKinds: in.InputKinds, OutputContract: in.OutputContract, ToolPolicy: in.ToolPolicy,
 			ModelHint: in.ModelHint, ModelLevel: in.ModelLevel, RepoScope: in.RepoScope,
 			ContextBudget: in.ContextBudget,
@@ -201,7 +207,26 @@ func (s *Server) putRole(ctx context.Context, in putRoleInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
-	return ok(map[string]any{"outcome": report.Roles[0], "role": role.Role, "latest_version": role.Latest})
+	return ok(map[string]any{"outcome": report.Roles[0], "role": role.Role, "latest_version": versionForModel(role.Latest)})
+}
+
+// versionForModel — версия роли для ответа тула: документы с содержимым и
+// без склейки instructions (решение 0068, п. 4.3). Ответ тула читает модель,
+// а не клиент со схемой, и склейка рядом с документами удвоила бы контекст.
+func versionForModel(rv *domain.RoleVersion) any {
+	if rv == nil {
+		return nil
+	}
+	raw, err := json.Marshal(rv)
+	if err != nil {
+		return rv
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return rv
+	}
+	delete(out, "instructions")
+	return out
 }
 
 type roleKeyInput struct {
@@ -217,7 +242,7 @@ func (s *Server) getRole(ctx context.Context, in roleKeyInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
-	return ok(map[string]any{"role": role.Role, "latest_version": role.Latest, "used_on": role.UsedOn})
+	return ok(map[string]any{"role": role.Role, "latest_version": versionForModel(role.Latest), "used_on": role.UsedOn})
 }
 
 type putDocumentInput struct {

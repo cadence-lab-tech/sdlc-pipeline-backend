@@ -465,13 +465,14 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		}
 		return print(out)
 	case "put":
-		var projectFlag, roleKey, name, summary, file, contract, inputs, changelog, modelLevel string
+		var projectFlag, roleKey, name, summary, file, dir, contract, inputs, changelog, modelLevel string
 		_, err := flags("role", rest, func(fs *flag.FlagSet) {
 			fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 			fs.StringVar(&roleKey, "key", "", "ключ роли")
 			fs.StringVar(&name, "name", "", "название")
 			fs.StringVar(&summary, "summary", "", "в двух словах")
-			fs.StringVar(&file, "file", "", "инструкция (markdown); - читает stdin")
+			fs.StringVar(&file, "file", "", "инструкция одним файлом (markdown) — документ main.md; - читает stdin")
+			fs.StringVar(&dir, "dir", "", "каталог роли: role.json (поля роли и documents [{name, kind}] по порядку) и <имя>.md")
 			fs.StringVar(&contract, "contract", "", "файл с output_contract (JSON-список)")
 			fs.StringVar(&inputs, "inputs", "", "input_kinds через запятую")
 			fs.StringVar(&changelog, "changelog", "", "что изменилось")
@@ -480,20 +481,40 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		if roleKey == "" {
-			return fmt.Errorf("не указан --key")
+		if dir != "" && file != "" {
+			return fmt.Errorf("--dir и --file вместе не задаются: каталог роли или один файл main.md")
+		}
+		// Каталог читается до похода на сервер: лишний или пропавший файл —
+		// ошибка без запроса.
+		var role map[string]any
+		bundleVersion := 1
+		if dir != "" {
+			if role, err = readRoleDir(dir); err != nil {
+				return err
+			}
+			// Документы — формат 3: сервер прежней версии его отобьёт целиком,
+			// ничего не применив. --file идёт форматом 1 и работает с любым.
+			bundleVersion = 3
+		} else {
+			instructions, err := readContent(file, "")
+			if err != nil {
+				return err
+			}
+			role = map[string]any{"instructions": string(instructions)}
+		}
+		// Флаги перекрывают поля role.json: правка одного поля не требует
+		// править каталог.
+		for k, v := range map[string]string{"key": roleKey, "name": name, "summary": summary, "changelog": changelog} {
+			if v != "" || dir == "" {
+				role[k] = v
+			}
+		}
+		if roleFieldString(role, "key") == "" {
+			return fmt.Errorf("не указан --key (или key в role.json)")
 		}
 		key, err := c.project(ctx, projectFlag)
 		if err != nil {
 			return err
-		}
-		instructions, err := readContent(file, "")
-		if err != nil {
-			return err
-		}
-		role := map[string]any{
-			"key": roleKey, "name": name, "summary": summary,
-			"instructions": string(instructions), "changelog": changelog,
 		}
 		if inputs != "" {
 			role["input_kinds"] = splitCSV(inputs)
@@ -516,13 +537,27 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		}
 		var out any
 		if err := c.post(ctx, "/projects/"+key+"/import",
-			map[string]any{"version": 1, "roles": []any{role}}, &out); err != nil {
+			map[string]any{"version": bundleVersion, "roles": []any{role}}, &out); err != nil {
 			return err
 		}
 		return print(out)
 	default:
 		return fmt.Errorf("clab role show|put")
 	}
+}
+
+// roleFieldString — строковое поле роли: из флага (string) или из role.json
+// (json.RawMessage).
+func roleFieldString(role map[string]any, k string) string {
+	switch v := role[k].(type) {
+	case string:
+		return v
+	case json.RawMessage:
+		var out string
+		_ = json.Unmarshal(v, &out)
+		return out
+	}
+	return ""
 }
 
 // ── документы ───────────────────────────────────────────────────────────────

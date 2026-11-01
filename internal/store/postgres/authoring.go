@@ -358,9 +358,7 @@ func (s *Store) MoveWaitingTasks(ctx context.Context, tx pgx.Tx, fromWorkflowID 
 			SELECT sr.status_id, r.id AS role_id, rv.id AS role_version_id
 			FROM status_roles sr
 			JOIN roles r ON r.id = sr.role_id
-			JOIN LATERAL (
-				SELECT id FROM role_versions WHERE role_id = r.id ORDER BY version DESC LIMIT 1
-			) rv ON true
+			JOIN LATERAL (SELECT `+latestRoleVersionOf("r.id")+` AS id) rv ON rv.id IS NOT NULL
 			WHERE sr.is_primary AND sr.status_id IN (SELECT DISTINCT to_status_id FROM dest)
 		),
 		opened AS (

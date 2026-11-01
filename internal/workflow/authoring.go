@@ -40,7 +40,11 @@ func NewAuthoring(store *postgres.Store, log *slog.Logger, engine *Engine) *Auth
 // ── роли ────────────────────────────────────────────────────────────────────
 
 type RoleVersionInput struct {
+	// Либо Instructions — одна строка, она станет документом main.md, —
+	// либо Documents (решение 0068, п. 5.1). nil и пустой срез различаются:
+	// documents: [] — отказ «нет ни одного документа».
 	Instructions   string
+	Documents      []RoleDocumentInput
 	InputKinds     []string
 	OutputContract json.RawMessage
 	ToolPolicy     json.RawMessage
@@ -117,9 +121,14 @@ func (a *Authoring) AddRoleVersion(ctx context.Context, projectKey, roleKey stri
 	return out, err
 }
 
+// addVersion — единственная точка заведения версии роли: REST, MCP, связка
+// и clab role put приходят сюда. Версия, документы и колонка instructions
+// (склейка) пишутся на одной транзакции tx; через эту точку CLAB-307
+// проведёт черновик версии с апрувом.
 func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, roleID uuid.UUID, actor uuid.UUID, in RoleVersionInput) (domain.RoleVersion, error) {
-	if strings.TrimSpace(in.Instructions) == "" {
-		return domain.RoleVersion{}, apperr.InvalidInput("инструкция роли не может быть пустой")
+	docs, err := roleDocuments(in, a.store.BlobLimit())
+	if err != nil {
+		return domain.RoleVersion{}, err
 	}
 	if err := validateOutputContract(in.OutputContract); err != nil {
 		return domain.RoleVersion{}, err
@@ -130,7 +139,8 @@ func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, roleID uuid.UUID,
 	}
 	return a.store.CreateRoleVersion(ctx, tx, postgres.CreateRoleVersionInput{
 		RoleID:         roleID,
-		Instructions:   in.Instructions,
+		Instructions:   ConcatDocuments(documentsOf(docs)),
+		Documents:      storeDocuments(docs),
 		InputKinds:     in.InputKinds,
 		OutputContract: in.OutputContract,
 		ToolPolicy:     in.ToolPolicy,
@@ -186,14 +196,57 @@ func (a *Authoring) GetRole(ctx context.Context, projectKey, roleKey string) (Ro
 		return out, err
 	}
 	out.Role = role
+	// Список — документы без содержимого, последняя версия — с ним
+	// (контракт CLAB-343 для страницы «Пайплайн»).
 	if out.Versions, err = a.store.ListRoleVersions(ctx, q, role.ID); err != nil {
 		return out, err
 	}
+	if err := a.store.AttachRoleDocuments(ctx, q, out.Versions, false); err != nil {
+		return out, err
+	}
 	if len(out.Versions) > 0 {
-		out.Latest = &out.Versions[0]
+		latest, err := a.latestVersion(ctx, q, role.ID)
+		if err != nil {
+			return out, err
+		}
+		out.Latest = &latest
 	}
 	out.UsedOn, err = a.store.RoleUsage(ctx, q, role.ID)
 	return out, err
+}
+
+// latestVersion — текущая версия роли с документами и их содержимым.
+func (a *Authoring) latestVersion(ctx context.Context, q postgres.Querier, roleID uuid.UUID) (domain.RoleVersion, error) {
+	rv, err := a.store.LatestRoleVersion(ctx, q, roleID)
+	if err != nil {
+		return rv, err
+	}
+	versions := []domain.RoleVersion{rv}
+	if err := a.store.AttachRoleDocuments(ctx, q, versions, true); err != nil {
+		return rv, err
+	}
+	return versions[0], nil
+}
+
+// GetRoleVersion — версия роли по номеру с документами и их содержимым.
+func (a *Authoring) GetRoleVersion(ctx context.Context, projectKey, roleKey string, version int) (domain.RoleVersion, error) {
+	q := a.store.DB()
+	role, err := a.role(ctx, q, projectKey, roleKey)
+	if err != nil {
+		return domain.RoleVersion{}, err
+	}
+	rv, err := a.store.GetRoleVersionByNumber(ctx, q, role.ID, version)
+	if apperr.As(err).Code == apperr.CodeNotFound {
+		return rv, apperr.NotFound("версия %d роли %q не найдена", version, roleKey)
+	}
+	if err != nil {
+		return rv, err
+	}
+	versions := []domain.RoleVersion{rv}
+	if err := a.store.AttachRoleDocuments(ctx, q, versions, true); err != nil {
+		return rv, err
+	}
+	return versions[0], nil
 }
 
 func (a *Authoring) UpdateRole(ctx context.Context, projectKey, roleKey string, name, summary *string) (domain.Role, error) {

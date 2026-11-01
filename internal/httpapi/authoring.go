@@ -30,10 +30,14 @@ func (s *Server) listRoles(c *gin.Context) {
 }
 
 type roleVersionRequest struct {
-	Instructions   string          `json:"instructions" binding:"required"`
-	InputKinds     []string        `json:"input_kinds"`
-	OutputContract json.RawMessage `json:"output_contract"`
-	ToolPolicy     json.RawMessage `json:"tool_policy"`
+	// Либо instructions — одна строка, станет документом main.md, — либо
+	// documents (решение 0068, п. 5.1). Оба или ни одного — 400 из
+	// workflow, а не из привязки: отказ называет причину по-русски.
+	Instructions   string                       `json:"instructions"`
+	Documents      []workflow.RoleDocumentInput `json:"documents"`
+	InputKinds     []string                     `json:"input_kinds"`
+	OutputContract json.RawMessage              `json:"output_contract"`
+	ToolPolicy     json.RawMessage              `json:"tool_policy"`
 	// Устарел (решение 0060): принимается ради клиентов прежних версий.
 	ModelHint *string `json:"model_hint"`
 	// Уровень модели роли по умолчанию: low | medium | high, "" — не задан.
@@ -46,6 +50,7 @@ type roleVersionRequest struct {
 func (r roleVersionRequest) toInput() workflow.RoleVersionInput {
 	return workflow.RoleVersionInput{
 		Instructions:   r.Instructions,
+		Documents:      r.Documents,
 		InputKinds:     r.InputKinds,
 		OutputContract: r.OutputContract,
 		ToolPolicy:     r.ToolPolicy,
@@ -161,19 +166,13 @@ func (s *Server) getRoleVersion(c *gin.Context) {
 		fail(c, s.log, apperr.InvalidInput("версия роли — число"))
 		return
 	}
-	role, err := s.authoring.GetRole(c.Request.Context(),
-		c.Param("projectKey"), c.Param("roleKey"))
+	rv, err := s.authoring.GetRoleVersion(c.Request.Context(),
+		c.Param("projectKey"), c.Param("roleKey"), version)
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	for _, rv := range role.Versions {
-		if rv.Version == version {
-			c.JSON(http.StatusOK, rv)
-			return
-		}
-	}
-	fail(c, s.log, apperr.NotFound("версия %d роли %q не найдена", version, c.Param("roleKey")))
+	c.JSON(http.StatusOK, rv)
 }
 
 // ── версии цикла ────────────────────────────────────────────────────────────

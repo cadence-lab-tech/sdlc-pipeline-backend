@@ -257,15 +257,15 @@ func (e *Engine) spawnReviews(ctx context.Context, tx pgx.Tx, task domain.Task, 
 			return apperr.InvalidInput(
 				"гейт %q зовёт на перепроверку ту же роль, что и исполнителя этапа", g.Key)
 		}
-		versions, err := e.store.ListRoleVersions(ctx, tx, role.ID)
+		latest, err := e.store.LatestRoleVersion(ctx, tx, role.ID)
+		if apperr.As(err).Code == apperr.CodeNotFound {
+			return apperr.InvalidInput("у роли %q нет ни одной версии инструкции", role.Key)
+		}
 		if err != nil {
 			return err
 		}
-		if len(versions) == 0 {
-			return apperr.InvalidInput("у роли %q нет ни одной версии инструкции", role.Key)
-		}
 
-		review, err := e.store.CreateReviewRun(ctx, tx, run, g.ID, role.ID, versions[0].ID)
+		review, err := e.store.CreateReviewRun(ctx, tx, run, g.ID, role.ID, latest.ID)
 		if err != nil {
 			return err
 		}

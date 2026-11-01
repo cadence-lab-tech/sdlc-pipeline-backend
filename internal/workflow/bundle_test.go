@@ -45,6 +45,15 @@ func TestSameVersion(t *testing.T) {
 		ContextBudget:  json.RawMessage(`{"rag_top_k":12}`),
 		ModelHint:      &hint,
 		RepoScope:      []string{},
+		Documents:      documentsOf([]RoleDocumentInput{{Name: "main.md", Kind: "instructions", Content: "Ты ревьюер."}}),
+	}
+	docsOf := func(in RoleVersionInput) []domain.RoleDocument {
+		t.Helper()
+		docs, err := roleDocuments(in, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return documentsOf(docs)
 	}
 	same := RoleVersionInput{
 		Instructions:   "Ты ревьюер.",
@@ -53,25 +62,45 @@ func TestSameVersion(t *testing.T) {
 		ContextBudget:  json.RawMessage(`{"rag_top_k": 12}`),
 		ModelHint:      &hint,
 	}
-	if !sameVersion(have, same) {
+	if !sameVersion(have, same, docsOf(same)) {
 		t.Fatal("нормализованно равные версии сочтены разными")
+	}
+
+	// Тот же текст документами: main.md типа instructions — тот же набор.
+	asDocs := same
+	asDocs.Instructions = ""
+	asDocs.Documents = []RoleDocumentInput{{Name: "main.md", Content: "Ты ревьюер."}}
+	if !sameVersion(have, asDocs, docsOf(asDocs)) {
+		t.Fatal("instructions и тот же main.md документами сочтены разными")
 	}
 
 	changed := same
 	changed.Instructions = "Ты ревьюер. Проверяй тесты."
-	if sameVersion(have, changed) {
+	if sameVersion(have, changed, docsOf(changed)) {
 		t.Fatal("другая инструкция сочтена той же версией")
+	}
+
+	for name, docs := range map[string][]RoleDocumentInput{
+		"другое имя":      {{Name: "rules.md", Content: "Ты ревьюер."}},
+		"другой тип":      {{Name: "main.md", Kind: "checklist", Content: "Ты ревьюер."}},
+		"лишний документ": {{Name: "main.md", Content: "Ты ревьюер."}, {Name: "git.md", Content: "Ветки."}},
+	} {
+		v := same
+		v.Instructions, v.Documents = "", docs
+		if sameVersion(have, v, docsOf(v)) {
+			t.Fatalf("%s сочтено той же версией", name)
+		}
 	}
 
 	contract := same
 	contract.OutputContract = json.RawMessage(`[{"kind":"review.verdict","required":false}]`)
-	if sameVersion(have, contract) {
+	if sameVersion(have, contract, docsOf(contract)) {
 		t.Fatal("другой контракт сочтён той же версией")
 	}
 
 	noHint := same
 	noHint.ModelHint = nil
-	if sameVersion(have, noHint) {
+	if sameVersion(have, noHint, docsOf(noHint)) {
 		t.Fatal("снятая подсказка модели — изменение")
 	}
 }
