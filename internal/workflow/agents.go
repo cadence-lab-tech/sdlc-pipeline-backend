@@ -37,14 +37,20 @@ type Lease struct {
 // RoleView — инструкция роли в том виде, в каком её получает агент.
 // Приезжает в ответе на захват: в локальном репозитории синхронизировать
 // нечего, правка роли в UI действует со следующего захвата.
+//
+// Роль — набор документов (решение 0068, п. 4): Documents — все документы
+// версии прогона по position, с содержимым; Instructions — их склейка
+// ConcatDocuments для clab, раннера и плагина прежних версий (у роли из
+// одного документа — его текст байт в байт). MCP склейку не отдаёт.
 type RoleView struct {
-	Key            string          `json:"key"`
-	Name           string          `json:"name"`
-	Version        int             `json:"version"`
-	Instructions   string          `json:"instructions"`
-	InputKinds     []string        `json:"input_kinds"`
-	OutputContract json.RawMessage `json:"output_contract"`
-	ToolPolicy     json.RawMessage `json:"tool_policy"`
+	Key            string                `json:"key"`
+	Name           string                `json:"name"`
+	Version        int                   `json:"version"`
+	Instructions   string                `json:"instructions"`
+	Documents      []domain.RoleDocument `json:"documents"`
+	InputKinds     []string              `json:"input_kinds"`
+	OutputContract json.RawMessage       `json:"output_contract"`
+	ToolPolicy     json.RawMessage       `json:"tool_policy"`
 	// Уровень модели версии роли по умолчанию (решение 0060).
 	ModelLevel *string `json:"model_level"`
 	// Устарел: строка модели для clab и раннера прежних версий.
@@ -678,8 +684,18 @@ func (e *Engine) roleView(ctx context.Context, q postgres.Querier, roleVersionID
 		Scan(&key, &name); err != nil {
 		return nil, apperr.Internal(err, "роль версии %s", roleVersionID)
 	}
+	// Документы версии с содержимым тем же читателем, что у авторинга: в нём
+	// правило «нет строк — main.md из колонки» и чтение из внешнего
+	// хранилища блобов. Склейка — из документов, а не из колонки: отбор по
+	// статусу (CLAB-348) подменит набор здесь, перед ConcatDocuments.
+	versions := []domain.RoleVersion{rv}
+	if err := e.store.AttachRoleDocuments(ctx, q, versions, true); err != nil {
+		return nil, err
+	}
+	docs := versions[0].Documents
 	return &RoleView{
-		Key: key, Name: name, Version: rv.Version, Instructions: rv.Instructions,
+		Key: key, Name: name, Version: rv.Version,
+		Instructions: ConcatDocuments(docs), Documents: docs,
 		InputKinds: rv.InputKinds, OutputContract: rv.OutputContract,
 		ToolPolicy: rv.ToolPolicy, ModelLevel: rv.ModelLevel, ModelHint: rv.ModelHint,
 		ContextBudget: rv.ContextBudget,

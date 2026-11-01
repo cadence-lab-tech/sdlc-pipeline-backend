@@ -31,8 +31,10 @@ func (s *Server) registerTools() {
 			"показана, но не claimable.",
 		s.listTasks)
 	add(s, "sdlc_claim_task",
-		"Забрать задачу: выдаётся аренда, в ответ приезжают инструкция роли, результаты "+
-			"предыдущих этапов, область репозиториев и требования гейтов впереди. execution — "+
+		"Забрать задачу: выдаётся аренда, в ответ приезжают документы роли, результаты "+
+			"предыдущих этапов, область репозиториев и требования гейтов впереди. role.documents — "+
+			"инструкция роли набором документов по порядку (name, kind, position, sha256, size_bytes, "+
+			"content); читай их все, склейки одной строкой в MCP нет. execution — "+
 			"рекомендованный уровень модели прогона {model_level, model_level_source}: этап "+
 			"задачи → задача → роль → none, снимок при захвате; role.model_level — уровень роли, "+
 			"role.model_hint устарел. boundary "+
@@ -42,7 +44,8 @@ func (s *Server) registerTools() {
 			"context.attachments_hint. "+filesNote,
 		s.claimTask)
 	add(s, "sdlc_get_task",
-		"Полное состояние задачи: этап, роль, входные артефакты, дрейф, гейты. Аренду не выдаёт. "+
+		"Полное состояние задачи: этап, роль с документами (role.documents, как у sdlc_claim_task), "+
+			"входные артефакты, дрейф, гейты. Аренду не выдаёт. "+
 			"task несёт уровни модели задачи и этапов (model_level, stage_settings), execution — "+
 			"рекомендацию текущего прогона: его снимок, а до захвата — то, что получит захват; "+
 			"у каждого из stage_runs — свой снимок model_level и model_level_source и свой учёт usage: "+
@@ -387,7 +390,7 @@ func (s *Server) claimTask(ctx context.Context, in claimInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
-	return ok(res)
+	return ok(mcpClaim(res))
 }
 
 type taskKeyInput struct {
@@ -428,7 +431,7 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 		"stage_run_id": state.StageRunID,
 		"kind":         state.Kind,
 		"task":         state.Task,
-		"role":         state.Role,
+		"role":         mcpRoleOf(state.Role),
 		"context":      state.Context,
 		"gates_ahead":  state.GatesAhead,
 		"boundary":     state.Boundary,

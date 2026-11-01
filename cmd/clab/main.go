@@ -55,7 +55,7 @@ func commands() []command {
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
 		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
-		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md]", cmdClaim},
+		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md] [--instructions-dir dir]", cmdClaim},
 		{"heartbeat", "продлить аренду: один раз, по интервалу или пока работает долгая команда", "clab heartbeat SDLC-42 | clab heartbeat SDLC-42 --every 5m [--for 2h] | clab heartbeat SDLC-42 [--every 5m] [--with-credentials] -- <команда> [аргументы] (код выхода — код команды; без --every интервал из ответа сервера; команда идёт без учётных данных clab: SDLC_TOKEN, SDLC_API_URL, SDLC_PROJECT, SDLC_ACTOR вычищены, CLAB_CONFIG_DIR — пустой временный каталог; --with-credentials передаёт окружение как есть)", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
@@ -477,11 +477,12 @@ func cmdShow(ctx context.Context, c *Client, args []string) error {
 }
 
 func cmdClaim(ctx context.Context, c *Client, args []string) error {
-	var session, instructionsFile string
+	var session, instructionsFile, instructionsDir string
 	task, rest := popTask(args)
 	fs, err := flags("claim", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&session, "session", "", "идентификатор сессии агента")
-		fs.StringVar(&instructionsFile, "instructions-file", "", "записать инструкцию роли в этот файл вместо вывода")
+		fs.StringVar(&instructionsFile, "instructions-file", "", "записать инструкцию роли одним файлом (склейка документов) вместо вывода")
+		fs.StringVar(&instructionsDir, "instructions-dir", "", "разложить документы роли файлами по именам в этот каталог вместо вывода")
 	})
 	if err != nil {
 		return err
@@ -505,17 +506,26 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 		if err := print(out); err != nil {
 			return err
 		}
-		if instructionsFile == "" {
+		if instructionsFile == "" && instructionsDir == "" {
 			return nil
 		}
 		var s stateView
 		if err := decode(out, &s); err != nil {
 			return err
 		}
-		_, err := writeInstructions(s, instructionsFile)
-		return err
+		if instructionsDir != "" {
+			if _, err := writeDocuments(s, instructionsDir); err != nil {
+				return err
+			}
+		}
+		if instructionsFile != "" {
+			if _, err := writeInstructions(s, instructionsFile); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	return renderClaim(out, instructionsFile)
+	return renderClaim(out, instructionsFile, instructionsDir)
 }
 
 func cmdRelease(ctx context.Context, c *Client, args []string) error {

@@ -107,6 +107,9 @@ type stateView struct {
 		Name         string `json:"name"`
 		Version      int    `json:"version"`
 		Instructions string `json:"instructions"`
+		// Документы роли (решение 0068); сервер прежней версии их не
+		// отдаёт — тогда роль одна строка instructions.
+		Documents []roleDocView `json:"documents"`
 		// Сырым: форму контракта проверяет сервер, а show не должен падать
 		// из-за поля, которое он не печатает.
 		OutputContract json.RawMessage `json:"output_contract"`
@@ -172,7 +175,8 @@ func renderState(raw json.RawMessage) error {
 
 // printSummary — сводка задачи, общая для show и claim. Причину возврата
 // show показывает одной усечённой строкой, claim — целиком отдельной
-// секцией, поэтому здесь она по флагу.
+// секцией, поэтому здесь она по флагу; по нему же show дописывает к роли
+// список её документов.
 func printSummary(s stateView, rejectionLine bool) {
 	fmt.Printf("%s  %s\n", s.Task.Key, s.Task.Title)
 	pairs := []string{
@@ -186,7 +190,13 @@ func printSummary(s stateView, rejectionLine bool) {
 		pairs = append(pairs, "Трекер:", link)
 	}
 	if s.Role != nil {
-		pairs = append(pairs, "Роль:", fmt.Sprintf("%s (%s) v%d", s.Role.Key, s.Role.Name, s.Role.Version))
+		role := fmt.Sprintf("%s (%s) v%d", s.Role.Key, s.Role.Name, s.Role.Version)
+		// Состав роли — только в show: claim печатает документы целиком
+		// в секции инструкции.
+		if rejectionLine && len(s.Role.Documents) > 0 {
+			role += "; документы: " + documentsLine(s.Role.Documents)
+		}
+		pairs = append(pairs, "Роль:", role)
 	}
 	run := dash(short(s.StageRunID))
 	if s.Kind != "" {
@@ -258,10 +268,11 @@ func printSummary(s stateView, rejectionLine bool) {
 
 // renderClaim — ответ захвата: сводка, как у show, и всё, что нужно агенту
 // без MCP, — что сдать, входы, возврат или перепроверка и инструкция роли
-// целиком последней, чтобы длинный текст не прятал остальное. С файлом
-// инструкция пишется в него, и только после того, как всё прочее
-// напечатано: аренда уже взята, и id прогона агенту нужен даже при ошибке.
-func renderClaim(raw json.RawMessage, instructionsFile string) error {
+// целиком последней, чтобы длинный текст не прятал остальное. С каталогом
+// документы роли раскладываются в него файлами, с файлом — склейка пишется
+// в него, и только после того, как всё прочее напечатано: аренда уже
+// взята, и id прогона агенту нужен даже при ошибке.
+func renderClaim(raw json.RawMessage, instructionsFile, instructionsDir string) error {
 	var s stateView
 	if err := decode(raw, &s); err != nil {
 		return err
@@ -319,6 +330,9 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 	}
 
 	if s.Role == nil {
+		if instructionsDir != "" {
+			return fmt.Errorf("в ответе захвата нет роли: документы в %s писать нечего", instructionsDir)
+		}
 		if instructionsFile != "" {
 			return fmt.Errorf("в ответе захвата нет роли: инструкцию в %s писать нечего", instructionsFile)
 		}
@@ -327,16 +341,34 @@ func renderClaim(raw json.RawMessage, instructionsFile string) error {
 	fmt.Println()
 	fmt.Println(instructionsHeading)
 	head := fmt.Sprintf("Инструкция роли %s v%d", s.Role.Key, s.Role.Version)
+	if instructionsDir != "" {
+		paths, err := writeDocuments(s, instructionsDir)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s: документов %d в %s\n", head, len(paths), instructionsDir)
+		for _, p := range paths {
+			fmt.Println(p)
+		}
+	}
 	if instructionsFile != "" {
 		n, err := writeInstructions(s, instructionsFile)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("%s: %s (%d симв.)\n", head, instructionsFile, n)
+	}
+	if instructionsDir != "" || instructionsFile != "" {
 		return nil
 	}
 	fmt.Println(head + ":")
-	fmt.Println(s.Role.Instructions)
+	// Сервер прежней версии документов не отдаёт: текст печатается, как
+	// раньше, без шапки.
+	if len(s.Role.Documents) == 0 {
+		fmt.Println(s.Role.Instructions)
+		return nil
+	}
+	printDocuments(s.Role.Documents)
 	return nil
 }
 
@@ -347,18 +379,6 @@ const (
 	dataHeading         = "== Данные задачи: " + trust.DataNote + " =="
 	instructionsHeading = "== Правила этапа: инструкция роли =="
 )
-
-// writeInstructions пишет инструкцию роли в файл байт в байт и отвечает
-// длиной в символах.
-func writeInstructions(s stateView, path string) (int, error) {
-	if s.Role == nil {
-		return 0, fmt.Errorf("в ответе захвата нет роли: инструкцию в %s писать нечего", path)
-	}
-	if err := os.WriteFile(path, []byte(s.Role.Instructions), 0o644); err != nil {
-		return 0, fmt.Errorf("инструкция роли не записана в %s: %w", path, err)
-	}
-	return utf8.RuneCountInString(s.Role.Instructions), nil
-}
 
 // printContract — что этап обязан сдать. Контракт не той формы (сервер его
 // проверяет на сохранении роли, так что это чужой сервер) не валит вывод:
