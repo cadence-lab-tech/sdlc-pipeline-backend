@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Каталог роли (решение 0068, п. 5.4) — формат CLI, а не API: на сервер
@@ -108,6 +109,11 @@ func readRoleDir(dir string) (map[string]any, error) {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("документ %s: %w", path, err)
+		}
+		// JSON невалидный UTF-8 не несёт: кодировщик молча заменил бы такие
+		// байты на U+FFFD, и сервер принял бы испорченный текст новой версией.
+		if !utf8.Valid(content) {
+			return nil, fmt.Errorf("документ %s: содержимое — не UTF-8", path)
 		}
 		doc := map[string]any{"name": d.Name, "content": string(content)}
 		if d.Kind != "" {

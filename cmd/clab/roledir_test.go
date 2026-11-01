@@ -63,7 +63,8 @@ func TestReadRoleDirOrder(t *testing.T) {
 }
 
 // AC-16: лишний файл, строка без файла, имя за пределами каталога, пустой
-// набор, instructions в role.json — ошибка с именем файла.
+// набор, instructions в role.json, файл не в UTF-8 (R-5) — ошибка с именем
+// файла.
 func TestReadRoleDirRejects(t *testing.T) {
 	withDraft := map[string]string{"draft.md": "черновик"}
 	for k, v := range threeFiles {
@@ -84,6 +85,7 @@ func TestReadRoleDirRejects(t *testing.T) {
 		{"пустой набор", `{"key":"w","documents":[]}`, nil, "нет ни одного документа"},
 		{"instructions", `{"key":"w","instructions":"x","documents":[{"name":"a.md"}]}`, map[string]string{"a.md": "x"}, "instructions"},
 		{"не JSON", `{"key":`, nil, "не разбирается"},
+		{"не UTF-8", `{"key":"w","documents":[{"name":"a.md"}]}`, map[string]string{"a.md": "caf\xe9"}, "a.md: содержимое — не UTF-8"},
 	}
 	for _, tc := range cases {
 		_, err := readRoleDir(writeRoleDir(t, tc.manifest, tc.files))
