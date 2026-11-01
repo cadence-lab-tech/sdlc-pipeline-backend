@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -100,6 +101,13 @@ func TestScopeHintsMultiRepoOnForbidden(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "scope_expansion_forbidden") ||
 		!strings.Contains(err.Error(), "--multi-repo") || !strings.Contains(err.Error(), "решение человека") {
 		t.Fatalf("ждали ошибку сервера и подсказку, получили %v", err)
+	}
+	// exit() печатает только Code и Message найденного APIError, обёртки
+	// (%w) он отбрасывает: подсказка должна лежать в самом сообщении.
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "scope_expansion_forbidden" ||
+		!strings.Contains(api.Message, "включите свойство multi_repo") || !strings.Contains(api.Message, "--multi-repo") {
+		t.Fatalf("подсказка не в сообщении APIError (его одно и печатает exit): %#v", api)
 	}
 
 	c, _ = newInviteClient(t, http.StatusConflict, forbidden)

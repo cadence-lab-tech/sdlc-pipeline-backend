@@ -665,8 +665,12 @@ func cmdScope(ctx context.Context, c *Client, args []string) error {
 	if err := c.do(ctx, "PATCH", "/tasks/"+task+"/scope", body, &out); err != nil {
 		var api *APIError
 		if !multiRepoSet && errors.As(err, &api) && api.Code == "scope_expansion_forbidden" {
-			return fmt.Errorf("%w\nесли область должна охватывать несколько репозиториев, повторите с --multi-repo: "+
-				"это решение человека, а не исполнителя этапа", err)
+			// exit печатает код и текст APIError и отбрасывает обёртку, так что
+			// подсказка идёт в сообщение самой ошибки, а не через %w.
+			hinted := *api
+			hinted.Message += "\nесли область должна охватывать несколько репозиториев, повторите с --multi-repo: " +
+				"это решение человека, а не исполнителя этапа"
+			return &hinted
 		}
 		return err
 	}
