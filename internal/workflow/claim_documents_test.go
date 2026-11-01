@@ -205,18 +205,19 @@ func TestClaimRoleDocumentFromBlobStore(t *testing.T) {
 	}
 }
 
-// Ключи role ответа — прежние плюс documents, и ничего больше: новое поле
-// роли (CLAB-348 добавит document_warnings) — осознанное решение, а не
-// случайность.
+// Ключи role ответа — прежние плюс documents и document_warnings (CLAB-348,
+// только при отсутствующих именах отбора), и ничего больше: новое поле роли
+// — осознанное решение, а не случайность.
 func TestRoleViewKeys(t *testing.T) {
 	r := fullClaimResult().Role
 	r.Documents = []domain.RoleDocument{{Name: "main.md"}}
+	r.DocumentWarnings = []string{"документ gone.md из отбора на статусе не найден"}
 	var keys []string
 	for k := range roleJSON(t, r) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := append(append([]string{}, prevRoleKeys...), "model_hint", "context_budget", "documents")
+	want := append(append([]string{}, prevRoleKeys...), "model_hint", "context_budget", "documents", "document_warnings")
 	sort.Strings(want)
 	if !reflect.DeepEqual(keys, want) {
 		t.Fatalf("ключи role %v, ждали %v", keys, want)

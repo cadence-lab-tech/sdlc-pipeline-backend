@@ -122,8 +122,8 @@ func (s *Store) CopyWorkflowContent(ctx context.Context, q Querier, srcID, dstID
 			FROM workflow_statuses WHERE workflow_id = $1
 			RETURNING id, key
 		)
-		INSERT INTO status_roles (status_id, role_id, position, is_primary)
-		SELECT ins.id, sr.role_id, sr.position, sr.is_primary
+		INSERT INTO status_roles (status_id, role_id, position, is_primary, document_names)
+		SELECT ins.id, sr.role_id, sr.position, sr.is_primary, sr.document_names
 		FROM ins
 		JOIN src ON src.key = ins.key
 		JOIN status_roles sr ON sr.status_id = src.id`, srcID, dstID); err != nil {
@@ -495,7 +495,7 @@ func (s *Store) clearInitial(ctx context.Context, q Querier, workflowID uuid.UUI
 // сразу, но после правки набора нужен ровно один статус.
 func (s *Store) StatusRoles(ctx context.Context, q Querier, statusID uuid.UUID) ([]domain.StatusRole, error) {
 	rows, err := q.Query(ctx, `
-		SELECT sr.role_id, r.key, r.name, sr.is_primary, sr.position
+		SELECT sr.role_id, r.key, r.name, sr.is_primary, sr.position, sr.document_names
 		FROM status_roles sr
 		JOIN roles r ON r.id = sr.role_id
 		WHERE sr.status_id = $1
@@ -508,7 +508,7 @@ func (s *Store) StatusRoles(ctx context.Context, q Querier, statusID uuid.UUID) 
 	out := []domain.StatusRole{}
 	for rows.Next() {
 		var r domain.StatusRole
-		if err := rows.Scan(&r.RoleID, &r.RoleKey, &r.RoleName, &r.IsPrimary, &r.Position); err != nil {
+		if err := rows.Scan(&r.RoleID, &r.RoleKey, &r.RoleName, &r.IsPrimary, &r.Position, &r.DocumentNames); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, r)
@@ -563,6 +563,8 @@ type StatusRoleInput struct {
 	RoleKey   string
 	IsPrimary bool
 	Position  int
+	// Отбор документов роли на статусе; nil — отбора нет (NULL в базе).
+	DocumentNames []string
 }
 
 // SetStatusRoles заменяет набор ролей статуса целиком: исполнитель и
@@ -578,12 +580,31 @@ func (s *Store) SetStatusRoles(ctx context.Context, q Querier, projectID uuid.UU
 			return err
 		}
 		if _, err := q.Exec(ctx, `
-			INSERT INTO status_roles (status_id, role_id, position, is_primary)
-			VALUES ($1, $2, $3, $4)`, statusID, role.ID, r.Position, r.IsPrimary); err != nil {
+			INSERT INTO status_roles (status_id, role_id, position, is_primary, document_names)
+			VALUES ($1, $2, $3, $4, $5)`, statusID, role.ID, r.Position, r.IsPrimary, r.DocumentNames); err != nil {
 			return translate(err)
 		}
 	}
 	return nil
+}
+
+// StatusRoleDocuments — отбор документов роли на статусе: строка
+// status_roles пары (статус, роль). nil — отбора нет или пары на статусе нет
+// (захват на этом не падает: этап получает все документы, как до отбора).
+// Ключ — пара, а не признак основной роли: прогон перепроверки несёт статус
+// родителя и версию своей роли, и отбор ему достаётся свой.
+func (s *Store) StatusRoleDocuments(ctx context.Context, q Querier, statusID, roleID uuid.UUID) ([]string, error) {
+	var names []string
+	err := q.QueryRow(ctx, `
+		SELECT document_names FROM status_roles WHERE status_id = $1 AND role_id = $2`,
+		statusID, roleID).Scan(&names)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, translate(err)
+	}
+	return names, nil
 }
 
 // ── переходы и гейты ────────────────────────────────────────────────────────

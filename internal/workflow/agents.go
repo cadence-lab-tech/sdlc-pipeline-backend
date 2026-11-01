@@ -38,10 +38,13 @@ type Lease struct {
 // Приезжает в ответе на захват: в локальном репозитории синхронизировать
 // нечего, правка роли в UI действует со следующего захвата.
 //
-// Роль — набор документов (решение 0068, п. 4): Documents — все документы
+// Роль — набор документов (решение 0068, п. 4): Documents — документы
 // версии прогона по position, с содержимым; Instructions — их склейка
 // ConcatDocuments для clab, раннера и плагина прежних версий (у роли из
 // одного документа — его текст байт в байт). MCP склейку не отдаёт.
+// Отбор на статусе (п. 3, CLAB-348) сужает Documents и склейку до
+// названных документов; имена, которых в версии нет, — DocumentWarnings.
+// Без отбора ключа document_warnings в ответе нет.
 type RoleView struct {
 	Key            string                `json:"key"`
 	Name           string                `json:"name"`
@@ -56,6 +59,8 @@ type RoleView struct {
 	// Устарел: строка модели для clab и раннера прежних версий.
 	ModelHint     *string         `json:"model_hint,omitempty"`
 	ContextBudget json.RawMessage `json:"context_budget,omitempty"`
+	// Предупреждения отбора: имена, не найденные в версии роли прогона.
+	DocumentWarnings []string `json:"document_warnings,omitempty"`
 }
 
 type RepositoryView struct {
@@ -653,7 +658,7 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 	var err error
 	var roleLevel *string
 	if run.RoleVersionID != nil {
-		role, err := e.roleView(ctx, q, *run.RoleVersionID)
+		role, err := e.roleView(ctx, q, run.StatusID, *run.RoleVersionID)
 		if err != nil {
 			return out, err
 		}
@@ -674,7 +679,11 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 	return out, nil
 }
 
-func (e *Engine) roleView(ctx context.Context, q postgres.Querier, roleVersionID uuid.UUID) (*RoleView, error) {
+// roleView — роль прогона: версия роли и отбор её документов на статусе
+// прогона. Основной прогон и перепроверка идут одним путём: прогон
+// перепроверки несёт статус родителя и версию роли-ревьюера, и пара
+// (статус, роль) находит его собственную строку status_roles.
+func (e *Engine) roleView(ctx context.Context, q postgres.Querier, statusID, roleVersionID uuid.UUID) (*RoleView, error) {
 	rv, err := e.store.GetRoleVersion(ctx, q, roleVersionID)
 	if err != nil {
 		return nil, err
@@ -687,16 +696,21 @@ func (e *Engine) roleView(ctx context.Context, q postgres.Querier, roleVersionID
 	// Документы версии с содержимым тем же читателем, что у авторинга: в нём
 	// правило «нет строк — main.md из колонки» и чтение из внешнего
 	// хранилища блобов. Склейка — из документов, а не из колонки: отбор по
-	// статусу (CLAB-348) подменит набор здесь, перед ConcatDocuments.
+	// статусу сужает набор до неё.
 	versions := []domain.RoleVersion{rv}
 	if err := e.store.AttachRoleDocuments(ctx, q, versions, true); err != nil {
 		return nil, err
 	}
-	docs := versions[0].Documents
+	names, err := e.store.StatusRoleDocuments(ctx, q, statusID, rv.RoleID)
+	if err != nil {
+		return nil, err
+	}
+	docs, missing := selectDocuments(versions[0].Documents, names)
 	return &RoleView{
 		Key: key, Name: name, Version: rv.Version,
 		Instructions: ConcatDocuments(docs), Documents: docs,
-		InputKinds: rv.InputKinds, OutputContract: rv.OutputContract,
+		DocumentWarnings: claimDocumentWarnings(key, rv.Version, names, missing),
+		InputKinds:       rv.InputKinds, OutputContract: rv.OutputContract,
 		ToolPolicy: rv.ToolPolicy, ModelLevel: rv.ModelLevel, ModelHint: rv.ModelHint,
 		ContextBudget: rv.ContextBudget,
 	}, nil
