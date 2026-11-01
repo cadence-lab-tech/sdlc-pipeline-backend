@@ -60,7 +60,7 @@ func commands() []command {
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
-		{"scope", "расширить или сузить область задачи", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] --reason ...", cmdScope},
+		{"scope", "расширить или сузить область задачи", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] [--multi-repo[=false]] --reason ...", cmdScope},
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file] — --artifact только для текста, бинарный файл сдаётся до перехода: clab submit --file", cmdTransition},
 		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
@@ -630,10 +630,14 @@ func cmdLink(ctx context.Context, c *Client, args []string) error {
 
 func cmdScope(ctx context.Context, c *Client, args []string) error {
 	var add, remove, reason string
+	var multiRepo bool
 	task, rest := popTask(args)
 	fs, err := flags("scope", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&add, "add", "", "репозитории через запятую: добавить в область")
 		fs.StringVar(&remove, "remove", "", "репозитории через запятую: убрать из области (нужен уровень maintainer)")
+		fs.BoolVar(&multiRepo, "multi-repo", false,
+			"включить свойство multi_repo (область из нескольких репозиториев); --multi-repo=false выключает. "+
+				"Решение человека (решение 0015); вместе с --add — одной транзакцией")
 		fs.StringVar(&reason, "reason", "", "почему область меняется")
 	})
 	if err != nil {
@@ -642,15 +646,28 @@ func cmdScope(ctx context.Context, c *Client, args []string) error {
 	if err := requireTask(fs, task); err != nil {
 		return err
 	}
-	if add == "" && remove == "" {
-		return fmt.Errorf("не указан ни --add, ни --remove")
+	multiRepoSet := false
+	fs.Visit(func(f *flag.Flag) { multiRepoSet = multiRepoSet || f.Name == "multi-repo" })
+	if add == "" && remove == "" && !multiRepoSet {
+		return fmt.Errorf("не указан ни --add, ни --remove, ни --multi-repo")
+	}
+
+	body := map[string]any{
+		"add_repositories": splitList(add), "remove_repositories": splitList(remove),
+		"note": reason,
+	}
+	if multiRepoSet {
+		// Свойства сервер сливает с текущими: уходит только названное.
+		body["properties"] = map[string]any{"multi_repo": multiRepo}
 	}
 
 	var out any
-	if err := c.do(ctx, "PATCH", "/tasks/"+task+"/scope", map[string]any{
-		"add_repositories": splitList(add), "remove_repositories": splitList(remove),
-		"note": reason,
-	}, &out); err != nil {
+	if err := c.do(ctx, "PATCH", "/tasks/"+task+"/scope", body, &out); err != nil {
+		var api *APIError
+		if !multiRepoSet && errors.As(err, &api) && api.Code == "scope_expansion_forbidden" {
+			return fmt.Errorf("%w\nесли область должна охватывать несколько репозиториев, повторите с --multi-repo: "+
+				"это решение человека, а не исполнителя этапа", err)
+		}
 		return err
 	}
 	return print(out)
