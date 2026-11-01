@@ -30,8 +30,11 @@ import (
 
 // BundleVersion — формат связки; растёт при несовместимых изменениях.
 // Вторая версия переносит несколько циклов: у проекта их столько, сколько
-// типов задач (решение 0024).
-const BundleVersion = 2
+// типов задач (решение 0024). Третья несёт роль набором документов
+// (решение 0068, п. 5.3): экспорт пишет documents, импорт форматов 1 и 2
+// со строкой instructions даёт один main.md, а сервер прежней версии
+// формат 3 отбивает целиком, ничего не применив.
+const BundleVersion = 3
 
 type Bundle struct {
 	Version      int                `json:"version"`
@@ -64,13 +67,16 @@ type BundleRepository struct {
 }
 
 type BundleRole struct {
-	Key            string          `json:"key"`
-	Name           string          `json:"name"`
-	Summary        string          `json:"summary,omitempty"`
-	Instructions   string          `json:"instructions"`
-	InputKinds     []string        `json:"input_kinds,omitempty"`
-	OutputContract json.RawMessage `json:"output_contract,omitempty"`
-	ToolPolicy     json.RawMessage `json:"tool_policy,omitempty"`
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	Summary string `json:"summary,omitempty"`
+	// Либо Instructions (форматы 1 и 2, один main.md), либо Documents
+	// (формат 3); оба у одной роли — отказ всей связки.
+	Instructions   string               `json:"instructions,omitempty"`
+	Documents      []BundleRoleDocument `json:"documents,omitempty"`
+	InputKinds     []string             `json:"input_kinds,omitempty"`
+	OutputContract json.RawMessage      `json:"output_contract,omitempty"`
+	ToolPolicy     json.RawMessage      `json:"tool_policy,omitempty"`
 	// Устарел (решение 0060): строка модели для раннера прежних версий.
 	ModelHint string `json:"model_hint,omitempty"`
 	// Уровень модели роли по умолчанию: low | medium | high. Сервер прежней
@@ -79,6 +85,14 @@ type BundleRole struct {
 	RepoScope     []string        `json:"repo_scope,omitempty"`
 	ContextBudget json.RawMessage `json:"context_budget,omitempty"`
 	Changelog     string          `json:"changelog,omitempty"`
+}
+
+// BundleRoleDocument — документ роли в связке, в порядке отдачи агенту.
+// Пустой kind — instructions.
+type BundleRoleDocument struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind,omitempty"`
+	Content string `json:"content"`
 }
 
 type BundleDocument struct {
@@ -178,6 +192,14 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 	if b.Version > BundleVersion {
 		return report, apperr.InvalidInput("связка версии %d новее поддерживаемой %d", b.Version, BundleVersion)
 	}
+	// Форма ролей — до транзакции и до первой записи: связка с ролью, у
+	// которой оба поля, отбивается целиком, в том числе в dry_run.
+	for _, r := range b.Roles {
+		if r.Instructions != "" && r.Documents != nil {
+			return report, apperr.InvalidInput(
+				"роль %q: у роли в связке либо instructions, либо documents, а не оба сразу", r.Key)
+		}
+	}
 
 	err := a.store.InTx(ctx, func(tx pgx.Tx) error {
 		project, err := a.store.GetProjectByKey(ctx, tx, projectKey)
@@ -262,7 +284,7 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 	if strings.TrimSpace(r.Key) == "" {
 		return ImportEntry{}, apperr.InvalidInput("у роли нужен key")
 	}
-	if strings.TrimSpace(r.Instructions) == "" {
+	if r.Documents == nil && strings.TrimSpace(r.Instructions) == "" {
 		return ImportEntry{}, apperr.InvalidInput("у роли нужна инструкция")
 	}
 	if r.Name == "" {
@@ -274,7 +296,7 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 		return ImportEntry{}, err
 	}
 	version := RoleVersionInput{
-		Instructions: r.Instructions, InputKinds: r.InputKinds,
+		Instructions: r.Instructions, Documents: bundleDocumentsIn(r.Documents), InputKinds: r.InputKinds,
 		OutputContract: r.OutputContract, ToolPolicy: r.ToolPolicy,
 		ModelHint: optional(r.ModelHint), ModelLevel: optional(r.ModelLevel), RepoScope: r.RepoScope,
 		ContextBudget: r.ContextBudget, Changelog: optional(r.Changelog),
@@ -309,13 +331,25 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 		}
 	}
 
-	versions, err := a.store.ListRoleVersions(ctx, tx, role.ID)
+	// Набор проверяется до сравнения: неверный документ — отказ связки, а
+	// не «unchanged» по совпадению sha.
+	docs, err := roleDocuments(version, a.store.BlobLimit())
 	if err != nil {
 		return ImportEntry{}, err
 	}
-	if len(versions) > 0 && sameVersion(versions[0], version) {
-		return ImportEntry{Key: r.Key, Outcome: "unchanged", ID: role.ID.String(),
-			Detail: fmt.Sprintf("версия %d совпадает", versions[0].Version)}, nil
+	latest, err := a.store.LatestRoleVersion(ctx, tx, role.ID)
+	switch {
+	case err == nil:
+		have := []domain.RoleVersion{latest}
+		if err := a.store.AttachRoleDocuments(ctx, tx, have, false); err != nil {
+			return ImportEntry{}, err
+		}
+		if sameVersion(have[0], version, documentsOf(docs)) {
+			return ImportEntry{Key: r.Key, Outcome: "unchanged", ID: role.ID.String(),
+				Detail: fmt.Sprintf("версия %d совпадает", latest.Version)}, nil
+		}
+	case apperr.As(err).Code != apperr.CodeNotFound:
+		return ImportEntry{}, err
 	}
 	if version.Changelog == nil {
 		version.Changelog = optional("импорт связки")
@@ -326,6 +360,19 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 	}
 	return ImportEntry{Key: r.Key, Outcome: "new_version", ID: role.ID.String(),
 		Detail: fmt.Sprintf("версия %d", rv.Version)}, nil
+}
+
+// bundleDocumentsIn — документы роли связки во вход версии; nil остаётся
+// nil, чтобы роль формата 1–2 шла путём instructions.
+func bundleDocumentsIn(docs []BundleRoleDocument) []RoleDocumentInput {
+	if docs == nil {
+		return nil
+	}
+	out := make([]RoleDocumentInput, len(docs))
+	for i, d := range docs {
+		out[i] = RoleDocumentInput{Name: d.Name, Kind: d.Kind, Content: d.Content}
+	}
+	return out
 }
 
 // sameWorkflow — совпадает ли версия цикла (в виде связки) с тем, что
@@ -386,11 +433,13 @@ func eqStringSet(a, b []string) bool {
 	return eqStrings(sa, sb)
 }
 
-// sameVersion — совпадает ли последняя версия роли с тем, что импортируется.
-// JSON сравнивается нормализованно: пробелы и порядок ключей не должны
-// заводить новую версию.
-func sameVersion(have domain.RoleVersion, want RoleVersionInput) bool {
-	if have.Instructions != want.Instructions {
+// sameVersion — совпадает ли последняя версия роли с тем, что импортируется:
+// поля версии и набор документов по (name, kind, position, sha256)
+// (решение 0068, п. 5.5). have — с документами (AttachRoleDocuments),
+// wantDocs — набор входа. JSON сравнивается нормализованно: пробелы и
+// порядок ключей не должны заводить новую версию.
+func sameVersion(have domain.RoleVersion, want RoleVersionInput, wantDocs []domain.RoleDocument) bool {
+	if !sameDocuments(have.Documents, wantDocs) {
 		return false
 	}
 	if !eqStrings(have.InputKinds, want.InputKinds) || !eqStrings(have.RepoScope, want.RepoScope) {
@@ -579,17 +628,21 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 		return out, err
 	}
 	for _, r := range roles {
-		versions, err := a.store.ListRoleVersions(ctx, q, r.ID)
+		if r.LatestVersion == nil {
+			continue
+		}
+		v, err := a.latestVersion(ctx, q, r.ID)
 		if err != nil {
 			return out, err
 		}
-		if len(versions) == 0 {
-			continue
+		// Формат 3 пишет только documents: склейку импорт соберёт сам.
+		docs := make([]BundleRoleDocument, len(v.Documents))
+		for i, d := range v.Documents {
+			docs[i] = BundleRoleDocument{Name: d.Name, Kind: d.Kind, Content: content(d)}
 		}
-		v := versions[0]
 		out.Roles = append(out.Roles, BundleRole{
 			Key: r.Key, Name: r.Name, Summary: deref(r.Summary),
-			Instructions: v.Instructions, InputKinds: v.InputKinds,
+			Documents: docs, InputKinds: v.InputKinds,
 			OutputContract: v.OutputContract, ToolPolicy: v.ToolPolicy,
 			ModelHint: deref(v.ModelHint), ModelLevel: deref(v.ModelLevel),
 			RepoScope: v.RepoScope, ContextBudget: v.ContextBudget,

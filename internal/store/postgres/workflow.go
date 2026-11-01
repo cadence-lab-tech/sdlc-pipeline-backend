@@ -262,9 +262,7 @@ func (s *Store) PrimaryRole(ctx context.Context, q Querier, statusID uuid.UUID) 
 		SELECT r.id, rv.id
 		FROM status_roles sr
 		JOIN roles r ON r.id = sr.role_id
-		JOIN LATERAL (
-			SELECT id FROM role_versions WHERE role_id = r.id ORDER BY version DESC LIMIT 1
-		) rv ON true
+		JOIN LATERAL (SELECT `+latestRoleVersionOf("r.id")+` AS id) rv ON rv.id IS NOT NULL
 		WHERE sr.status_id = $1 AND sr.is_primary`, statusID,
 	).Scan(&rid, &rvid)
 	if err != nil {

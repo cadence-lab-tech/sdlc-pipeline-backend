@@ -2,10 +2,14 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"sort"
 
 	"github.com/google/uuid"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
@@ -159,9 +163,21 @@ func (s *Store) GetRoleVersionByNumber(ctx context.Context, q Querier, roleID uu
 	return rv, nil
 }
 
+// RoleDocumentInput — документ заводимой версии; позиция — порядок в срезе.
+// Форму имени, типа и содержимого проверяет workflow до вызова.
+type RoleDocumentInput struct {
+	Name    string
+	Kind    string
+	Content []byte
+}
+
 type CreateRoleVersionInput struct {
-	RoleID         uuid.UUID
+	RoleID uuid.UUID
+	// Instructions — то, что ляжет в колонку role_versions.instructions:
+	// склейка документов (workflow.ConcatDocuments). Её читают реплики и
+	// clab прежних версий.
 	Instructions   string
+	Documents      []RoleDocumentInput
 	InputKinds     []string
 	OutputContract json.RawMessage
 	ToolPolicy     json.RawMessage
@@ -173,7 +189,9 @@ type CreateRoleVersionInput struct {
 	CreatedBy      uuid.UUID
 }
 
-// CreateRoleVersion добавляет новую версию инструкции роли.
+// CreateRoleVersion добавляет новую версию инструкции роли вместе с её
+// документами. Всё на одном q: вызывающий держит транзакцию, и отказ на
+// любом шаге не оставляет ни версии, ни строк документов.
 //
 // Версия иммутабельна и номер выдаётся из максимума в этой же транзакции:
 // stage_runs пинят конкретную версию при заходе на статус, поэтому правка
@@ -195,6 +213,11 @@ func (s *Store) CreateRoleVersion(ctx context.Context, q Querier, in CreateRoleV
 		in.ContextBudget = json.RawMessage(`{}`)
 	}
 
+	shas, err := s.putRoleDocumentBlobs(ctx, q, in.Documents)
+	if err != nil {
+		return domain.RoleVersion{}, err
+	}
+
 	rv, err := scanRoleVersion(q.QueryRow(ctx, `
 		INSERT INTO role_versions (role_id, version, instructions, input_kinds,
 		            output_contract, tool_policy, model_hint, repo_scope,
@@ -207,5 +230,165 @@ func (s *Store) CreateRoleVersion(ctx context.Context, q Querier, in CreateRoleV
 	if err != nil {
 		return rv, translate(err)
 	}
+
+	rv.Documents = make([]domain.RoleDocument, 0, len(in.Documents))
+	for i, d := range in.Documents {
+		if _, err := q.Exec(ctx, `
+			INSERT INTO role_version_documents (role_version_id, position, name, kind, blob_sha)
+			VALUES ($1, $2, $3, $4, $5)`, rv.ID, i, d.Name, d.Kind, shas[i]); err != nil {
+			return rv, translate(err)
+		}
+		content := string(d.Content)
+		rv.Documents = append(rv.Documents, domain.RoleDocument{
+			Name: d.Name, Kind: d.Kind, Position: i, SHA256: shas[i],
+			SizeBytes: int64(len(d.Content)), Content: &content,
+		})
+	}
 	return rv, nil
+}
+
+// putRoleDocumentBlobs кладёт содержимое документов в blobs и отдаёт sha по
+// порядку документов. Пишется по возрастанию sha, каждый sha — один раз:
+// PutBlob держит advisory-замок по sha до коммита, и две конкурирующие
+// версии с общими документами в разном порядке взяли бы замки крест-накрест
+// — дедлок, который Postgres разорвёт ошибкой 500 одной из записей.
+func (s *Store) putRoleDocumentBlobs(ctx context.Context, q Querier, docs []RoleDocumentInput) ([]string, error) {
+	shas := make([]string, len(docs))
+	content := map[string][]byte{}
+	for i, d := range docs {
+		sum := sha256.Sum256(d.Content)
+		shas[i] = hex.EncodeToString(sum[:])
+		content[shas[i]] = d.Content
+	}
+	order := make([]string, 0, len(content))
+	for sha := range content {
+		order = append(order, sha)
+	}
+	sort.Strings(order)
+	for _, sha := range order {
+		got, err := s.PutBlob(ctx, q, content[sha], "text/markdown")
+		if err != nil {
+			return nil, err
+		}
+		if got != sha {
+			return nil, apperr.Internal(nil, "sha документа роли %s, а blobs вернул %s", sha, got)
+		}
+	}
+	return shas, nil
+}
+
+// latestRoleVersionOf — единственное место выбора текущей версии роли:
+// последней по номеру (решение 0068, п. 1.8). roleID — SQL-выражение с
+// идентификатором роли (параметр или колонка внешнего запроса); результат —
+// скалярный подзапрос с id версии, NULL у роли без версий. Его подставляют
+// PrimaryRole, переезд задач при активации цикла (MoveWaitingTasks) и
+// LatestRoleVersion; через эту точку CLAB-307 проведёт черновик версии с
+// апрувом. 000011_orchestration несёт свою копию, но она применена и не
+// правится.
+func latestRoleVersionOf(roleID string) string {
+	return `(SELECT id FROM role_versions WHERE role_id = ` + roleID + ` ORDER BY version DESC LIMIT 1)`
+}
+
+// LatestRoleVersion — текущая версия роли, без документов. У роли без
+// версий — not_found.
+func (s *Store) LatestRoleVersion(ctx context.Context, q Querier, roleID uuid.UUID) (domain.RoleVersion, error) {
+	rv, err := scanRoleVersion(q.QueryRow(ctx, `SELECT `+roleVersionCols+`
+		FROM role_versions WHERE id = `+latestRoleVersionOf("$1"), roleID))
+	if err != nil {
+		return rv, notFound(err, "у роли нет ни одной версии")
+	}
+	return rv, nil
+}
+
+// AttachRoleDocuments заполняет Documents у версий одним запросом на все
+// (без N+1 в списке версий). withContent — читать ли содержимое: списки его
+// не отдают.
+//
+// Версия без строк документов читается как один main.md из колонки
+// instructions (решение 0068, п. 6.3): такую пишут реплика прежней версии во
+// время апгрейда, прежний образ после отката и сиды, вставляющие
+// role_versions напрямую. Правило живёт только здесь — его берут GET,
+// связка, MCP и (CLAB-344) захват.
+func (s *Store) AttachRoleDocuments(ctx context.Context, q Querier, versions []domain.RoleVersion, withContent bool) error {
+	if len(versions) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(versions))
+	for i, v := range versions {
+		ids[i] = v.ID
+	}
+	rows, err := q.Query(ctx, `
+		SELECT d.role_version_id, d.position, d.name, d.kind, d.blob_sha, b.size_bytes,
+		       CASE WHEN $2 AND b.storage = 'inline' THEN b.content END, b.storage
+		FROM role_version_documents d
+		JOIN blobs b ON b.sha256 = d.blob_sha
+		WHERE d.role_version_id = ANY($1)
+		ORDER BY d.role_version_id, d.position`, ids, withContent)
+	if err != nil {
+		return translate(err)
+	}
+	type external struct {
+		id  uuid.UUID
+		idx int
+	}
+	byVersion := map[uuid.UUID][]domain.RoleDocument{}
+	var pending []external
+	for rows.Next() {
+		var id uuid.UUID
+		var d domain.RoleDocument
+		var content []byte
+		var storage string
+		if err := rows.Scan(&id, &d.Position, &d.Name, &d.Kind, &d.SHA256, &d.SizeBytes, &content, &storage); err != nil {
+			rows.Close()
+			return translate(err)
+		}
+		if withContent {
+			if storage == "inline" {
+				text := string(content)
+				d.Content = &text
+			} else {
+				pending = append(pending, external{id, len(byVersion[id])})
+			}
+		}
+		byVersion[id] = append(byVersion[id], d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return translate(err)
+	}
+	// Вынесенное во внешнее хранилище читается после закрытия выборки: на
+	// том же соединении транзакции второй запрос посреди чтения строк нельзя.
+	for _, p := range pending {
+		d := &byVersion[p.id][p.idx]
+		content, _, err := s.BlobContent(ctx, q, d.SHA256)
+		if err != nil {
+			return err
+		}
+		text := string(content)
+		d.Content = &text
+	}
+
+	for i := range versions {
+		docs, ok := byVersion[versions[i].ID]
+		if !ok {
+			docs = []domain.RoleDocument{mainFromColumn(versions[i].Instructions, withContent)}
+		}
+		versions[i].Documents = docs
+	}
+	return nil
+}
+
+// mainFromColumn — main.md версии без строк документов; sha и размер — от
+// байтов колонки, как у документа, перенесённого миграцией.
+func mainFromColumn(instructions string, withContent bool) domain.RoleDocument {
+	sum := sha256.Sum256([]byte(instructions))
+	d := domain.RoleDocument{
+		Name: domain.MainRoleDocument, Kind: domain.DefaultRoleDocumentKind, Position: 0,
+		SHA256: hex.EncodeToString(sum[:]), SizeBytes: int64(len(instructions)),
+	}
+	if withContent {
+		text := instructions
+		d.Content = &text
+	}
+	return d
 }
