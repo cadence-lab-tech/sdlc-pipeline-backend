@@ -106,7 +106,11 @@ the rest of the commands.
 
 A task has a repository scope. Pull requests and artifacts stay inside it.
 Widening it (`clab scope <key> --add <owner/name> --reason "…"`) is a human
-decision — an agent describes the need instead of widening silently.
+decision — an agent describes the need instead of widening silently. A
+single-repository task refuses a second repository (`scope_expansion_forbidden`)
+until its `multi_repo` property is on: the human adds `--multi-repo` to the same
+command (`--multi-repo=false` turns it off), and that is the human's decision
+too. An agent has no way to switch it on.
 
 ## Approvals
 
