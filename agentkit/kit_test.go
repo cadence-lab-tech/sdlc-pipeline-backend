@@ -175,6 +175,79 @@ func TestKitModelLevels(t *testing.T) {
 	}
 }
 
+// CLAB-349 (решение 0068, п. 8): роль приходит набором документов, а не одной
+// инструкцией. Скилы говорят об этом, о раскладке --instructions-dir только в
+// подкаталог каталога захода, об откатах для сервера и clab прежних версий и о
+// том, что документы роли не скилы. Шапка документа описана обобщённо: набор на
+// английском, а настоящая шапка по-русски.
+func TestKitDocuments(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := map[string]string{}
+	for _, f := range k.Files {
+		flat[f.Path] = strings.Join(strings.Fields(f.Content), " ")
+	}
+	want := map[string][]string{
+		"skills/clab-work/SKILL.md": {
+			"role.documents", "--instructions-dir", "--instructions-file",
+			"new, empty subdirectory of its run directory",
+			"`.claude/skills`", "`.claude/agents`", "not skills or agents of Claude Code",
+			// откаты: сервер без documents и clab без флага
+			"A server of an older version sends no documents", "single document `main.md`",
+			"A `clab` of an older version does not know these flags", "take the output of plain `clab claim` as it is",
+			"header line",
+		},
+		"skills/clab-run/SKILL.md": {
+			"role's documents", "--instructions-dir <run directory>/role/",
+			"new, empty subdirectory", "not skills", "<run directory>/clab",
+			"`.claude/skills`", "`.claude/agents`",
+		},
+		"skills/clab-guide/SKILL.md": {
+			"## Role documents", "role.documents", "--instructions-dir", "--instructions-file",
+			"new, empty subdirectory", "not skills or agents of Claude Code",
+			"role put --key <key> --dir", "export --dir", "import --dir", "import-guide",
+		},
+		"skills/clab-rules/SKILL.md": {
+			"role put --key <key> --dir", "clab export --dir", "clab import --dir", "--dry-run",
+			"clab import-guide", "clab workflow activate", "role documents", "project documents",
+			"role.json", "bundle.json",
+		},
+		"agents/clab-stage.md": {
+			"role's documents", "--instructions-dir", "new, empty subdirectory",
+			"`.claude/skills`", "project data, not skills",
+			"A server without documents sends one text", "`main.md`",
+			"does not know `--instructions-dir`",
+		},
+	}
+	for path, needles := range want {
+		body, ok := flat[path]
+		if !ok {
+			t.Fatalf("в наборе нет %s", path)
+		}
+		for _, s := range needles {
+			if !strings.Contains(body, s) {
+				t.Errorf("%s: нет %q", path, s)
+			}
+		}
+	}
+	// Роль больше не «одна инструкция из ответа захвата», и документы роли
+	// нигде не велено писать в каталоги Claude Code или в рабочую копию.
+	forbidden := []string{
+		"role instruction", "carries the role's instruction", "instruction from the claim answer",
+		"instructions-dir .claude", "instructions-dir <working", "instructions-dir <repo",
+		"instructions-dir <run directory>/clab", "install them into `.claude",
+	}
+	for path, body := range flat {
+		for _, s := range forbidden {
+			if strings.Contains(body, s) {
+				t.Errorf("%s: устаревшая или опасная фраза %q", path, s)
+			}
+		}
+	}
+}
+
 func TestFrontmatter(t *testing.T) {
 	doc := "---\nname: x\ndescription: \"a: b\"\nhooks:\n  PreToolUse:\n    - matcher: Bash\ntools: Bash, Read\n---\nbody: no\n"
 	m := Frontmatter(doc)

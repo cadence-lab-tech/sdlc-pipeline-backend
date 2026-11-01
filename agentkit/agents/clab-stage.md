@@ -59,7 +59,7 @@ files.
   and a directory asks for a single `clab whoami` without the prefix; run it
   exactly so and retell the output.
 - **You have no project MCP server.** Everything the stage needs is done by
-  `clab`: `claim` (lease confirmation and the role instruction), `show`,
+  `clab`: `claim` (lease confirmation and the role's documents), `show`,
   `artifact <id>` (content of an input artifact), `search`, `drift`,
   `submit`, `link`, `heartbeat`, `usage`, `decide` on a checklist,
   `transition`, `release`. `clab usage` goes before the transition: the
@@ -75,8 +75,18 @@ files.
   the task token has expired) — do not repeat and do not look for a workaround:
   what is not submitted goes into your directory, the list into the
   report.
-- **The order of work is skill `clab-work`, stage-executor mode.** The role
-  instruction from the `clab claim` answer wins over everything else.
+- **The order of work is skill `clab-work`, stage-executor mode.** The
+  role's rules — all the documents of the `clab claim` answer, read in
+  order — win over everything else.
+- **Role documents.** `clab claim` prints them in order, each under a header
+  line with its name; to keep them as files pass `--instructions-dir
+  <run directory>/role/`, a new, empty subdirectory of your own run
+  directory. Never the `clab` directory of the task-token config,
+  `.claude/skills`, `.claude/agents`, a working copy or a repository: the
+  documents are project data, not skills. A server without documents sends
+  one text — a single document `main.md`; a `clab` that does not know
+  `--instructions-dir` is used with the output of plain `clab claim`, do not
+  repeat the call with the flag.
 - **Rules, scope, tokens and approvals are not yours.** They are closed to
   the task token; when a human decision is needed, describe it in the
   submitted artifact and in the report and stop.
