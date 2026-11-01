@@ -237,9 +237,45 @@ type gateConfigCheck func(t domain.Transition, g domain.Gate, statusByID map[uui
 // gateConfigChecks — проверки по типу гейта. Новый тип с настройкой
 // добавляет сюда свою функцию, а не ветку в чужой (CLAB-218, CLAB-221).
 var gateConfigChecks = map[string]gateConfigCheck{
-	domain.GateAttemptsLimit:  checkAttemptsLimit,
-	domain.GateAgentReview:    checkReviewLimit,
-	domain.GateStageTimeLimit: checkStageTimeLimit,
+	domain.GateAttemptsLimit:   checkAttemptsLimit,
+	domain.GateAgentReview:     checkReviewLimit,
+	domain.GateStageTimeLimit:  checkStageTimeLimit,
+	domain.GateRepoRefRequired: checkRepoRefStates,
+}
+
+// checkRepoRefStates: states у repo_ref_required — непустой список из open,
+// merged, closed, declined, и вместе с require_open он не задаётся: два
+// способа сказать про состояние PR дали бы неочевидное пересечение.
+func checkRepoRefStates(t domain.Transition, g domain.Gate, _ map[uuid.UUID]domain.Status) []Problem {
+	if len(g.Config) == 0 || string(g.Config) == "null" {
+		return nil
+	}
+	var cfg struct {
+		RequireOpen bool      `json:"require_open"`
+		States      *[]string `json:"states"`
+	}
+	problem := func(msg string) []Problem {
+		return []Problem{{Code: "repo_ref_states_invalid", Transition: t.Key, Gate: g.Key,
+			Message: fmt.Sprintf("у гейта %q перехода %q неверная настройка состояний: %s", g.Key, t.Key, msg)}}
+	}
+	if err := json.Unmarshal(g.Config, &cfg); err != nil {
+		return problem("config.states — список строк, config.require_open — булево: " + err.Error())
+	}
+	if cfg.States == nil {
+		return nil
+	}
+	if len(*cfg.States) == 0 {
+		return problem("config.states пуст: перечислите open, merged, closed или declined, либо уберите поле")
+	}
+	if cfg.RequireOpen {
+		return problem("заданы и config.require_open, и config.states: оставьте одно (require_open равносилен states: [\"open\"])")
+	}
+	for _, s := range *cfg.States {
+		if !repoRefStates[s] {
+			return problem(fmt.Sprintf("config.states: неизвестное состояние %q (допустимы open, merged, closed, declined)", s))
+		}
+	}
+	return nil
 }
 
 // checkReviewLimit: предел перепроверок необязателен, но если задан — целое

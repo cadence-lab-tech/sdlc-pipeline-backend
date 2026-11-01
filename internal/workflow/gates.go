@@ -270,6 +270,30 @@ type repoRefConfig struct {
 	MinCount      int  `json:"min_count"`
 	RequireOpen   bool `json:"require_open"`
 	PerRepository bool `json:"per_repository"`
+	// States — состояния ссылки (task_repo_refs.state), которые гейт
+	// засчитывает: open, merged, closed, declined. Не задан — состояние не
+	// важно (или важно только по require_open). Это состояние PR, а не статус
+	// цикла: так повторный круг после слияния проходит без пустого PR.
+	States []string `json:"states"`
+}
+
+// repoRefStates — допустимые значения states у repo_ref_required.
+var repoRefStates = map[string]bool{"open": true, "merged": true, "closed": true, "declined": true}
+
+// nullStateCounts — засчитывается ли ссылка, состояние которой воркер ещё не
+// принёс (state IS NULL). Без доступа к GitHub оно не приходит вовсе, и гейт
+// не должен блокировать задачу за отсутствие данных: засчитываем, пока
+// «открыта» — допустимое состояние. require_open работает так же.
+func (c repoRefConfig) nullStateCounts() bool {
+	if len(c.States) == 0 {
+		return true
+	}
+	for _, s := range c.States {
+		if s == "open" {
+			return true
+		}
+	}
+	return false
 }
 
 // evalRepoRefRequired проверяет, что к задаче привязан PR (или ветка/коммит).
@@ -289,6 +313,11 @@ func (e *Engine) evalRepoRefRequired(ctx context.Context, q postgres.Querier, in
 		cfg.MinCount = 1
 	}
 
+	states := cfg.States
+	if states == nil {
+		states = []string{}
+	}
+
 	// Состояние PR подтягивает синхронизация с GitHub (фаза 3). Пока оно не
 	// заполнено, require_open отбивает только заведомо закрытое — иначе гейт
 	// блокировал бы задачу за отсутствие данных, а не за отсутствие PR.
@@ -302,8 +331,12 @@ func (e *Engine) evalRepoRefRequired(ctx context.Context, q postgres.Querier, in
 		      AND rr.ref_type = $2
 		      AND (NOT $3 OR rr.state IS NULL
 		           OR rr.state NOT IN ('closed', 'merged', 'declined'))
+		      AND (cardinality($4::text[]) = 0
+		           OR rr.state = ANY($4)
+		           OR ($5 AND rr.state IS NULL))
 		WHERE tr.task_id = $1
-		GROUP BY 1 ORDER BY 1`, in.Task.ID, cfg.RefType, cfg.RequireOpen)
+		GROUP BY 1 ORDER BY 1`, in.Task.ID, cfg.RefType, cfg.RequireOpen,
+		states, cfg.nullStateCounts())
 	if err != nil {
 		return GateOutcome{}, err
 	}
@@ -342,14 +375,21 @@ func (e *Engine) evalRepoRefRequired(ctx context.Context, q postgres.Querier, in
 	}
 
 	details := map[string]any{"ref_type": cfg.RefType, "per_repository": counts}
+	if len(cfg.States) > 0 {
+		details["states"] = cfg.States
+	}
 	if len(missing) == 0 {
 		out := base(in.Gate, domain.GateResultPassed, "")
 		out.Details = details
 		return out, nil
 	}
 
+	what := cfg.RefType
+	if len(cfg.States) > 0 {
+		what += " в состоянии " + strings.Join(cfg.States, "/")
+	}
 	out := base(in.Gate, domain.GateResultFailed,
-		fmt.Sprintf("нет %s в: %s", cfg.RefType, strings.Join(missing, ", ")))
+		fmt.Sprintf("нет %s в: %s", what, strings.Join(missing, ", ")))
 	details["missing"] = missing
 	out.Details = details
 	return out, nil
