@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -170,8 +171,10 @@ func (s *Server) getWorkflow(c *gin.Context) {
 // вместе с limit, поиск q по ключу и заголовку, order=updated, top_level и
 // исполнитель (assignee, unassigned) и поля статуса из версии цикла
 // (terminal, has_role, in_work, category); в ответе —
-// total выборки, у элементов — status_category и child_counts. Всё
-// добавочное: прежние поля и их значения те же.
+// total выборки, у элементов — status_category и child_counts. Для «Обзора»
+// (CLAB-363, решение 0070) — поля строки (blocked_by, last_moved_at,
+// current_run, attention, cost), фильтры по причинам attention* и
+// order=backlog. Всё добавочное: прежние поля и их значения те же.
 func (s *Server) listTasks(c *gin.Context) {
 	ctx, q := c.Request.Context(), s.store.DB()
 
@@ -194,10 +197,11 @@ func (s *Server) listTasks(c *gin.Context) {
 	}
 	switch order := c.Query("order"); order {
 	case "":
-	case postgres.TaskListOrderUpdated:
+	case postgres.TaskListOrderUpdated, postgres.TaskListOrderBacklog:
 		f.Order = order
 	default:
-		badRequest(c, s.log, fmt.Errorf("order: неизвестный порядок %q, есть %q", order, postgres.TaskListOrderUpdated))
+		badRequest(c, s.log, fmt.Errorf("order: неизвестный порядок %q, есть %q и %q", order,
+			postgres.TaskListOrderUpdated, postgres.TaskListOrderBacklog))
 		return
 	}
 	if f.TopLevel, err = queryBool(c, "top_level"); err != nil {
@@ -222,37 +226,45 @@ func (s *Server) listTasks(c *gin.Context) {
 		f.Categories = strings.Split(raw, ",")
 	}
 
-	items, total, err := s.store.ListTaskItems(ctx, q, project.ID, f)
+	attention, err := workflow.ParseAttentionFilter(c.Query)
+	if err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+
+	page, err := s.engine.ListTaskOverviews(ctx, q, project.ID, f, attention, actor(c).ID, time.Now())
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	// «Ждёт апрува» у каждой строки (CLAB-326): то же правило, что у детей
-	// карточки; гейты считаются только у задач в работе с апрувом на
-	// переходе вперёд.
-	tasks := make([]domain.Task, len(items))
-	for i, it := range items {
-		tasks[i] = it.Task
+	out := make([]taskListItem, 0, len(page.Items))
+	for _, it := range page.Items {
+		ov := page.Overviews[it.ID]
+		out = append(out, taskListItem{
+			TaskListItem: it, AwaitingApproval: ov.AwaitingApproval,
+			BlockedBy: ov.BlockedBy, LastMovedAt: ov.LastMovedAt, CurrentRun: ov.CurrentRun,
+			Attention: ov.Attention, Cost: ov.Cost,
+			SubtreeLastMovedAt: ov.SubtreeLastMovedAt, SubtreeCostUSD: ov.SubtreeCostUSD,
+		})
 	}
-	awaiting, err := s.engine.TasksAwaitingApproval(ctx, q, tasks)
-	if err != nil {
-		fail(c, s.log, err)
-		return
-	}
-	out := make([]taskListItem, 0, len(items))
-	for _, it := range items {
-		out = append(out, taskListItem{TaskListItem: it, AwaitingApproval: awaiting[it.ID]})
-	}
-	c.JSON(http.StatusOK, gin.H{"tasks": out, "total": total})
+	c.JSON(http.StatusOK, gin.H{"tasks": out, "total": page.Total})
 }
 
-// taskListItem — элемент списка задач: элемент списка (CLAB-327) и признак
-// «ждёт апрува» (CLAB-326) за её полями. Вложенная структура встроена, JSON
-// плоский: клиент прошлой версии читает элемент как раньше, новое поле — в
-// конце.
+// taskListItem — элемент списка задач: элемент списка (CLAB-327), признак
+// «ждёт апрува» (CLAB-326) и поля «Обзора» (CLAB-363) за её полями.
+// Вложенная структура встроена, JSON плоский: клиент прошлой версии читает
+// элемент как раньше, новые поля — в конце. Поля поддерева — только у задач
+// с детьми.
 type taskListItem struct {
 	domain.TaskListItem
-	AwaitingApproval bool `json:"awaiting_approval"`
+	AwaitingApproval   bool                 `json:"awaiting_approval"`
+	BlockedBy          []string             `json:"blocked_by"`
+	LastMovedAt        time.Time            `json:"last_moved_at"`
+	CurrentRun         *workflow.CurrentRun `json:"current_run"`
+	Attention          []workflow.Attention `json:"attention"`
+	Cost               *domain.TaskCost     `json:"cost"`
+	SubtreeLastMovedAt *time.Time           `json:"subtree_last_moved_at,omitempty"`
+	SubtreeCostUSD     *float64             `json:"subtree_cost_usd,omitempty"`
 }
 
 // queryBool — необязательный логический параметр запроса; пусто — false.
