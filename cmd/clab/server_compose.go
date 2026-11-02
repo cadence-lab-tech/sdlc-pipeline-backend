@@ -379,3 +379,115 @@ func (i *installation) readyTimeout() (int, error) {
 	}
 	return n, nil
 }
+
+// errAPIStarting — `up -d` упал, пока api стартовал (миграция базы дольше
+// healthcheck'а), и api не стал здоров до CADENCE_READY_TIMEOUT: стек не
+// доведён, воркер не запущен (CLAB-369, R24).
+var errAPIStarting = errors.New("the api is still starting")
+
+// upError — `up -d` упал по другой причине: api не создан или упал, порт
+// занят, образа нет, ошибка конфигурации. Команды печатают прежний текст
+// (R25).
+type upError struct{ err error }
+
+func (u *upError) Error() string { return u.err.Error() }
+
+// apiStarting — api создан, работает и ещё не здоров (starting или
+// unhealthy), без перезапусков: так выглядит идущая миграция, а не падение.
+// Перезапускающийся или вышедший api ждать бессмысленно.
+func (i *installation) apiStarting(ctx context.Context) bool {
+	api := i.containerOf(ctx, "api")
+	if api == "" {
+		return false
+	}
+	out, err := output(ctx, i.e.run, i.docker("inspect", "-f",
+		"{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}", api))
+	if err != nil {
+		return false
+	}
+	f := strings.Fields(out)
+	return len(f) == 3 && f[0] == "running" && (f[1] == "starting" || f[1] == "unhealthy") && f[2] == "0"
+}
+
+// startStack — `up -d --remove-orphans`, терпимый к долгому старту api
+// (CLAB-369, R21-R23).
+//
+// Сервис катит миграции при старте, и /readyz молчит до их конца; воркер
+// ждёт здоровья api (depends_on), и `up -d` падает «dependency failed to
+// start», когда миграция дольше healthcheck'а compose (у клиента может быть
+// свой, короче, в compose.override.yml). Тогда api не упал: команда ждёт
+// его до CADENCE_READY_TIMEOUT и доводит стек повторным `up -d` — воркер не
+// остаётся пересозданным, но не запущенным.
+//
+// Срок один и считается от запуска стека: `up -d`, который сам ждёт
+// здоровья зависимости, его не продлевает — при положительном timeout он
+// обрывается на сроке. Нулевой timeout — «не ждать готовности» (на нём
+// стоят сценарии отката в ci/ пакета), и `up -d` тогда не ограничен, как
+// прежде. Возвращает остаток срока для waitReady; ошибка — *upError или
+// errAPIStarting.
+func (i *installation) startStack(ctx context.Context, timeout int) (int, error) {
+	e := i.e
+	start := e.now()
+	deadline := start.Add(time.Duration(timeout) * time.Second)
+	left := func() int { return int(deadline.Sub(e.now()).Round(time.Second) / time.Second) }
+	up := func() error {
+		upCtx := ctx
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			upCtx, cancel = context.WithTimeout(ctx, deadline.Sub(e.now()))
+			defer cancel()
+		}
+		return i.composeRun(upCtx, false, "up", "-d", "--remove-orphans")
+	}
+
+	if err := up(); err != nil {
+		if !i.apiStarting(ctx) {
+			return 0, &upError{err}
+		}
+		e.info("the api is not ready yet: a database migration may be running (docker compose logs -f api); waiting for it up to CADENCE_READY_TIMEOUT (%ds from the start of the stack)", timeout)
+		for !i.apiHealthy(ctx) {
+			if ctx.Err() != nil || left() <= 0 {
+				return 0, errAPIStarting
+			}
+			if !i.apiStarting(ctx) {
+				return 0, &upError{err}
+			}
+			// Шаг не длиннее остатка: ожидание не выходит за срок.
+			e.sleep(min(3*time.Second, deadline.Sub(e.now())))
+		}
+		e.info("the api is ready; starting the rest of the stack")
+		if err := i.composeRun(ctx, false, "up", "-d", "--remove-orphans"); err != nil {
+			return 0, &upError{err}
+		}
+	}
+	if timeout == 0 {
+		return 0, nil
+	}
+	// Хотя бы одна проверка готовности: `up -d`, вернувшийся на самом
+	// сроке, — не повод объявить готовый стек неготовым.
+	return max(left(), 1), nil
+}
+
+// workerRunning — воркер запущен: успех печатается только с ним (R22).
+// Несколько шагов на случай, когда контейнер ещё поднимается после `up -d`.
+func (i *installation) workerRunning(ctx context.Context) bool {
+	for step := 0; step < 5; step++ {
+		if i.running(ctx, "worker") {
+			return true
+		}
+		i.e.sleep(3 * time.Second)
+	}
+	return false
+}
+
+// apiStartingHelp — что делать, когда срок вышел, а api ещё стартует
+// (R24): ждать миграцию, а не откатываться, и как довести стек.
+func (i *installation) apiStartingHelp(timeout int) string {
+	return fmt.Sprintf("the api is not ready after CADENCE_READY_TIMEOUT (%ds): a database migration may still be running (docker compose logs -f api).\n"+
+		"  The worker is not started. When the api is healthy, finish starting the stack:\n"+
+		"%s  export CADENCE_VERSION=$(cat VERSION)\n"+
+		"  docker compose up -d --remove-orphans\n"+
+		"  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile\n"+
+		"  A long migration is expected: raise CADENCE_READY_TIMEOUT for the next run (docs/admin.md, \"Upgrades and rollback\").",
+		timeout, i.cdHint())
+}

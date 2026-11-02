@@ -39,6 +39,11 @@ func (c *cacheCounters) add(other cacheCounters) {
 type pendingFile struct {
 	fileID uuid.UUID
 	chunks []Chunk
+	// carryFrom — файл родителя, из которого пересчитанный файл берёт
+	// векторы кусков с прежним текстом (carried — их sha): модель их не
+	// считает, вектор переносит CarryChunkVectors после записи кусков.
+	carryFrom *uuid.UUID
+	carried   map[string]bool
 }
 
 func newEmbedBatch(ix *Indexer, projectID uuid.UUID) *embedBatch {
@@ -46,10 +51,21 @@ func newEmbedBatch(ix *Indexer, projectID uuid.UUID) *embedBatch {
 }
 
 func (b *embedBatch) add(ctx context.Context, fileID uuid.UUID, chunks []Chunk) error {
+	return b.addFile(ctx, pendingFile{fileID: fileID, chunks: chunks})
+}
+
+// addCarried — куски пересчитанного файла: векторы прежнего текста
+// переносятся из файла родителя, модель считает только новый текст.
+func (b *embedBatch) addCarried(ctx context.Context, fileID uuid.UUID, chunks []Chunk, parentFileID uuid.UUID, carried map[string]bool) error {
+	return b.addFile(ctx, pendingFile{fileID: fileID, chunks: chunks, carryFrom: &parentFileID, carried: carried})
+}
+
+func (b *embedBatch) addFile(ctx context.Context, f pendingFile) error {
+	chunks := f.chunks
 	if len(chunks) == 0 {
 		return nil
 	}
-	b.pending = append(b.pending, pendingFile{fileID: fileID, chunks: chunks})
+	b.pending = append(b.pending, f)
 	b.count += len(chunks)
 	if b.count >= b.ix.opts.EmbedBatch {
 		return b.flush(ctx)
@@ -67,6 +83,9 @@ func (b *embedBatch) flush(ctx context.Context) error {
 	texts := map[string]string{}
 	for _, f := range pending {
 		for _, c := range f.chunks {
+			if f.carried[c.TextSHA] {
+				continue
+			}
 			texts[c.TextSHA] = c.Text
 		}
 	}
@@ -93,13 +112,18 @@ func (b *embedBatch) flush(ctx context.Context) error {
 				Ord: c.Ord, StartLine: c.StartLine, EndLine: c.EndLine,
 				SymbolFQN: c.SymbolFQN, Text: c.Text, TextSHA: c.TextSHA, Tokens: c.Tokens,
 			}
-			if vec, ok := vectors[c.TextSHA]; ok {
+			if vec, ok := vectors[c.TextSHA]; ok && !f.carried[c.TextSHA] {
 				row.Embedding, row.EmbedModel = vec, model
 			}
 			rows = append(rows, row)
 		}
 		if err := b.ix.store.InsertCodeChunks(ctx, b.ix.store.DB(), f.fileID, b.projectID, rows); err != nil {
 			return err
+		}
+		if f.carryFrom != nil {
+			if err := b.ix.store.CarryChunkVectors(ctx, b.ix.store.DB(), f.fileID, *f.carryFrom, b.ix.embedderModel()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

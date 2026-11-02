@@ -119,23 +119,27 @@ const searchJSX = `export function Page() {
 
 func indexSearchFixture(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
 	t.Helper()
+	return indexCodeFiles(t, map[string]string{
+		"internal/store/postgres/attachments.go": searchAttachmentsDecl,
+		"internal/store/postgres/auth.go":        searchAuthDecl,
+		"internal/workflow/agents.go":            searchCalls,
+		"internal/workflow/helpers_test.go":      searchHelpers,
+		"internal/workflow/mixed.go":             searchMixed,
+		"web/src/Page.tsx":                       searchJSX,
+		"internal/store/postgres/blobs.go":       searchBlobDecl,
+		"internal/workflow/save.go":              searchBlobCalls,
+	})
+}
+
+// indexCodeFiles индексирует один коммит с этими файлами в демо-репозиторий.
+func indexCodeFiles(t *testing.T, files map[string]string) (*postgres.Store, *pgxpool.Pool) {
+	t.Helper()
 	store, pool := testStore(t)
 	ctx := context.Background()
 	src := &fakeSource{
-		repo: "sdlc-pipeline-backend",
-		head: "c1",
-		commits: map[string]map[string]string{
-			"c1": {
-				"internal/store/postgres/attachments.go": searchAttachmentsDecl,
-				"internal/store/postgres/auth.go":        searchAuthDecl,
-				"internal/workflow/agents.go":            searchCalls,
-				"internal/workflow/helpers_test.go":      searchHelpers,
-				"internal/workflow/mixed.go":             searchMixed,
-				"web/src/Page.tsx":                       searchJSX,
-				"internal/store/postgres/blobs.go":       searchBlobDecl,
-				"internal/workflow/save.go":              searchBlobCalls,
-			},
-		},
+		repo:    "sdlc-pipeline-backend",
+		head:    "c1",
+		commits: map[string]map[string]string{"c1": files},
 	}
 	// Размер куска как у индексатора по умолчанию: файл вызовов — один кусок.
 	ix := New(store, src, embed.Hash{}, testdb.Logger(), Options{ChunkChars: 1600, EmbedBatch: 8})
@@ -393,5 +397,169 @@ func TestCodeTsvectorWithEmptySearchPath(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("tsvector при пустом search_path другая:\n%s\nпротив\n%s", got, want)
+	}
+}
+
+// Ступени порядка объявлений (CLAB-369, R8-R11): точный регистр раньше
+// совпавшего без регистра, нетестовый файл раньше тестового, объявление
+// только в тесте — выше использований.
+
+// Настоящее определение: имя один раз.
+const tierAuthDecl = `package postgres
+
+func (s *Store) RevokeRunTokens(ctx context.Context, runID string) error {
+	return nil
+}
+`
+
+// Фейк с тем же именем в тестовом файле, имя чаще: по одному ts_rank_cd он
+// обогнал бы определение. Хелпер seedLeaseFixture объявлен только здесь.
+const tierFakeDecl = `package indexer
+
+// fakeStore.RevokeRunTokens: RevokeRunTokens записывает вызов, RevokeRunTokens
+// не ходит в базу; RevokeRunTokens нужен тестам аренды.
+func (f *fakeStore) RevokeRunTokens(ctx context.Context, runID string) error {
+	f.calls = append(f.calls, "RevokeRunTokens")
+	return nil
+}
+
+func seedLeaseFixture(t *testing.T) string {
+	return "lease"
+}
+`
+
+// Использования: и имени метода, и хелпера, чаще, чем в объявлениях.
+const tierCalls = `package workflow
+
+func (e *Engine) expire(ctx context.Context, runID string) error {
+	_ = e.store.RevokeRunTokens(ctx, runID)
+	_ = e.store.RevokeRunTokens(ctx, runID)
+	_ = e.store.RevokeRunTokens(ctx, runID)
+	_ = e.store.RevokeRunTokens(ctx, runID)
+	return e.store.RevokeRunTokens(ctx, runID)
+}
+`
+
+const tierHelperCallsTest = `package indexer
+
+func TestLease(t *testing.T) {
+	_ = seedLeaseFixture(t)
+	_ = seedLeaseFixture(t)
+	_ = seedLeaseFixture(t)
+}
+`
+
+const tierHelperCalls = `package indexer
+
+var leaseNames = []string{seedLeaseFixture(nil), seedLeaseFixture(nil), seedLeaseFixture(nil)}
+`
+
+// listAttachments и ListAttachments — разные символы Go.
+const tierHandlerDecl = `package httpapi
+
+func (s *Server) listAttachments(c *gin.Context) {
+	c.JSON(200, nil)
+}
+`
+
+// У куска с ListAttachments ts_rank_cd выше: имя повторяется.
+const tierStoreDecl = `package postgres
+
+// ListAttachments отдаёт вложения задачи: ListAttachments не читает
+// артефакты этапа, ListAttachments — отдельный список.
+func (s *Store) ListAttachments(ctx context.Context, taskID string) ([]string, error) {
+	return nil, nil
+}
+`
+
+// Точное имя listAttachments в тестовом файле.
+const tierTestHelperDecl = `export function listAttachments(): string[] {
+  return []
+}
+`
+
+func indexTierFixture(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
+	t.Helper()
+	return indexCodeFiles(t, map[string]string{
+		"internal/store/postgres/auth.go":          tierAuthDecl,
+		"internal/indexer/x_test.go":               tierFakeDecl,
+		"internal/workflow/expire.go":              tierCalls,
+		"internal/indexer/y_test.go":               tierHelperCallsTest,
+		"internal/indexer/z.go":                    tierHelperCalls,
+		"internal/httpapi/attachments.go":          tierHandlerDecl,
+		"internal/store/postgres/artifacts.go":     tierStoreDecl,
+		"web/src/__tests__/attachments.helpers.ts": tierTestHelperDecl,
+	})
+}
+
+// order — места первых кусков файлов в выдаче; -1 — файла нет.
+func order(hits []postgres.SearchHit, paths ...string) []int {
+	out := make([]int, len(paths))
+	for i, p := range paths {
+		out[i] = slices.IndexFunc(hits, func(h postgres.SearchHit) bool { return h.Path == p })
+	}
+	return out
+}
+
+// AC-9: настоящее определение раньше фейка в тестовом файле, оба — раньше
+// использований.
+func TestCodeSearchPutsNonTestDefinitionFirst(t *testing.T) {
+	store, pool := indexTierFixture(t)
+	engine := workflow.NewEngine(store, testdb.Logger(), workflow.Options{})
+	const (
+		decl  = "internal/store/postgres/auth.go"
+		fake  = "internal/indexer/x_test.go"
+		calls = "internal/workflow/expire.go"
+	)
+	if rankOf(t, pool, fake, "fakeStore", "RevokeRunTokens") <= rankOf(t, pool, decl, "RevokeRunTokens", "RevokeRunTokens") ||
+		rankOf(t, pool, calls, "RevokeRunTokens", "RevokeRunTokens") <= rankOf(t, pool, decl, "RevokeRunTokens", "RevokeRunTokens") {
+		t.Fatal("набор не проверяет порядок: фейк и вызовы и без него ниже определения")
+	}
+	hits := searchCode(t, engine, "RevokeRunTokens", "text")
+	if got := order(hits, decl, fake, calls); got[0] != 0 || got[1] != 1 || got[2] < 2 {
+		t.Fatalf("ждали определение, фейк, вызовы: %v:%s", got, describeHits(hits))
+	}
+}
+
+// AC-10: хелпер, объявленный только в тестовом файле, — выше своих вызовов
+// и в тестах, и в коде.
+func TestCodeSearchTestOnlyDeclarationAboveUses(t *testing.T) {
+	store, _ := indexTierFixture(t)
+	engine := workflow.NewEngine(store, testdb.Logger(), workflow.Options{})
+	hits := searchCode(t, engine, "seedLeaseFixture", "text")
+	got := order(hits, "internal/indexer/x_test.go", "internal/indexer/y_test.go", "internal/indexer/z.go")
+	if got[0] != 0 || got[1] < 1 || got[2] < 1 {
+		t.Fatalf("ждали объявление первым, вызовы ниже: %v:%s", got, describeHits(hits))
+	}
+}
+
+// AC-12: точный регистр раньше совпавшего без регистра, в том числе
+// точное совпадение в тестовом файле — раньше совпадения без регистра в
+// нетестовом; запрос без точного совпадения — по тестовости и ts_rank_cd.
+func TestCodeSearchExactCaseFirst(t *testing.T) {
+	store, pool := indexTierFixture(t)
+	engine := workflow.NewEngine(store, testdb.Logger(), workflow.Options{})
+	const (
+		handler = "internal/httpapi/attachments.go"
+		storeF  = "internal/store/postgres/artifacts.go"
+		testTS  = "web/src/__tests__/attachments.helpers.ts"
+	)
+	if rankOf(t, pool, storeF, "ListAttachments", "listAttachments") <= rankOf(t, pool, handler, "listAttachments", "listAttachments") {
+		t.Fatal("набор не проверяет регистр: кусок хранилища и без него ниже обработчика")
+	}
+
+	hits := searchCode(t, engine, "listAttachments", "text")
+	if got := order(hits, handler, testTS, storeF); !slices.Equal(got, []int{0, 1, 2}) {
+		t.Fatalf("listAttachments: ждали обработчик, тест, хранилище: %v:%s", got, describeHits(hits))
+	}
+
+	hits = searchCode(t, engine, "ListAttachments", "text")
+	if got := order(hits, storeF, handler, testTS); !slices.Equal(got, []int{0, 1, 2}) {
+		t.Fatalf("ListAttachments: ждали хранилище, обработчик, тест: %v:%s", got, describeHits(hits))
+	}
+
+	hits = searchCode(t, engine, "listattachments", "text")
+	if got := order(hits, storeF, handler, testTS); !slices.Equal(got, []int{0, 1, 2}) {
+		t.Fatalf("listattachments: ждали хранилище (ранг), обработчик, тест: %v:%s", got, describeHits(hits))
 	}
 }

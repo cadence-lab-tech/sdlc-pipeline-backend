@@ -80,7 +80,37 @@ type fakeRunner struct {
 	// Окружение сервиса api в docker compose config (CLAB-199): JSON-объект,
 	// пусто — без environment.
 	apiEnvironment string
+
+	// Долгая миграция (CLAB-369): сколько первых `up -d --remove-orphans`
+	// падают ошибкой зависимости; после скольких проверок здоровья api
+	// становится healthy (0 — не становится сам); ответ inspect о
+	// состоянии api для apiStarting (пусто — по healthy: «running healthy
+	// 0» или «running starting 0»); сколько «идёт» каждый `up -d` по часам
+	// clock; воркер не запущен.
+	upFails      int
+	healthyAfter int
+	healthChecks int
+	apiState     string
+	upTakes      time.Duration
+	clock        *fakeClock
+	workerDown   bool
 }
+
+// fakeClock — часы serverEnv, которые двигает sleep и подставной `up -d`.
+type fakeClock struct{ t time.Time }
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Date(2026, 10, 18, 3, 0, 0, 0, time.UTC)} }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func (c *fakeClock) sleep(d time.Duration) {
+	if d > 0 {
+		c.t = c.t.Add(d)
+	}
+}
+
+// use — serverEnv на этих часах.
+func (c *fakeClock) use(e *serverEnv) { e.now, e.sleep = c.now, c.sleep }
 
 // exitErr — код выхода внешней команды, как у *exec.ExitError.
 type exitErr int
@@ -253,6 +283,23 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 			write("pg123\n")
 		}
 		return nil
+	case args == "compose up -d --remove-orphans":
+		if f.clock != nil {
+			f.clock.sleep(f.upTakes)
+		}
+		if f.upFails > 0 {
+			f.upFails--
+			if c.stderr != nil {
+				io.WriteString(c.stderr, "dependency failed to start: container cadence-api-1 is unhealthy\n")
+			}
+			return exitErr(1)
+		}
+		return nil
+	case args == "compose ps -q --status running worker":
+		if !f.workerDown {
+			write("w123\n")
+		}
+		return nil
 	case args == "compose ps -a -q api":
 		if f.apiContainer != "" {
 			write(f.apiContainer + "\n")
@@ -268,7 +315,22 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 	case strings.HasPrefix(args, "inspect -f {{index .Config.Labels"):
 		write(f.takenBy + "\n")
 		return nil
+	case strings.HasPrefix(args, "inspect -f {{.State.Status}}"):
+		switch {
+		case f.apiState != "":
+			write(f.apiState + "\n")
+		case f.healthy:
+			write("running healthy 0\n")
+		default:
+			write("running starting 0\n")
+		}
+		return nil
 	case strings.HasPrefix(args, "inspect -f"):
+		if !f.healthy && f.healthyAfter > 0 {
+			if f.healthChecks++; f.healthChecks >= f.healthyAfter {
+				f.healthy = true
+			}
+		}
 		if f.healthy {
 			write("healthy\n")
 		} else {

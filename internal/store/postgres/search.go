@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -149,7 +150,7 @@ func (s *Store) searchScope(ctx context.Context, q Querier, scope string, in Sea
 	if strings.TrimSpace(in.Query) != "" {
 		var extra []any
 		if scope == ScopeCode {
-			extra = []any{nameWords(in.Query)}
+			extra = []any{nameWords(in.Query), exactNameWords(in.Query), testPathPattern}
 		}
 		text, err = s.searchQuery(ctx, q, textSQL, scan, in.ProjectID, in.Repositories, in.Query, limit, extra...)
 		if err != nil {
@@ -214,16 +215,28 @@ func codeSearchSQL() (string, string, func(interface{ Scan(...any) error }) (Sea
 	// объявлений, и по одному ts_rank_cd файл, где имя зовут десять раз,
 	// обгонял файл, где оно объявлено. «Объявлено в куске» — объявление из
 	// code_symbols того же файла с именем из слов-имён запроса ($5,
-	// nameWords), начавшееся внутри куска: symbol_fqn несёт только символ
-	// первой строки, а мелкие объявления слипаются в один кусок. Внутри
-	// групп порядок прежний — по ts_rank_cd.
+	// nameWords, без учёта регистра), начавшееся внутри куска: symbol_fqn
+	// несёт только символ первой строки, а мелкие объявления слипаются в
+	// один кусок.
+	//
+	// Среди объявлений — ступени (CLAB-369): имя совпало с регистром слова
+	// запроса ($6, exactNameWords) — раньше совпавшего без регистра: в Go
+	// listAttachments и ListAttachments — разные символы, и точное имя —
+	// сигнал того, кто ищет. Внутри ступени регистра объявления нетестовых
+	// файлов раньше тестовых ($7, testPathPattern): фейк или хелпер теста
+	// с тем же именем не обгоняет настоящее определение. Регистр выше
+	// тестовости. Ступени: 0 — точный регистр, 1 — он же в тесте, 2 — без
+	// регистра, 3 — он же в тесте, 4 — имя только используется. Внутри
+	// ступени порядок прежний — по ts_rank_cd.
 	text := currentRuns + columns + `
 		  AND cc.tsv @@ sdlc_tsquery('simple', $3)
-		ORDER BY cardinality($5::text[]) > 0 AND EXISTS (
-		             SELECT 1 FROM code_symbols cs
+		ORDER BY coalesce((
+		             SELECT min(CASE WHEN cs.name = ANY($6::text[]) THEN 0 ELSE 2 END)
+		             FROM code_symbols cs
 		             WHERE cs.code_file_id = cc.code_file_id
 		               AND cs.start_line BETWEEN cc.start_line AND cc.end_line
-		               AND lower(cs.name) = ANY($5::text[])) DESC,
+		               AND lower(cs.name) = ANY($5::text[]))
+		             + CASE WHEN cf.path ~ $7 THEN 1 ELSE 0 END, 4),
 		         ts_rank_cd(cc.tsv, sdlc_tsquery('simple', $3)) DESC
 		LIMIT $4`
 
@@ -311,8 +324,18 @@ func documentSearchSQL() (string, string, func(interface{ Scan(...any) error }) 
 // берётся последний сегмент). Обычное слово фразы не поднимает ничего:
 // в запросе «revoke task tokens RevokeRunTokens» слово task подняло бы
 // выше определения RevokeRunTokens каждую func task из тестов. Регистр
-// не важен, как и в tsvector 'simple'.
+// не важен, как и в tsvector 'simple': слова приведены к нижнему.
 func nameWords(query string) []string {
+	return queryNames(query, true)
+}
+
+// exactNameWords — те же слова-имена в регистре запроса: объявление с
+// точно таким именем идёт раньше совпавшего без учёта регистра (CLAB-369).
+func exactNameWords(query string) []string {
+	return queryNames(query, false)
+}
+
+func queryNames(query string, fold bool) []string {
 	var words []string
 	for _, f := range strings.Fields(query) {
 		// Исключённое слово websearch («-foo») имени не называет.
@@ -336,11 +359,39 @@ func nameWords(query string) []string {
 		if i := strings.LastIndex(w, "."); i >= 0 {
 			w = w[i+1:]
 		}
-		name := strings.ToLower(w)
+		name := w
+		if fold {
+			name = strings.ToLower(w)
+		}
 		if codeLike && name != "" && !seen[name] {
 			seen[name] = true
 			out = append(out, name)
 		}
 	}
 	return out
+}
+
+// testPathPattern — признак тестового файла по пути (CLAB-369, R10): его
+// объявления уступают объявлениям нетестовых файлов той же ступени
+// регистра. Перечень закрытый и живёт только здесь; регулярка — общее
+// подмножество RE2 и регулярок Postgres (без \b, классов Perl и
+// просмотров), её применяют и Go (isTestPath), и запрос поиска (cf.path ~):
+//
+//   - Go — *_test.go; Python — test_*.py и *_test.py;
+//   - TS/JS — *.test.* и *.spec.*;
+//   - каталоги testdata/, __tests__/, test/, tests/, e2e/, fixtures/ на
+//     любой глубине пути.
+//
+// testdb/, contest.go, latest.ts, attestation.go, testing-utils.ts —
+// не тесты: сегмент сравнивается целиком, суффикс — с разделителем.
+const testPathPattern = `(^|/)(testdata|__tests__|test|tests|e2e|fixtures)/` +
+	`|_test\.(go|py)$` +
+	`|(^|/)test_[^/]*\.py$` +
+	`|\.(test|spec)\.[^/]+$`
+
+var testPathRe = regexp.MustCompile(testPathPattern)
+
+// isTestPath — путь тестового файла по testPathPattern.
+func isTestPath(path string) bool {
+	return testPathRe.MatchString(path)
 }

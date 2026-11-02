@@ -33,6 +33,12 @@ const (
 // смысловая единица, и перекрытие только раздувало бы счёт эмбеддингов —
 // а он в этой системе оплачивается на каждый коммит.
 func Chunks(filePath string, content []byte, maxChars int) []Chunk {
+	return chunksBy(content, Symbols(filePath, content), maxChars)
+}
+
+// chunksBy режет содержимое по границам уже извлечённых символов: прогон
+// извлекает их один раз на файл и для кусков, и для code_symbols.
+func chunksBy(content []byte, symbols []Symbol, maxChars int) []Chunk {
 	if maxChars <= 0 {
 		maxChars = defaultChunkChars
 	}
@@ -44,7 +50,6 @@ func Chunks(filePath string, content []byte, maxChars int) []Chunk {
 
 	// Строка → объемлющий символ. Символы идут по возрастанию StartLine,
 	// вложенных среди них нет: извлекаются только объявления первой колонки.
-	symbols := Symbols(filePath, content)
 	owner := make([]string, len(lines)+1)
 	starts := map[int]bool{}
 	for _, s := range symbols {

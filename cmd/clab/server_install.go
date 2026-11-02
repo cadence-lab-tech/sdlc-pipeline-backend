@@ -113,6 +113,14 @@ CADENCE_VERIFY decides the rest: auto (default) warns once without cosign,
 require refuses without it, off does not verify (docs/admin.md, "Verifying
 a release").
 
+A database migration may run longer than the healthcheck of the api allows
+(it migrates at start and answers /readyz when done): when docker compose up
+fails while the api is still starting, the command waits for it up to
+CADENCE_READY_TIMEOUT, counted from the start of the stack, and starts the
+rest of the stack (the worker) once the api is healthy. If the time runs out,
+it says the migration may still be running and prints how to finish the
+start.
+
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
   CADENCE_REGISTRY       a registry mirror of our two images; written to .env
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
@@ -305,16 +313,25 @@ func install(ctx context.Context, e *serverEnv, o installOptions) error {
 		return fmt.Errorf("could not pull the images of %s: check that the registry (ghcr.io, or CADENCE_REGISTRY in .env) is reachable from this host.\n"+
 			"  .env is kept; then start the stack:\n%s", version, start)
 	}
-	e.info("starting the stack")
-	if err := inst.composeRun(ctx, false, "up", "-d", "--remove-orphans"); err != nil {
-		return fmt.Errorf("docker compose up failed (see above). .env is kept: fix the cause and run\n%s", start)
-	}
 	timeout, err := inst.readyTimeout()
 	if err != nil {
 		return err
 	}
-	e.info("waiting for the service to become ready (up to %ds)", timeout)
-	if err := inst.waitReady(ctx, timeout); err != nil {
+	e.info("starting the stack")
+	left, err := inst.startStack(ctx, timeout)
+	var up *upError
+	switch {
+	case errors.As(err, &up):
+		return fmt.Errorf("docker compose up failed (see above). .env is kept: fix the cause and run\n%s", start)
+	case errors.Is(err, errAPIStarting):
+		inst.showFailure(ctx, "api", "worker")
+		return fmt.Errorf("the stack did not finish starting: %s\n  .env is kept", inst.apiStartingHelp(timeout))
+	}
+	e.info("waiting for the service to become ready (up to %ds)", left)
+	if err := inst.waitReady(ctx, left); err == nil && !inst.workerRunning(ctx) {
+		inst.showFailure(ctx, "api", "worker")
+		return fmt.Errorf("the service is ready, but the worker is not running (logs above): docker compose logs worker. .env is kept")
+	} else if err != nil {
 		inst.showFailure(ctx, "api", "caddy")
 		var route *routeError
 		if errors.As(err, &route) {

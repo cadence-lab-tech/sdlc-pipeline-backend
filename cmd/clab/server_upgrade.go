@@ -57,6 +57,15 @@ After a successful upgrade it reminds to update clab, the CLI of people and
 agents, to the new version: the server does not update it. An upgrade to a
 version newer than this clab goes on with a warning.
 
+A database migration may run longer than the healthcheck of the api allows
+(it migrates at start and answers /readyz when done): when docker compose up
+fails while the api is still starting, the command waits for it up to
+CADENCE_READY_TIMEOUT, counted from the start of the stack, and starts the
+rest of the stack (the worker) once the api is healthy. If the time runs out,
+it says the migration may still be running and prints how to finish the
+start. Roll back only if the api has failed,
+not while the migration runs.
+
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
                          latest/download/<asset> (https://, http:// or file://)
@@ -131,6 +140,13 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		return err
 	}
 	defer os.RemoveAll(work)
+
+	// Срок готовности нужен до запуска стека (startStack): неверное значение
+	// отказывает, пока ничего не изменилось.
+	timeout, err := i.readyTimeout()
+	if err != nil {
+		return err
+	}
 
 	// --- 1. что ставить, до любых изменений -----------------------------------
 	if target == "" {
@@ -351,18 +367,28 @@ func (i *installation) upgrade(ctx context.Context, target string, force bool) e
 		return fmt.Errorf("could not pull the images of %s (see above); the package files are back on %s and the running stack is untouched.", target, i.version)
 	}
 	e.info("starting %s", target)
-	if err := i.composeRun(ctx, false, "up", "-d", "--remove-orphans"); err != nil {
+	left, err := i.startStack(ctx, timeout)
+	var up *upError
+	switch {
+	case errors.As(err, &up):
 		return fmt.Errorf("docker compose up failed for %s. To return to %s:\n%s", target, oldVersion, rollback)
+	case errors.Is(err, errAPIStarting):
+		i.showFailure(ctx, "api", "worker")
+		// Откат с восстановлением бэкапа поверх идущей миграции хуже самой
+		// миграции: он — только для упавшего api (R24).
+		return fmt.Errorf("%s did not finish starting: %s\n"+
+			"  Return to %s and its backup only if the api has failed (an error in its logs), not while the migration runs:\n%s",
+			target, i.apiStartingHelp(timeout), oldVersion, rollback)
 	}
 	// Caddyfile примонтирован файлом: up -d его правок не замечает.
 	_, _ = output(ctx, e.run, i.compose("exec", "-T", "caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile"))
 
-	timeout, err := i.readyTimeout()
-	if err != nil {
-		return err
-	}
-	e.info("waiting for readiness (up to %ds)", timeout)
-	if err := i.waitReady(ctx, timeout); err != nil {
+	e.info("waiting for readiness (up to %ds)", left)
+	if err := i.waitReady(ctx, left); err == nil && !i.workerRunning(ctx) {
+		i.showFailure(ctx, "api", "worker")
+		return fmt.Errorf("%s is ready, but the worker is not running (logs above): docker compose logs worker.\n"+
+			"  To return to %s and its backup:\n%s", target, oldVersion, rollback)
+	} else if err != nil {
 		i.showFailure(ctx, "api", "worker", "caddy")
 		var route *routeError
 		if errors.As(err, &route) {

@@ -338,11 +338,15 @@ type ParentFile struct {
 	ID        uuid.UUID
 	SourceSHA string
 	BlobSHA   *string
+	// SymbolsVersion — версия извлечения символов, которой получены символы
+	// и куски файла (indexer.SymbolsVersion): файл прежней версии прогон
+	// пересчитывает, а не копирует.
+	SymbolsVersion int
 }
 
 func (s *Store) ParentFiles(ctx context.Context, q Querier, runID uuid.UUID) (map[string]ParentFile, error) {
 	rows, err := q.Query(ctx, `
-		SELECT path, id, coalesce(source_sha, ''), blob_sha
+		SELECT path, id, coalesce(source_sha, ''), blob_sha, symbols_version
 		FROM code_files WHERE index_run_id = $1`, runID)
 	if err != nil {
 		return nil, translate(err)
@@ -353,7 +357,7 @@ func (s *Store) ParentFiles(ctx context.Context, q Querier, runID uuid.UUID) (ma
 	for rows.Next() {
 		var path string
 		var f ParentFile
-		if err := rows.Scan(&path, &f.ID, &f.SourceSHA, &f.BlobSHA); err != nil {
+		if err := rows.Scan(&path, &f.ID, &f.SourceSHA, &f.BlobSHA, &f.SymbolsVersion); err != nil {
 			return nil, translate(err)
 		}
 		out[path] = f
@@ -369,15 +373,17 @@ type CodeFileInput struct {
 	SizeBytes    int64
 	BlobSHA      string
 	SourceSHA    string
+	// SymbolsVersion — версия извлечения, которой получены символы и куски.
+	SymbolsVersion int
 }
 
 func (s *Store) InsertCodeFile(ctx context.Context, q Querier, in CodeFileInput) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `
-		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes, blob_sha, source_sha)
-		VALUES ($1, $2, $3, nullif($4, ''), $5, nullif($6, ''), nullif($7, ''))
+		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes, blob_sha, source_sha, symbols_version)
+		VALUES ($1, $2, $3, nullif($4, ''), $5, nullif($6, ''), nullif($7, ''), $8)
 		RETURNING id`,
-		in.RunID, in.RepositoryID, in.Path, in.Lang, in.SizeBytes, in.BlobSHA, in.SourceSHA,
+		in.RunID, in.RepositoryID, in.Path, in.Lang, in.SizeBytes, in.BlobSHA, in.SourceSHA, in.SymbolsVersion,
 	).Scan(&id)
 	return id, translate(err)
 }
@@ -452,8 +458,8 @@ func (s *Store) InsertCodeSymbols(ctx context.Context, q Querier, fileID, repoID
 func (s *Store) CopyFileFromParent(ctx context.Context, q Querier, runID, parentFileID uuid.UUID, model string) (int, error) {
 	var newFileID uuid.UUID
 	err := q.QueryRow(ctx, `
-		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes, blob_sha, source_sha)
-		SELECT $1, repository_id, path, lang, size_bytes, blob_sha, source_sha
+		INSERT INTO code_files (index_run_id, repository_id, path, lang, size_bytes, blob_sha, source_sha, symbols_version)
+		SELECT $1, repository_id, path, lang, size_bytes, blob_sha, source_sha, symbols_version
 		FROM code_files WHERE id = $2
 		RETURNING id`, runID, parentFileID).Scan(&newFileID)
 	if err != nil {
@@ -494,6 +500,49 @@ type FileChangeInput struct {
 	Additions      int
 	Deletions      int
 	CommitSHA      string
+}
+
+// VectorSHAs — тексты кусков файла, чьи векторы годятся для переноса в
+// пересчитанный файл (CarryChunkVectors): той же модели, а без провайдера
+// (пустая model) — любой, как и у CopyFileFromParent.
+func (s *Store) VectorSHAs(ctx context.Context, q Querier, fileID uuid.UUID, model string) (map[string]bool, error) {
+	rows, err := q.Query(ctx, `
+		SELECT DISTINCT text_sha FROM code_chunks
+		WHERE code_file_id = $1 AND text_sha IS NOT NULL AND embedding IS NOT NULL
+		  AND ($2 = '' OR embedding_model = $2)`, fileID, model)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, translate(err)
+		}
+		out[sha] = true
+	}
+	return out, translate(rows.Err())
+}
+
+// CarryChunkVectors переносит векторы из кусков файла родителя в куски
+// пересчитанного файла с тем же текстом (CLAB-369). Пересчёт символов
+// сдвигает границы кусков только там, где пропал ложный символ; за
+// неизменившийся текст модель второй раз не платит, даже если кэш
+// эмбеддингов его уже вытеснил.
+func (s *Store) CarryChunkVectors(ctx context.Context, q Querier, fileID, parentFileID uuid.UUID, model string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE code_chunks n
+		SET embedding = p.embedding, embedding_model = p.embedding_model
+		FROM (
+		    SELECT DISTINCT ON (text_sha) text_sha, embedding, embedding_model
+		    FROM code_chunks
+		    WHERE code_file_id = $2 AND embedding IS NOT NULL
+		      AND ($3 = '' OR embedding_model = $3)
+		) p
+		WHERE n.code_file_id = $1 AND n.embedding IS NULL AND n.text_sha = p.text_sha`,
+		fileID, parentFileID, model)
+	return translate(err)
 }
 
 func (s *Store) InsertFileChanges(ctx context.Context, q Querier, changes []FileChangeInput) error {

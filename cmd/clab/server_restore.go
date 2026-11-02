@@ -43,6 +43,14 @@ the backup in place first - the command is printed: the copy upgrade kept in
 backups/package-vX.Y.Z-<date>.tar.gz, or the package of the release - or
 pass --ignore-version if you know what you are doing.
 
+A database migration may run longer than the healthcheck of the api allows
+(it migrates at start and answers /readyz when done): when docker compose up
+fails while the api is still starting, the command waits for it up to
+CADENCE_READY_TIMEOUT, counted from the start of the stack, and starts the
+rest of the stack (the worker) once the api is healthy. If the time runs out,
+it says the migration may still be running and prints how to finish the
+start.
+
   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300`
 
 var backupName = regexp.MustCompile(`^cadence-(v[0-9]+\.[0-9]+\.[0-9]+)-[0-9]{8}-[0-9]{6}\.sql\.gz$`)
@@ -291,15 +299,24 @@ func (i *installation) restoreBlobsAndStart(ctx context.Context, dump, blobs str
 		}
 	}
 
-	e.info("starting the stack")
-	if err := i.composeRun(ctx, false, "up", "-d", "--remove-orphans"); err != nil {
-		return fmt.Errorf("docker compose up failed: %v", err)
-	}
 	timeout, err := i.readyTimeout()
 	if err != nil {
 		return err
 	}
-	if err := i.waitReady(ctx, timeout); err != nil {
+	e.info("starting the stack")
+	left, err := i.startStack(ctx, timeout)
+	var up *upError
+	switch {
+	case errors.As(err, &up):
+		return fmt.Errorf("docker compose up failed: %v", up.err)
+	case errors.Is(err, errAPIStarting):
+		i.showFailure(ctx, "api", "worker")
+		return fmt.Errorf("the dump %s is loaded, but the stack did not finish starting: %s", filepath.Base(dump), i.apiStartingHelp(timeout))
+	}
+	if err := i.waitReady(ctx, left); err == nil && !i.workerRunning(ctx) {
+		i.showFailure(ctx, "api", "worker")
+		return fmt.Errorf("the dump %s is loaded and the service is ready, but the worker is not running (logs above): docker compose logs worker", filepath.Base(dump))
+	} else if err != nil {
 		i.showFailure(ctx, "api", "caddy")
 		var route *routeError
 		if errors.As(err, &route) {
