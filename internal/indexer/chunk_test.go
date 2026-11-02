@@ -1,6 +1,10 @@
 package indexer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestChunksSplitOnDeclarations(t *testing.T) {
 	chunks := Chunks("internal/workflow/engine.go", []byte(goFile), 200)
@@ -67,11 +71,84 @@ func TestSkipPath(t *testing.T) {
 }
 
 func TestSkipContent(t *testing.T) {
-	if !SkipContent([]byte{0x00, 0x01, 0x02}) {
+	if skip, _ := SkipContent([]byte{0x00, 0x01, 0x02}); !skip {
 		t.Fatal("бинарник в индексе не нужен")
 	}
-	if SkipContent([]byte("package main\n")) {
+	if skip, _ := SkipContent([]byte("package main\n")); skip {
 		t.Fatal("обычный текст пропускать нельзя")
+	}
+}
+
+// padTo добивает ASCII-префиксом до offset байт, после чего идёт tail: так
+// граница в 8000 байт ложится на нужное место символа.
+func padTo(offset int, tail string) []byte {
+	return append([]byte(strings.Repeat("a", offset)), tail...)
+}
+
+// Срез в 8000 байт резал многобайтовый символ, и валидный файл считался
+// бинарным (CLAB-361): кириллица (2 байта), иероглиф и € (3), эмодзи (4).
+func TestSkipContentKeepsTextWithSplitRuneAtBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		rune string
+		// сколько байт символа остаётся до границы: символ режется на этом
+		// месте, 8000-й байт приходится внутрь него.
+		before int
+	}{
+		{"кириллица", "ж", 1},
+		{"евро", "€", 1},
+		{"евро, режется на два байта", "€", 2},
+		{"иероглиф", "世", 1},
+		{"эмодзи", "😀", 1},
+		{"эмодзи, режется на три байта", "😀", 3},
+	}
+	for _, c := range cases {
+		content := padTo(8000-c.before, c.rune+strings.Repeat("// продолжение\n", 200))
+		if utf8.Valid(content[:8000]) {
+			t.Fatalf("%s: тест не режет символ на границе", c.name)
+		}
+		if skip, reason := SkipContent(content); skip {
+			t.Errorf("%s: валидный файл отсеян: %s", c.name, reason)
+		}
+	}
+}
+
+// Форма настоящих auth.go и gates.go из CLAB-361: русский текст, символ режется
+// на 7999-м байте, определение функции идёт после границы.
+func TestSkipContentKeepsRealFileTail(t *testing.T) {
+	content := padTo(8000-1, "я\n// Токен задачи гасится вместе с арендой.\nfunc RevokeRunTokens() {}\n")
+	if utf8.Valid(content[:8000]) {
+		t.Fatal("тест не режет символ на границе")
+	}
+	if skip, reason := SkipContent(content); skip {
+		t.Fatalf("файл отсеян: %s", reason)
+	}
+}
+
+func TestSkipContentStillRejectsBinaryAndBroken(t *testing.T) {
+	long := strings.Repeat("a", 9000)
+	cases := []struct {
+		name    string
+		content []byte
+		reason  string
+	}{
+		{"пустой файл", nil, "пустой файл"},
+		{"NUL в голове", append([]byte("ab"), append([]byte{0}, long...)...), "нулевой байт на смещении 2"},
+		{"0xff в голове", append([]byte("ab"), append([]byte{0xff}, long...)...), "невалидный UTF-8 на смещении 2"},
+		{"NUL после 8000 байт", append([]byte(long), 0, 'x'), "нулевой байт на смещении 9000"},
+		{"битая последовательность после 8000 байт", append([]byte(long), 0xff, 'x'), "невалидный UTF-8 на смещении 9000"},
+		{"оборванный символ в конце файла", append([]byte(long), 0xd0), "невалидный UTF-8 на смещении 9000"},
+		{"суррогат", append([]byte("ab"), 0xed, 0xa0, 0x80), "невалидный UTF-8 на смещении 2"},
+	}
+	for _, c := range cases {
+		skip, reason := SkipContent(c.content)
+		if !skip {
+			t.Errorf("%s: файл не отсеян", c.name)
+			continue
+		}
+		if reason != c.reason {
+			t.Errorf("%s: причина %q, ждали %q", c.name, reason, c.reason)
+		}
 	}
 }
 
