@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"testing"
@@ -432,7 +433,8 @@ func TestApprovalsQueriesBounded(t *testing.T) {
 }
 
 // AC-20: признак списка совпадает с детьми карточки и с предпросмотром
-// задачи; гейты считаются только у задач в работе с апрувом на выходе.
+// задачи; гейты считаются только у задач в работе с человеческим гейтом на
+// выходе, остальные факты строки — пакетом на страницу.
 func TestTasksAwaitingApproval(t *testing.T) {
 	w := newApprovalsWorld(t)
 	waiting := w.task("nova", "Ждёт", "start")
@@ -447,17 +449,29 @@ func TestTasksAwaitingApproval(t *testing.T) {
 	build := w.task("story", "Build", "pick")
 	backlog := w.task("story", "Backlog")
 
-	tasks, err := w.store.ListTasks(w.ctx, w.store.DB(), w.pid, postgres.ListTasksFilter{})
+	// Признак строки списка считает TaskOverviews (CLAB-363) — тем же
+	// вердиктом гейтов, что и причину awaits_human.
+	awaiting := func(q postgres.Querier, items []domain.TaskListItem) map[uuid.UUID]bool {
+		t.Helper()
+		ovs, err := w.engine.TaskOverviews(w.ctx, q, items, uuid.Nil, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[uuid.UUID]bool{}
+		for id, ov := range ovs {
+			out[id] = ov.AwaitingApproval
+		}
+		return out
+	}
+	items, _, err := w.store.ListTaskItems(w.ctx, w.store.DB(), w.pid, postgres.ListTasksFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := w.engine.TasksAwaitingApproval(w.ctx, w.store.DB(), tasks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := awaiting(w.store.DB(), items)
 	want := map[string]bool{waiting: true, notYet: false, board: true, build: false, backlog: false}
 	seen := 0
-	for _, task := range tasks {
+	for _, item := range items {
+		task := item.Task
 		exp, ok := want[task.Key]
 		if !ok {
 			continue
@@ -478,19 +492,46 @@ func TestTasksAwaitingApproval(t *testing.T) {
 		t.Fatalf("в списке %d из %d задач", seen, len(want))
 	}
 
-	// Число запросов не растёт с задачами без апрува на выходе: 30 строк.
-	count := func(tasks []domain.Task) int {
-		q := &countingQ{Querier: w.store.DB()}
-		if _, err := w.engine.TasksAwaitingApproval(w.ctx, q, tasks); err != nil {
-			t.Fatal(err)
+	// AC-A9 CLAB-363: причина awaits_human — тот же набор задач и гейтов, что
+	// у «Ждут меня», на циклах с чек-листами и несколькими апрувами.
+	ovs, err := w.engine.TaskOverviews(w.ctx, w.store.DB(), items, uuid.Nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromList := map[string]bool{}
+	for _, item := range items {
+		for _, a := range ovs[item.ID].Attention {
+			if a.Code != AttentionAwaitsHuman {
+				continue
+			}
+			for _, g := range a.Fields["gates"].([]AttentionGate) {
+				fromList[item.Key+"/"+g.Transition+"/"+g.Gate] = true
+			}
 		}
+	}
+	approvals, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, ApprovalsMaxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromApprovals := map[string]bool{}
+	for _, a := range approvals.Approvals {
+		fromApprovals[a.Task.Key+"/"+a.Transition.Key+"/"+a.Gate.GateKey] = true
+	}
+	if len(fromApprovals) == 0 || !maps.Equal(fromList, fromApprovals) {
+		t.Fatalf("awaits_human %v, «Ждут меня» %v", fromList, fromApprovals)
+	}
+
+	// Число запросов не растёт с задачами без апрува на выходе: 30 строк.
+	count := func(items []domain.TaskListItem) int {
+		q := &countingQ{Querier: w.store.DB()}
+		awaiting(q, items)
 		return q.n
 	}
-	base := count(tasks)
+	base := count(items)
 	for i := 0; i < 30; i++ {
 		w.task("story", fmt.Sprintf("Ещё бэклог %d", i))
 	}
-	more, err := w.store.ListTasks(w.ctx, w.store.DB(), w.pid, postgres.ListTasksFilter{})
+	more, _, err := w.store.ListTaskItems(w.ctx, w.store.DB(), w.pid, postgres.ListTasksFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

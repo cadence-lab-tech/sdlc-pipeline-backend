@@ -68,15 +68,45 @@ type ListTasksFilter struct {
 	// исполнителя. Оба пусто — фильтра нет.
 	Assignee   string
 	Unassigned bool
-	// "updated" — недавно обновлённые первыми; пусто — порядок цикла: позиция
-	// статуса, затем номер.
+	// "updated" — недавно обновлённые первыми; "backlog" — порядок бэклога
+	// (CLAB-363): без незакрытых блокирующих выше, затем приоритет, затем
+	// номер; пусто — порядок цикла: позиция статуса, затем номер.
 	Order  string
 	Limit  int
 	Offset int
 }
 
-// TaskListOrderUpdated — порядок списка «обновлены недавно».
-const TaskListOrderUpdated = "updated"
+// Порядки списка: «обновлены недавно» и порядок бэклога (CLAB-363).
+const (
+	TaskListOrderUpdated = "updated"
+	TaskListOrderBacklog = "backlog"
+)
+
+// backlogOrderSQL — порядок бэклога: задачи без незакрытых блокирующих
+// (источник связи blocks в категории статуса, отличной от done, — то же
+// правило, что у blocked_by списка и гейта dependencies_closed) выше
+// заблокированных, внутри — приоритет urgent → high → normal → low, затем
+// номер. Номер уникален в проекте, поэтому порядок детерминирован и листание
+// не теряет и не повторяет строк. Ручной ранг бэклога (эпик CLAB-368) встанет
+// первым ключом этого же выражения.
+const backlogOrderSQL = `
+	EXISTS (SELECT 1 FROM task_links bl
+	        JOIN tasks blk ON blk.id = bl.from_task_id
+	        JOIN workflow_statuses bws ON bws.id = blk.status_id
+	        WHERE bl.to_task_id = t.id AND bl.rel = 'blocks' AND bws.category <> 'done'),
+	CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+	t.seq`
+
+// listTasksOrder — выражение ORDER BY по порядку фильтра.
+func listTasksOrder(order string) string {
+	switch order {
+	case TaskListOrderUpdated:
+		return `t.updated_at DESC, t.seq DESC`
+	case TaskListOrderBacklog:
+		return backlogOrderSQL
+	}
+	return `ws.position, t.seq`
+}
 
 // listTasksWhere — условие выборки списка, общее для страницы и счёта:
 // `total` обязан считать ровно то, что листается. Параметры $1…$15.
@@ -126,37 +156,105 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 		limit = 200
 	}
 	offset := max(f.Offset, 0)
-	order := `ws.position, t.seq`
-	if f.Order == TaskListOrderUpdated {
-		order = `t.updated_at DESC, t.seq DESC`
-	}
 	args := append(listTasksArgs(projectID, f), limit, offset)
 	rows, err := q.Query(ctx, taskSelect+listTasksWhere+`
-		ORDER BY `+order+`
+		ORDER BY `+listTasksOrder(f.Order)+`
 		LIMIT $16 OFFSET $17`, args...)
 	if err != nil {
 		return nil, translate(err)
 	}
-	defer rows.Close()
+	return s.collectTasks(ctx, q, rows)
+}
 
+// collectTasks дочитывает строки taskSelect и область каждой задачи одним
+// запросом на всю страницу (CLAB-363): число запросов списка не растёт с её
+// размером.
+func (s *Store) collectTasks(ctx context.Context, q Querier, rows pgx.Rows) ([]domain.Task, error) {
 	tasks := []domain.Task{}
 	for rows.Next() {
 		t, err := scanTask(rows)
 		if err != nil {
+			rows.Close()
 			return nil, translate(err)
 		}
 		tasks = append(tasks, t)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, translate(err)
 	}
-
+	ids := make([]uuid.UUID, len(tasks))
+	for i, t := range tasks {
+		ids[i] = t.ID
+	}
+	repos, err := s.taskRepositoriesByTask(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range tasks {
-		if tasks[i].Repositories, err = s.TaskRepositories(ctx, q, tasks[i].ID); err != nil {
-			return nil, err
-		}
+		tasks[i].Repositories = repos[tasks[i].ID]
 	}
 	return tasks, nil
+}
+
+// TaskRef — строка выборки списка без полей задачи: по ней режим фильтров
+// по причинам внимания (CLAB-363) считает потолок и листает в порядке
+// списка, не читая задач, которые на страницу не попадут.
+type TaskRef struct {
+	ID       uuid.UUID
+	Terminal bool
+}
+
+// ListTaskRefs — вся выборка списка по фильтру без limit и offset, в порядке
+// списка. Условие и порядок — те же, что у ListTasks и CountTasks.
+func (s *Store) ListTaskRefs(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]TaskRef, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.id, ws.is_terminal
+		FROM tasks t
+		JOIN workflow_statuses ws ON ws.id = t.status_id
+		LEFT JOIN tasks parent ON parent.id = t.parent_id
+		LEFT JOIN principals assignee ON assignee.id = t.assignee_id`+listTasksWhere+`
+		ORDER BY `+listTasksOrder(f.Order), listTasksArgs(projectID, f)...)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	out := []TaskRef{}
+	for rows.Next() {
+		var r TaskRef
+		if err := rows.Scan(&r.ID, &r.Terminal); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, r)
+	}
+	return out, translate(rows.Err())
+}
+
+// TaskItemsByIDs — элементы списка для заданных задач в заданном порядке:
+// те же поля, что у ListTaskItems, тем же числом запросов на всю пачку.
+func (s *Store) TaskItemsByIDs(ctx context.Context, q Querier, ids []uuid.UUID) ([]domain.TaskListItem, error) {
+	if len(ids) == 0 {
+		return []domain.TaskListItem{}, nil
+	}
+	rows, err := q.Query(ctx, taskSelect+` WHERE t.id = ANY($1)`, ids)
+	if err != nil {
+		return nil, translate(err)
+	}
+	tasks, err := s.collectTasks(ctx, q, rows)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[uuid.UUID]domain.Task, len(tasks))
+	for _, t := range tasks {
+		byID[t.ID] = t
+	}
+	ordered := make([]domain.Task, 0, len(ids))
+	for _, id := range ids {
+		if t, ok := byID[id]; ok {
+			ordered = append(ordered, t)
+		}
+	}
+	return s.taskItems(ctx, q, ordered)
 }
 
 // CountTasks — сколько задач в выборке списка без учёта limit и offset.
@@ -184,23 +282,33 @@ func (s *Store) ListTaskItems(ctx context.Context, q Querier, projectID uuid.UUI
 	if err != nil {
 		return nil, 0, err
 	}
+	items, err := s.taskItems(ctx, q, tasks)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+// taskItems дополняет задачи категорией статуса и счётом детей: два запроса
+// на всю пачку.
+func (s *Store) taskItems(ctx context.Context, q Querier, tasks []domain.Task) ([]domain.TaskListItem, error) {
 	ids := make([]uuid.UUID, len(tasks))
 	for i, t := range tasks {
 		ids[i] = t.ID
 	}
 	categories, err := s.statusCategories(ctx, q, ids)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	counts, err := s.childCounts(ctx, q, ids)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	items := make([]domain.TaskListItem, len(tasks))
 	for i, t := range tasks {
 		items[i] = domain.TaskListItem{Task: t, StatusCategory: categories[t.ID], ChildCounts: counts[t.ID]}
 	}
-	return items, total, nil
+	return items, nil
 }
 
 func (s *Store) statusCategories(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]string, error) {
@@ -337,6 +445,34 @@ func (s *Store) TaskRepositories(ctx context.Context, q Querier, taskID uuid.UUI
 			return nil, translate(err)
 		}
 		out = append(out, tr)
+	}
+	return out, translate(rows.Err())
+}
+
+// taskRepositoriesByTask — область каждой задачи пачки одним запросом, в
+// порядке TaskRepositories. У задачи без репозиториев записи нет.
+func (s *Store) taskRepositoriesByTask(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID][]domain.TaskRepository, error) {
+	out := map[uuid.UUID][]domain.TaskRepository{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT tr.task_id, tr.repository_id, r.owner, r.name, r.role_hint, tr.is_primary
+		FROM task_repositories tr
+		JOIN repositories r ON r.id = tr.repository_id
+		WHERE tr.task_id = ANY($1)
+		ORDER BY tr.task_id, tr.is_primary DESC, r.owner, r.name`, ids)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var tr domain.TaskRepository
+		if err := rows.Scan(&id, &tr.RepositoryID, &tr.Owner, &tr.Name, &tr.RoleHint, &tr.IsPrimary); err != nil {
+			return nil, translate(err)
+		}
+		out[id] = append(out[id], tr)
 	}
 	return out, translate(rows.Err())
 }

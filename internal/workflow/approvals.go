@@ -156,13 +156,7 @@ func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uu
 
 // taskApprovals — элементы выборки одной задачи, по переходам в порядке цикла.
 func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task domain.Task, g cycleGraph, now time.Time) ([]Approval, error) {
-	var candidates []domain.Transition
-	for _, t := range g.available(task.StatusID) {
-		if t.Kind == "advance" && hasBlockingHuman(t) {
-			candidates = append(candidates, t)
-		}
-	}
-	if len(candidates) == 0 {
+	if !hasCandidates(g, task.StatusID, hasBlockingHuman) {
 		return nil, nil
 	}
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
@@ -175,7 +169,7 @@ func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task dom
 		}
 		return nil, err
 	}
-	stageArtifacts, taskArtifacts, err := e.artifacts(ctx, q, task, run)
+	stageArtifacts, allArtifacts, err := e.artifacts(ctx, q, task, run)
 	if err != nil {
 		return nil, err
 	}
@@ -193,35 +187,22 @@ func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task dom
 		StatusKey: task.StatusKey, StatusName: task.StatusName,
 	}
 
-	choice := storedChoice(task.OptionalStages)
+	verdicts, err := e.humanVerdicts(ctx, q, task, g, run, hasBlockingHuman,
+		&taskArtifacts{stage: stageArtifacts, all: allArtifacts})
+	if err != nil {
+		return nil, err
+	}
 	var out []Approval
-	for _, t := range candidates {
-		land, err := planLanding(g, choice, t)
-		if err != nil {
-			return nil, err
-		}
-		// Переход в выключенный этап недоступен: решать по нему нечего.
-		if land.Unavailable != "" {
-			continue
-		}
-		outcomes, _, err := e.evaluate(ctx, q, task, run, t, land, stageArtifacts, taskArtifacts)
-		if err != nil {
-			return nil, err
-		}
-		for _, gate := range AwaitsHuman(outcomes) {
-			if gate.Type == domain.GateChecklist && runView.LeaseHeld {
-				continue
-			}
-			out = append(out, Approval{
-				Task: taskView,
-				Transition: ApprovalTransition{
-					Key: t.Key, Name: t.Name, ToStatus: g.byID[t.ToStatusID].Key,
-					LandsIn: land.To.Key, LandsInName: land.To.Name,
-				},
-				Gate:     gate,
-				StageRun: runView,
-			})
-		}
+	for _, w := range humanWaits(verdicts, runView.LeaseHeld) {
+		out = append(out, Approval{
+			Task: taskView,
+			Transition: ApprovalTransition{
+				Key: w.Transition.Key, Name: w.Transition.Name, ToStatus: g.byID[w.Transition.ToStatusID].Key,
+				LandsIn: w.Landing.To.Key, LandsInName: w.Landing.To.Name,
+			},
+			Gate:     w.Gate,
+			StageRun: runView,
+		})
 	}
 	return out, nil
 }
