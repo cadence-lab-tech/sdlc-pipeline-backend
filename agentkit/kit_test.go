@@ -309,3 +309,32 @@ func TestFrontmatter(t *testing.T) {
 		t.Fatal("без фронтматтера поля не читаются")
 	}
 }
+
+// CLAB-370: скил clab-rules описывает параметры repo_ref_required — states и
+// require_open, их несовместимость и ловушку повторного круга после слияния.
+// Удалённый абзац роняет тест.
+func TestKitRulesRepoRefGate(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flat string
+	for _, f := range k.Files {
+		if f.Path == "skills/clab-rules/SKILL.md" {
+			flat = strings.Join(strings.Fields(f.Content), " ")
+		}
+	}
+	if flat == "" {
+		t.Fatal("в наборе нет skills/clab-rules/SKILL.md")
+	}
+	for _, s := range []string{
+		"`repo_ref_required`", "`ref_type`", "`min_count`", "`per_repository`",
+		"`states`", "`open`", "`merged`", "`closed`", "`declined`",
+		"`require_open`", "`repo_ref_states_invalid`", "never both",
+		`["open","merged"]`, "waives it",
+	} {
+		if !strings.Contains(flat, s) {
+			t.Errorf("clab-rules: нет %q", s)
+		}
+	}
+}

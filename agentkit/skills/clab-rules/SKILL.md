@@ -96,6 +96,27 @@ The rules of the import format (names, types, what is refused) are in
      agents and runners fail with `stage_time_exceeded`, a live lease keeps
      working. Only a human lifts it, with `waived` on the entry transition,
      until the stage ends.
+     `repo_ref_required` wants a repository reference on the task, e.g.
+     `{"ref_type":"pull_request","min_count":1,"per_repository":true,"states":["open","merged"]}`:
+     `ref_type` is `pull_request`, `branch` or `commit` (default
+     `pull_request`); `min_count` is how many references are needed (at
+     least 1); with `per_repository` true that many in every repository of
+     the task's scope, otherwise in the task as a whole. `states` limits the
+     references that count to those in the listed states of a pull request:
+     a non-empty list of `open`, `merged`, `closed`, `declined`. Without
+     `states` any state counts. `require_open: true` is the older spelling of
+     `states: ["open"]`: it refuses a pull request that is closed, merged or
+     declined. Give a gate either `require_open` or `states`, never both: the
+     draft is refused with `repo_ref_states_invalid`. A reference whose state
+     has not been synchronized yet (no GitHub access) counts when `open` is
+     among the `states` (or without `states`), and never counts when it is
+     not. Mind the way back: if a task can return to a status before the
+     merge from a status after it (a failed rollout, say), the pull request
+     is already merged then, and a gate that counts only open pull requests
+     holds the task until a human waives it. Put `["open","merged"]` on the
+     pull request gates along that path. The price: such a gate also lets a
+     pull request merged ahead of time through, so keep the human approval
+     before the merge.
    - Which of a role's documents a status delivers is the cycle's choice,
      not the role's: a role knows nothing about statuses. In a status of
      `bundle.json`, `role_documents` lists the document names of the
