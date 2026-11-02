@@ -125,6 +125,19 @@ func TestStartWaitsForMigratingAPI(t *testing.T) {
 			}
 		})
 
+		// Круг 2, решение человека: CADENCE_READY_TIMEOUT по умолчанию — 600 с,
+		// как DEPLOY_READY_TIMEOUT выкладки. Без переменной миграция дольше
+		// прежних 300 с дожидается, а срок выходит на 600 с.
+		t.Run(cmd.name+"/default timeout", func(t *testing.T) {
+			got := cmd.run(t, func(r *fakeRunner) { r.upFails, r.healthy = 1, false }, map[string]string{})
+			if got.code != 1 || !strings.Contains(got.errw, "the api is not ready after CADENCE_READY_TIMEOUT (600s)") {
+				t.Fatalf("code %d, want the timeout of 600s\nout:\n%s\nerr:\n%s", got.code, got.out, got.errw)
+			}
+			if got.elapsed <= 300*time.Second || got.elapsed > 600*time.Second {
+				t.Errorf("waited %s, want more than 300 s and no more than 600 s", got.elapsed)
+			}
+		})
+
 		// R23: `up -d`, который сам ждёт api, срок не продлевает.
 		t.Run(cmd.name+"/slow up counts", func(t *testing.T) {
 			got := cmd.run(t, func(r *fakeRunner) {
@@ -182,5 +195,29 @@ func TestStartWaitsForMigratingAPI(t *testing.T) {
 				t.Fatalf("code %d\nout:\n%s\nerr:\n%s", got.code, got.out, got.errw)
 			}
 		})
+	}
+}
+
+// Круг 2: умолчание CADENCE_READY_TIMEOUT — 600 с; .env и окружение его
+// перекрывают; --help команд, которые ждут готовности, называют 600.
+func TestReadyTimeoutDefault(t *testing.T) {
+	for _, c := range []struct {
+		env, getenv map[string]string
+		want        int
+	}{
+		{nil, nil, 600},
+		{map[string]string{"CADENCE_READY_TIMEOUT": "1800"}, nil, 1800},
+		{nil, map[string]string{"CADENCE_READY_TIMEOUT": "0"}, 0},
+	} {
+		getenv := c.getenv
+		i := &installation{e: &serverEnv{getenv: func(k string) string { return getenv[k] }}, env: c.env}
+		if got, err := i.readyTimeout(); err != nil || got != c.want {
+			t.Errorf("env %v, process %v: readyTimeout %d, %v; want %d", c.env, c.getenv, got, err, c.want)
+		}
+	}
+	for name, help := range map[string]string{"install": installHelp, "upgrade": upgradeHelp, "restore": restoreHelp, "starter": starterHelp} {
+		if !strings.Contains(help, "CADENCE_READY_TIMEOUT") || !strings.Contains(help, "default 600") || strings.Contains(help, "default 300") {
+			t.Errorf("clab server %s --help does not name the default of 600 s:\n%s", name, help)
+		}
 	}
 }

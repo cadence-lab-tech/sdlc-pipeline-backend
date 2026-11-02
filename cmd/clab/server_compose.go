@@ -370,9 +370,10 @@ func (i *installation) showFailure(ctx context.Context, services ...string) {
 	_ = i.composeRun(ctx, false, append([]string{"logs", "--tail", "40"}, services...)...)
 }
 
-// readyTimeout — CADENCE_READY_TIMEOUT в секундах, по умолчанию 300.
+// readyTimeout — CADENCE_READY_TIMEOUT в секундах, по умолчанию 600 (как
+// DEPLOY_READY_TIMEOUT выкладки, решение человека по CLAB-369).
 func (i *installation) readyTimeout() (int, error) {
-	raw := i.getDefault("CADENCE_READY_TIMEOUT", "300")
+	raw := i.getDefault("CADENCE_READY_TIMEOUT", "600")
 	var n int
 	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n < 0 || fmt.Sprint(n) != strings.TrimSpace(raw) {
 		return 0, fmt.Errorf("CADENCE_READY_TIMEOUT is '%s', expected a number of seconds", raw)

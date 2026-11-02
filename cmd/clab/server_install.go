@@ -121,7 +121,7 @@ rest of the stack (the worker) once the api is healthy. If the time runs out,
 it says the migration may still be running and prints how to finish the
 start.
 
-  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
+  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 600
   CADENCE_REGISTRY       a registry mirror of our two images; written to .env
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
                          latest/download/<asset> (https://, http:// or file://)

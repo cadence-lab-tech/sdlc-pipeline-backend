@@ -62,7 +62,7 @@ is refused without changes; compare by hand with
 clab import --project KEY --file bundles/starter.json --dry-run.
 
   CADENCE_READY_TIMEOUT  seconds to wait for the API (in tls mode, for the
-                         certificate), default 300`
+                         certificate), default 600`
 
 // starterBundlePath — связка стартового проекта внутри пакета.
 const starterBundlePath = "bundles/starter.json"

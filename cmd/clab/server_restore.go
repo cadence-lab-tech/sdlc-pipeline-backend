@@ -51,7 +51,7 @@ rest of the stack (the worker) once the api is healthy. If the time runs out,
 it says the migration may still be running and prints how to finish the
 start.
 
-  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300`
+  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 600`
 
 var backupName = regexp.MustCompile(`^cadence-(v[0-9]+\.[0-9]+\.[0-9]+)-[0-9]{8}-[0-9]{6}\.sql\.gz$`)
 

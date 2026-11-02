@@ -66,7 +66,7 @@ it says the migration may still be running and prints how to finish the
 start. Roll back only if the api has failed,
 not while the migration runs.
 
-  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
+  CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 600
   CADENCE_RELEASES_URL   a mirror of the releases: download/vX.Y.Z/<asset> and
                          latest/download/<asset> (https://, http:// or file://)
   CADENCE_VERIFY         auto, require or off: the signatures of the release`
