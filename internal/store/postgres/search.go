@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -146,7 +147,11 @@ func (s *Store) searchScope(ctx context.Context, q Querier, scope string, in Sea
 	}
 
 	if strings.TrimSpace(in.Query) != "" {
-		text, err = s.searchQuery(ctx, q, textSQL, scan, in.ProjectID, in.Repositories, in.Query, limit)
+		var extra []any
+		if scope == ScopeCode {
+			extra = []any{nameWords(in.Query)}
+		}
+		text, err = s.searchQuery(ctx, q, textSQL, scan, in.ProjectID, in.Repositories, in.Query, limit, extra...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -205,9 +210,21 @@ func codeSearchSQL() (string, string, func(interface{ Scan(...any) error }) (Sea
 		JOIN repositories r  ON r.id = cf.repository_id
 		WHERE cc.project_id = $1`
 
+	// Определение — выше использований: вызовов в коде больше, чем
+	// объявлений, и по одному ts_rank_cd файл, где имя зовут десять раз,
+	// обгонял файл, где оно объявлено. «Объявлено в куске» — объявление из
+	// code_symbols того же файла с именем из слов-имён запроса ($5,
+	// nameWords), начавшееся внутри куска: symbol_fqn несёт только символ
+	// первой строки, а мелкие объявления слипаются в один кусок. Внутри
+	// групп порядок прежний — по ts_rank_cd.
 	text := currentRuns + columns + `
 		  AND cc.tsv @@ sdlc_tsquery('simple', $3)
-		ORDER BY ts_rank_cd(cc.tsv, sdlc_tsquery('simple', $3)) DESC
+		ORDER BY cardinality($5::text[]) > 0 AND EXISTS (
+		             SELECT 1 FROM code_symbols cs
+		             WHERE cs.code_file_id = cc.code_file_id
+		               AND cs.start_line BETWEEN cc.start_line AND cc.end_line
+		               AND lower(cs.name) = ANY($5::text[])) DESC,
+		         ts_rank_cd(cc.tsv, sdlc_tsquery('simple', $3)) DESC
 		LIMIT $4`
 
 	vector := currentRuns + columns + `
@@ -284,4 +301,46 @@ func documentSearchSQL() (string, string, func(interface{ Scan(...any) error }) 
 		return h, err
 	}
 	return text, vector, scan
+}
+
+// nameWords — слова запроса, которые называют объявление: по ним кусок с
+// объявлением поднимается выше кусков, где имя только используется.
+//
+// Имя — единственное слово запроса либо слово, записанное «по-кодовому»:
+// с заглавной буквой, цифрой, _ или через точку (от записи через точку
+// берётся последний сегмент). Обычное слово фразы не поднимает ничего:
+// в запросе «revoke task tokens RevokeRunTokens» слово task подняло бы
+// выше определения RevokeRunTokens каждую func task из тестов. Регистр
+// не важен, как и в tsvector 'simple'.
+func nameWords(query string) []string {
+	var words []string
+	for _, f := range strings.Fields(query) {
+		// Исключённое слово websearch («-foo») имени не называет.
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		// Скобки, кавычки, ?. и прочие знаки делят слово: Foo(ctx) — это
+		// Foo и ctx, obj?.x — obj и .x.
+		words = append(words, strings.FieldsFunc(f, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '.'
+		})...)
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, w := range words {
+		// Точка в конце — знак препинания фразы, в начале (.x из obj?.x) и
+		// внутри — запись через точку.
+		w = strings.TrimRight(w, ".")
+		codeLike := len(words) == 1 || strings.ContainsAny(w, "._0123456789") ||
+			strings.IndexFunc(w, unicode.IsUpper) >= 0
+		if i := strings.LastIndex(w, "."); i >= 0 {
+			w = w[i+1:]
+		}
+		name := strings.ToLower(w)
+		if codeLike && name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }
