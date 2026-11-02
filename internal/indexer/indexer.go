@@ -268,7 +268,7 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 	}
 
 	started := time.Now()
-	counters, cache, err := ix.process(ctx, run)
+	counters, stats, err := ix.process(ctx, run)
 	if err != nil {
 		attempts := ix.opts.MaxAttempts
 		if errors.As(err, &permanentError{}) {
@@ -303,7 +303,12 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 		// Доля попаданий в кэш эмбеддингов: вместе с chunks_embedded это
 		// единственное, по чему видно, что кэш работает и во что обходится
 		// прогон у провайдера.
-		"cache_lookups", cache.lookups, "cache_hits", cache.hits,
+		"cache_lookups", stats.lookups, "cache_hits", stats.hits,
+		// Сверка прогона одной строкой: files_indexed + files_reused +
+		// files_skipped_content = files_considered. Отсев по содержимому
+		// иначе не виден (CLAB-361).
+		"files_considered", stats.filesConsidered,
+		"files_skipped_content", stats.filesSkippedContent,
 		"took", time.Since(started).Round(time.Millisecond))
 	return &done, nil
 }
@@ -314,9 +319,20 @@ func (ix *Indexer) runDone(failed bool, took time.Duration) {
 	}
 }
 
-func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, cacheCounters, error) {
+// runStats — то, что прогон сообщает в лог и чего нет в repo_index_runs:
+// счётчики кэша эмбеддингов и сверка отсева. Колонок под них нет намеренно:
+// схема и API не меняются.
+type runStats struct {
+	cacheCounters
+	// filesConsidered — файлы, прошедшие фильтр путей и предел хранилища.
+	filesConsidered int
+	// filesSkippedContent — из них отсеянные по содержимому (SkipContent).
+	filesSkippedContent int
+}
+
+func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, runStats, error) {
 	var counters postgres.IndexCounters
-	var cache cacheCounters
+	var cache runStats
 	repo := Repo{run.Owner, run.Name}
 	src, err := ix.source.ForRepository(ctx, credentialsOf(run.CredentialRef, run.InstallationID, run.ProjectInstallationID, run.ProjectCredentialRef))
 	if err != nil {
@@ -355,6 +371,8 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		return counters, cache, permanent("в %s %d файлов при пределе %d: сузьте exclude_globs",
 			repo, len(files), ix.opts.MaxFiles)
 	}
+
+	cache.filesConsidered = len(files)
 
 	parent, hasParent, err := ix.store.LatestCompletedRun(ctx, ix.store.DB(), run.RepositoryID, run.Branch)
 	if err != nil {
@@ -401,7 +419,19 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		if err != nil {
 			return counters, cache, fmt.Errorf("файл %s: %w", e.Path, err)
 		}
-		if SkipContent(content) {
+		if skip, reason := SkipContent(content); skip {
+			cache.filesSkippedContent++
+			// Пустой файл (.gitkeep, __init__.py) — норма, а не потеря:
+			// считается, но лог не засоряет. Остальное — файл, который
+			// пользователь ждёт в поиске, а его там не будет.
+			level := slog.LevelWarn
+			if reason == reasonEmpty {
+				level = slog.LevelDebug
+			}
+			ix.log.Log(ctx, level, "файл отсеян по содержимому и в индекс не попал",
+				"repository", repo.String(), "commit", short(run.CommitSHA), "path", e.Path,
+				"reason", reason, "size", len(content),
+				"hint", "если файл не нужен в индексе, добавьте его в exclude_globs репозитория")
 			continue
 		}
 
@@ -442,7 +472,7 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		return counters, cache, err
 	}
 	counters.ChunksEmbedded = batch.embedded
-	cache = batch.cache
+	cache.cacheCounters = batch.cache
 
 	if hasParent {
 		for path, prev := range parentFiles {

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bytes"
+	"fmt"
 	"path"
 	"strings"
 	"unicode/utf8"
@@ -75,17 +76,45 @@ func SkipPath(filePath string, size int64, maxBytes int, extra []string) (bool, 
 
 // SkipContent отсеивает то, что по пути распознать нельзя: бинарник без
 // расширения или файл в неизвестной кодировке. Индекс — это текст, кусок
-// бинарника в векторе не значит ничего.
-func SkipContent(content []byte) bool {
+// бинарника в векторе не значит ничего. Вторая причина строже вкуса: Postgres
+// не примет в text ни нулевой байт, ни невалидный UTF-8, и такой файл уронил
+// бы весь прогон, а не один себя.
+//
+// Проверяется всё содержимое, а не его голова. Срез в 8000 байт резал
+// многобайтовый символ на границе, и валидный файл с кириллицей считался
+// бинарным (CLAB-361); а нулевой байт за пределами среза пропускался и ронял
+// запись. Размер файла и так ограничен SkipPath, проверка дешёвая.
+//
+// Вторым значением — причина для лога: что именно и где.
+func SkipContent(content []byte) (bool, string) {
 	if len(content) == 0 {
-		return true
+		return true, reasonEmpty
 	}
-	head := content
-	if len(head) > 8000 {
-		head = head[:8000]
+	if i := bytes.IndexByte(content, 0); i >= 0 {
+		return true, fmt.Sprintf("%s на смещении %d", reasonNUL, i)
 	}
-	return bytes.IndexByte(head, 0) >= 0 || !utf8.Valid(head)
+	if utf8.Valid(content) {
+		return false, ""
+	}
+	// Невалидное место ищется только когда оно точно есть: обычный файл
+	// проходит одной проверкой.
+	for i := 0; i < len(content); {
+		r, size := utf8.DecodeRune(content[i:])
+		if r == utf8.RuneError && size <= 1 {
+			return true, fmt.Sprintf("%s на смещении %d", reasonInvalidUTF8, i)
+		}
+		i += size
+	}
+	return true, reasonInvalidUTF8
 }
+
+// Причины отсева по содержимому. Первые две попадают в warn воркера и
+// остаются префиксом строки «причина на смещении N».
+const (
+	reasonEmpty       = "пустой файл"
+	reasonNUL         = "нулевой байт"
+	reasonInvalidUTF8 = "невалидный UTF-8"
+)
 
 // Lang — язык файла для выдачи и подсветки. Не влияет на разбор: правила
 // извлечения символов выбираются по расширению отдельно.
