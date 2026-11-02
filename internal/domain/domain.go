@@ -1098,6 +1098,33 @@ const (
 	EventStageSkipped = "stage.skipped"
 )
 
+// MovementEvents — события ленты, которые двигают задачу по циклу: вход в
+// этап, захват, отпуск и протухание аренды, сдача, решение по гейту,
+// перепроверка, переход и отмена. По ним считается last_moved_at строки
+// списка задач (CLAB-363). Heartbeat (lease.extended), учёт, правка
+// постановки, вложения, привязка PR, дрейф и неудачная попытка перехода
+// (gate.failed) движением не считаются: они меняют updated_at или ленту, но
+// задача от них дальше не идёт.
+var MovementEvents = []string{
+	EventTaskCreated, EventStageEntered, EventStageClaimed, EventStageReleased,
+	EventLeaseExpired, EventArtifactSubmitted, EventGateDecided,
+	EventReviewRequested, EventReviewCompleted, EventTaskAdvanced,
+	EventTaskRejected, EventTaskCancelled,
+}
+
+// TaskCost — стоимость задачи в строке списка (CLAB-363): сумма учёта её
+// собственных прогонов, этапов и перепроверок, без поддерева. Значения — те
+// же, что у GET /v1/tasks/:key/usage: CostUSD — всё сообщённое, APICostUSD —
+// деньги (строки api и без признака, решение 0062), SubscriptionCostUSD —
+// условная стоимость на подписке. Reports — число строк учёта. Задача без
+// единой строки учёта получает null, а не нули: «нет учёта» — не «бесплатно».
+type TaskCost struct {
+	CostUSD             float64 `json:"cost_usd"`
+	APICostUSD          float64 `json:"api_cost_usd"`
+	SubscriptionCostUSD float64 `json:"subscription_cost_usd"`
+	Reports             int     `json:"reports"`
+}
+
 // TeamEvent — событие аудита уровня арендатора. Отдельная лента нужна там, где
 // следу негде остаться на задаче: удалённый проект уносит свои task_events с
 // собой, а команда-владелец остаётся.

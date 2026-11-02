@@ -203,7 +203,7 @@ func stageClock(enteredAt time.Time, limit time.Duration, now time.Time) (deadli
 // активирует, а если он всё же активен, предел необязателен и без числа его
 // нет).
 func (e *Engine) limitFor(ctx context.Context, q postgres.Querier, run domain.StageRun, now time.Time) (*StageLimit, error) {
-	if run.Kind != domain.StageKindStage || run.EnteredViaTransitionID == nil || run.FinishedAt != nil {
+	if !limitApplies(run) {
 		return nil, nil
 	}
 	t, err := e.store.GetTransition(ctx, q, *run.EnteredViaTransitionID)
@@ -213,17 +213,9 @@ func (e *Engine) limitFor(ctx context.Context, q postgres.Querier, run domain.St
 		}
 		return nil, err
 	}
-	gate, d, text, ok := enteredLimit(t)
-	if !ok {
+	out, gate := limitOnClock(run, t, now)
+	if out == nil {
 		return nil, nil
-	}
-	deadline, overdue := stageClock(run.EnteredAt, d, now)
-	out := &StageLimit{
-		StageRunID: run.ID, Gate: gate.Key, Transition: t.Key, Status: run.StatusKey,
-		MaxDuration: text, EnteredAt: run.EnteredAt, Deadline: deadline,
-		ElapsedSeconds:   max(0, int64(now.Sub(run.EnteredAt)/time.Second)),
-		RemainingSeconds: max(0, int64(deadline.Sub(now)/time.Second)),
-		Overdue:          overdue, OverdueAt: run.OverdueAt,
 	}
 	decision, err := e.store.GateDecision(ctx, q, run.ID, gate.ID)
 	if err != nil {
@@ -240,6 +232,32 @@ func (e *Engine) limitFor(ctx context.Context, q postgres.Querier, run domain.St
 		}
 	}
 	return out, nil
+}
+
+// limitApplies — может ли у прогона быть предел: открытый прогон этапа,
+// вошедший в статус переходом.
+func limitApplies(run domain.StageRun) bool {
+	return run.Kind == domain.StageKindStage && run.EnteredViaTransitionID != nil && run.FinishedAt == nil
+}
+
+// limitOnClock — предел прогона по переходу входа t на момент now, без
+// решения человека: срок, остаток и просрочка. nil — у перехода предела нет.
+// Вторым значением — гейт предела, по которому ищется снятие. Одна функция на
+// limitFor и строку списка задач (CLAB-363): там переход берётся из графа
+// версии цикла, а снятие — из пакетных фактов, и разойтись в сроке им нельзя.
+func limitOnClock(run domain.StageRun, t domain.Transition, now time.Time) (*StageLimit, *domain.Gate) {
+	gate, d, text, ok := enteredLimit(t)
+	if !ok {
+		return nil, nil
+	}
+	deadline, overdue := stageClock(run.EnteredAt, d, now)
+	return &StageLimit{
+		StageRunID: run.ID, Gate: gate.Key, Transition: t.Key, Status: run.StatusKey,
+		MaxDuration: text, EnteredAt: run.EnteredAt, Deadline: deadline,
+		ElapsedSeconds:   max(0, int64(now.Sub(run.EnteredAt)/time.Second)),
+		RemainingSeconds: max(0, int64(deadline.Sub(now)/time.Second)),
+		Overdue:          overdue, OverdueAt: run.OverdueAt,
+	}, gate
 }
 
 // limitOfStage — предел этапа, к которому относится прогон: у перепроверки
