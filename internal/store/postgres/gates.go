@@ -80,6 +80,24 @@ func (s *Store) ListGateResults(ctx context.Context, q Querier, stageRunID uuid.
 	return out, translate(rows.Err())
 }
 
+// countApprovalsSQL — запрос CountApprovals, вынесенный в константу, чтобы тест
+// плана гонял ровно его текст (export_test.go).
+//
+// Тип события — литерал, а не параметр: частичный индекс
+// task_events_gate_decided (000042) создан с условием type = 'gate.decided', и
+// планировщик берёт его, только если условие запроса доказывает предикат.
+// Подготовленное выражение pgx после пяти выполнений может перейти на общий
+// план, а в нём `type = $2` предикат не доказывает — индекс бы молча
+// перестал браться. Тот же приём у runClaimedSQL (usage.go, индекс 000032).
+const countApprovalsSQL = `
+		SELECT count(DISTINCT actor_id)
+		FROM task_events
+		WHERE stage_run_id = $1
+		  AND type = '` + domain.EventGateDecided + `'
+		  AND payload->>'gate_id' = $2::text
+		  AND payload->>'status' = 'passed'
+		  AND created_at > $3`
+
 // CountApprovals считает независимые апрувы по гейту в рамках попытки этапа,
 // поставленные после момента since (нулевое время — все).
 //
@@ -90,15 +108,7 @@ func (s *Store) ListGateResults(ctx context.Context, q Querier, stageRunID uuid.
 // утверждал не то, что лежит в задаче сейчас (решение 0042).
 func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateID uuid.UUID, since time.Time) (int, error) {
 	var n int
-	err := q.QueryRow(ctx, `
-		SELECT count(DISTINCT actor_id)
-		FROM task_events
-		WHERE stage_run_id = $1
-		  AND type = $2
-		  AND payload->>'gate_id' = $3::text
-		  AND payload->>'status' = 'passed'
-		  AND created_at > $4`,
-		stageRunID, domain.EventGateDecided, gateID.String(), since).Scan(&n)
+	err := q.QueryRow(ctx, countApprovalsSQL, stageRunID, gateID.String(), since).Scan(&n)
 	if err != nil {
 		return 0, translate(err)
 	}
