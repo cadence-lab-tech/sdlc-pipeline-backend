@@ -92,6 +92,26 @@ func mixed() {
 }
 `
 
+// Для гибрида: объявление — весь файл, и по мешку слов embed.Hash оно ближе
+// к запросу, чем кусок с тремя вызовами среди прочих слов. Иначе векторный
+// ранг 1 у вызовов и полнотекстовый ранг 1 у объявления дали бы равные
+// суммы RRF, и порядок решала бы случайность обхода map.
+const searchBlobDecl = `package postgres
+
+func PutBlob() {}
+`
+
+const searchBlobCalls = `package workflow
+
+func (e *Engine) save(ctx context.Context) error {
+	// Содержимое уходит в хранилище до строки артефакта: объект без строки
+	// подберёт сборщик мусора, а строка без объекта сломала бы чтение.
+	_ = e.store.PutBlob(ctx)
+	_ = e.store.PutBlob(ctx)
+	return e.store.PutBlob(ctx)
+}
+`
+
 const searchJSX = `export function Page() {
   return <Button variant="outline">ok</Button>
 }
@@ -112,6 +132,8 @@ func indexSearchFixture(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
 				"internal/workflow/helpers_test.go":      searchHelpers,
 				"internal/workflow/mixed.go":             searchMixed,
 				"web/src/Page.tsx":                       searchJSX,
+				"internal/store/postgres/blobs.go":       searchBlobDecl,
+				"internal/workflow/save.go":              searchBlobCalls,
 			},
 		},
 	}
@@ -314,17 +336,32 @@ func TestCodeSearchPutsDefinitionFirst(t *testing.T) {
 // AC-7: в гибридном режиме полнотекстовый список упорядочен так же, слияние
 // по рангу прежнее — определение в выдаче выше вызовов.
 func TestCodeSearchHybridKeepsDefinitionFirst(t *testing.T) {
-	store, _ := indexSearchFixture(t)
+	store, pool := indexSearchFixture(t)
 	engine := workflow.NewEngine(store, testdb.Logger(), workflow.Options{Embedder: embed.Hash{}})
 
-	hits := searchCode(t, engine, "RevokeRunTokens", "hybrid")
-	d := hitIndex(hits, "internal/store/postgres/auth.go", "func (s *Store) RevokeRunTokens(")
-	c := hitIndex(hits, "internal/workflow/agents.go", "RevokeRunTokens")
-	if d < 0 || c < 0 || d > c {
-		t.Fatalf("ждали объявление выше вызовов: объявление %d, вызовы %d:%s", d, c, describeHits(hits))
+	const (
+		decl  = "internal/store/postgres/blobs.go"
+		calls = "internal/workflow/save.go"
+	)
+	if rankOf(t, pool, calls, "PutBlob", "PutBlob") <= rankOf(t, pool, decl, "func PutBlob(", "PutBlob") {
+		t.Fatal("набор не проверяет порядок: вызовы и без него ниже объявления")
 	}
-	if !strings.Contains(hits[d].Match, "text") {
-		t.Fatalf("объявление пришло не из полнотекста: %q", hits[d].Match)
+	hits := searchCode(t, engine, "PutBlob", "hybrid")
+	d, c := hitIndex(hits, decl, "func PutBlob("), hitIndex(hits, calls, "PutBlob")
+	if d != 0 || c < 0 || hits[d].Score <= hits[c].Score {
+		t.Fatalf("ждали объявление первым и вызовы ниже: объявление %d, вызовы %d:%s", d, c, describeHits(hits))
+	}
+	if hits[d].Match != "vector+text" && hits[d].Match != "text+vector" {
+		t.Fatalf("объявление пришло не из обоих списков: %q", hits[d].Match)
+	}
+
+	// Объявление не в начале куска и вызовы, которые ближе по вектору: в
+	// выдаче есть оба, полнотекстовая половина участвует.
+	hits = searchCode(t, engine, "RevokeRunTokens", "hybrid")
+	d = hitIndex(hits, "internal/store/postgres/auth.go", "func (s *Store) RevokeRunTokens(")
+	c = hitIndex(hits, "internal/workflow/agents.go", "RevokeRunTokens")
+	if d < 0 || c < 0 || !strings.Contains(hits[d].Match, "text") {
+		t.Fatalf("ждали объявление и вызовы в гибридной выдаче: объявление %d, вызовы %d:%s", d, c, describeHits(hits))
 	}
 }
 
