@@ -162,6 +162,18 @@ func TestStartWaitsForMigratingAPI(t *testing.T) {
 			})
 		}
 
+		// Api стал здоров между падением `up -d` и проверкой: ждать нечего,
+		// повторный `up -d` доводит стек (одна проверка — одно состояние).
+		t.Run(cmd.name+"/api healthy by the check", func(t *testing.T) {
+			got := cmd.run(t, func(r *fakeRunner) { r.upFails = 1 }, readyIn("300"))
+			if got.code != 0 || !strings.Contains(got.out+got.errw, cmd.success) {
+				t.Fatalf("code %d\nout:\n%s\nerr:\n%s", got.code, got.out, got.errw)
+			}
+			if strings.Contains(got.out+got.errw, "the api is not ready yet") || ups(got.r) != 2 {
+				t.Errorf("want no wait and a second up -d (%d):\n%s", ups(got.r), got.out)
+			}
+		})
+
 		// R22: успех — только с запущенным воркером.
 		t.Run(cmd.name+"/worker down", func(t *testing.T) {
 			got := cmd.run(t, func(r *fakeRunner) { r.workerDown = true }, readyIn("300"))

@@ -392,21 +392,38 @@ type upError struct{ err error }
 
 func (u *upError) Error() string { return u.err.Error() }
 
-// apiStarting — api создан, работает и ещё не здоров (starting или
-// unhealthy), без перезапусков: так выглядит идущая миграция, а не падение.
-// Перезапускающийся или вышедший api ждать бессмысленно.
-func (i *installation) apiStarting(ctx context.Context) bool {
+// Фазы api для startStack: одна проверка — одно состояние, иначе api,
+// ставший здоровым между двумя вопросами, выглядел бы упавшим.
+const (
+	apiIsHealthy  = "healthy"
+	apiIsStarting = "starting"
+	apiIsOther    = "other"
+)
+
+// apiPhase — фаза контейнера api одним docker inspect. starting — создан,
+// работает и ещё не здоров (starting или unhealthy), без перезапусков: так
+// выглядит идущая миграция, а не падение. other — не создан, вышел,
+// перезапускается или без healthcheck: ждать его бессмысленно.
+func (i *installation) apiPhase(ctx context.Context) string {
 	api := i.containerOf(ctx, "api")
 	if api == "" {
-		return false
+		return apiIsOther
 	}
 	out, err := output(ctx, i.e.run, i.docker("inspect", "-f",
 		"{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}", api))
 	if err != nil {
-		return false
+		return apiIsOther
 	}
 	f := strings.Fields(out)
-	return len(f) == 3 && f[0] == "running" && (f[1] == "starting" || f[1] == "unhealthy") && f[2] == "0"
+	switch {
+	case len(f) != 3 || f[0] != "running":
+		return apiIsOther
+	case f[1] == "healthy":
+		return apiIsHealthy
+	case (f[1] == "starting" || f[1] == "unhealthy") && f[2] == "0":
+		return apiIsStarting
+	}
+	return apiIsOther
 }
 
 // startStack — `up -d --remove-orphans`, терпимый к долгому старту api
@@ -441,19 +458,24 @@ func (i *installation) startStack(ctx context.Context, timeout int) (int, error)
 	}
 
 	if err := up(); err != nil {
-		if !i.apiStarting(ctx) {
+		phase := i.apiPhase(ctx)
+		if phase == apiIsOther {
 			return 0, &upError{err}
 		}
-		e.info("the api is not ready yet: a database migration may be running (docker compose logs -f api); waiting for it up to CADENCE_READY_TIMEOUT (%ds from the start of the stack)", timeout)
-		for !i.apiHealthy(ctx) {
+		if phase == apiIsStarting {
+			e.info("the api is not ready yet: a database migration may be running (docker compose logs -f api); waiting for it up to CADENCE_READY_TIMEOUT (%ds from the start of the stack)", timeout)
+		}
+		// Api, здоровый уже к этой проверке, ждать не нужно — сразу
+		// повторный `up -d`; упал он по другой причине — тот её и покажет.
+		for phase != apiIsHealthy {
 			if ctx.Err() != nil || left() <= 0 {
 				return 0, errAPIStarting
 			}
-			if !i.apiStarting(ctx) {
-				return 0, &upError{err}
-			}
 			// Шаг не длиннее остатка: ожидание не выходит за срок.
 			e.sleep(min(3*time.Second, deadline.Sub(e.now())))
+			if phase = i.apiPhase(ctx); phase == apiIsOther {
+				return 0, &upError{err}
+			}
 		}
 		e.info("the api is ready; starting the rest of the stack")
 		if err := i.composeRun(ctx, false, "up", "-d", "--remove-orphans"); err != nil {

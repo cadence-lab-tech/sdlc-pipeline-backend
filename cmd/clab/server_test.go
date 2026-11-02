@@ -316,6 +316,11 @@ func (f *fakeRunner) run(_ context.Context, c cmdSpec) error {
 		write(f.takenBy + "\n")
 		return nil
 	case strings.HasPrefix(args, "inspect -f {{.State.Status}}"):
+		if !f.healthy && f.healthyAfter > 0 {
+			if f.healthChecks++; f.healthChecks >= f.healthyAfter {
+				f.healthy = true
+			}
+		}
 		switch {
 		case f.apiState != "":
 			write(f.apiState + "\n")
