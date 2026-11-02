@@ -223,3 +223,41 @@ func TestSkippedFileIsPickedUpByNextCommit(t *testing.T) {
 		t.Fatalf("прогон B: indexed=%d reused=%d, ждали 2 и 1", second.FilesIndexed, second.FilesReused)
 	}
 }
+
+// Пустой файл (.gitkeep, __init__.py) отсеивается и считается в
+// files_skipped_content, чтобы сверка сходилась, но предупреждением не
+// засоряет лог: это норма, а не потеря (отступление разработчика от AC-5,
+// принятое тестировщиком по R3: причины warn — нулевой байт и невалидный UTF-8).
+func TestEmptyFileIsCountedButNotWarned(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	spy := &logSpy{}
+	src := &fakeSource{
+		repo: "sdlc-pipeline-backend",
+		head: "c1",
+		commits: map[string]map[string]string{
+			"c1": {"internal/workflow/engine.go": engineV1, "internal/pkg/__init__.py": ""},
+		},
+	}
+	ix := New(store, src, embed.Hash{}, spy.logger(), Options{ChunkChars: 400, EmbedBatch: 8})
+	if _, err := ix.Enqueue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := ix.RunNext(ctx)
+	if err != nil || run == nil || run.State != "completed" {
+		t.Fatalf("прогон: %v (%+v)", err, run)
+	}
+	for _, r := range spy.records {
+		if r.message == "файл отсеян по содержимому и в индекс не попал" && r.level.String() != "DEBUG" {
+			t.Fatalf("пустой файл пишет %s, ждали DEBUG", r.level)
+		}
+	}
+	rec, ok := spy.find("репозиторий проиндексирован")
+	if !ok {
+		t.Fatal("сводки прогона нет в логе")
+	}
+	if rec.attrs["files_considered"].Int64() != 2 || rec.attrs["files_skipped_content"].Int64() != 1 ||
+		rec.attrs["files_indexed"].Int64() != 1 {
+		t.Fatalf("сверка: %v", rec.attrs)
+	}
+}
