@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security problems here: see SECURITY.md and use "Report a vulnerability" on the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`clab version`, the `VERSION` of the installation or the image tag"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options: [self-hosted tls, self-hosted proxy, Helm chart, development stack, not sure]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Remove tokens, passwords and other secrets before pasting.
+      render: shell
