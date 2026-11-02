@@ -81,33 +81,9 @@ func (e *Engine) ChildCards(ctx context.Context, q postgres.Querier, parentID uu
 	return out, nil
 }
 
-// TasksAwaitingApproval — признак «ждёт апрува» для строк списка задач
-// проекта (CLAB-326): то же правило и та же функция, что у детей в карточке
-// родителя, поэтому признак списка, children[] и карточки совпадают.
-// Категория статуса берётся из графа версии цикла, который нужен правилу и
-// так: лишнего запроса на задачу нет. Ключ ответа — задачи, которые ждут.
-func (e *Engine) TasksAwaitingApproval(ctx context.Context, q postgres.Querier, tasks []domain.Task) (map[uuid.UUID]bool, error) {
-	probe := e.newApprovalProbe()
-	out := map[uuid.UUID]bool{}
-	for _, t := range tasks {
-		g, err := probe.graph(ctx, q, t.WorkflowID)
-		if err != nil {
-			return nil, err
-		}
-		awaiting, err := probe.awaiting(ctx, q, t, g.byID[t.StatusID].Category)
-		if err != nil {
-			return nil, err
-		}
-		if awaiting {
-			out[t.ID] = true
-		}
-	}
-	return out, nil
-}
-
-// approvalProbe — общая часть детей карточки и списка задач: графы версий
-// цикла читаются один раз на версию, гейты вычисляются только у задач в
-// работе.
+// approvalProbe — общая часть детей карточки и списка задач (TaskOverviews):
+// графы версий цикла читаются один раз на версию, гейты вычисляются только у
+// задач в работе.
 type approvalProbe struct {
 	e      *Engine
 	graphs map[uuid.UUID]cycleGraph
@@ -145,13 +121,7 @@ func (p *approvalProbe) awaiting(ctx context.Context, q postgres.Querier, task d
 // awaitsApproval — то же, что TransitionsAwaitApproval(Preview(task)), но
 // вычисляет гейты только у переходов вперёд с блокирующим human_approval.
 func (e *Engine) awaitsApproval(ctx context.Context, q postgres.Querier, task domain.Task, g cycleGraph) (bool, error) {
-	var candidates []domain.Transition
-	for _, t := range g.available(task.StatusID) {
-		if t.Kind == "advance" && hasBlockingApproval(t) {
-			candidates = append(candidates, t)
-		}
-	}
-	if len(candidates) == 0 {
+	if !hasCandidates(g, task.StatusID, hasBlockingApproval) {
 		return false, nil
 	}
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
@@ -163,25 +133,112 @@ func (e *Engine) awaitsApproval(ctx context.Context, q postgres.Querier, task do
 		}
 		return false, err
 	}
-	stageArtifacts, taskArtifacts, err := e.artifacts(ctx, q, task, run)
+	verdicts, err := e.humanVerdicts(ctx, q, task, g, run, hasBlockingApproval, nil)
 	if err != nil {
 		return false, err
 	}
+	return verdictsAwaitApproval(verdicts), nil
+}
+
+// transitionVerdict — вердикт гейтов одного перехода вперёд и где по нему
+// встанет задача.
+type transitionVerdict struct {
+	Transition domain.Transition
+	Landing    landing
+	Outcomes   []GateOutcome
+}
+
+// hasCandidates — есть ли из статуса переход вперёд, подходящий под keep.
+func hasCandidates(g cycleGraph, statusID uuid.UUID, keep func(domain.Transition) bool) bool {
+	for _, t := range g.available(statusID) {
+		if t.Kind == "advance" && keep(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// humanVerdicts — гейты переходов вперёд из статуса задачи, отобранных keep,
+// на прогоне run. Одна функция на «ждёт апрува» (awaiting_approval списка и
+// children[] карточки), «Ждут меня» (/approvals) и причину awaits_human
+// списка задач (CLAB-363): строка списка вычисляет гейты один раз и берёт
+// из одного вердикта оба признака. arts — уже прочитанные артефакты этапа и
+// задачи; nil — прочитать.
+func (e *Engine) humanVerdicts(ctx context.Context, q postgres.Querier, task domain.Task, g cycleGraph, run domain.StageRun, keep func(domain.Transition) bool, arts *taskArtifacts) ([]transitionVerdict, error) {
+	var candidates []domain.Transition
+	for _, t := range g.available(task.StatusID) {
+		if t.Kind == "advance" && keep(t) {
+			candidates = append(candidates, t)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if arts == nil {
+		stage, all, err := e.artifacts(ctx, q, task, run)
+		if err != nil {
+			return nil, err
+		}
+		arts = &taskArtifacts{stage: stage, all: all}
+	}
 	choice := storedChoice(task.OptionalStages)
+	out := make([]transitionVerdict, 0, len(candidates))
 	for _, t := range candidates {
 		land, err := planLanding(g, choice, t)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		outcomes, _, err := e.evaluate(ctx, q, task, run, t, land, stageArtifacts, taskArtifacts)
+		outcomes, _, err := e.evaluate(ctx, q, task, run, t, land, arts.stage, arts.all)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if AwaitsApproval(outcomes) {
-			return true, nil
+		out = append(out, transitionVerdict{Transition: t, Landing: land, Outcomes: outcomes})
+	}
+	return out, nil
+}
+
+// taskArtifacts — артефакты этапа и задачи, прочитанные один раз на задачу.
+type taskArtifacts struct {
+	stage, all []domain.Artifact
+}
+
+// verdictsAwaitApproval — «ждёт апрува» по вердиктам: хотя бы на одном
+// переходе с блокирующим human_approval правило AwaitsApproval выполнено.
+func verdictsAwaitApproval(verdicts []transitionVerdict) bool {
+	for _, v := range verdicts {
+		if hasBlockingApproval(v.Transition) && AwaitsApproval(v.Outcomes) {
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+// humanWait — человеческий гейт, который ждёт решения, с переходом и
+// посадкой.
+type humanWait struct {
+	Transition domain.Transition
+	Landing    landing
+	Gate       GateOutcome
+}
+
+// humanWaits — гейты «Ждут меня» по вердиктам: AwaitsHuman на доступных
+// переходах; чек-лист при живой аренде прогона не ждёт человека — его, по
+// циклу, отмечает исполнитель этапа.
+func humanWaits(verdicts []transitionVerdict, leaseHeld bool) []humanWait {
+	var out []humanWait
+	for _, v := range verdicts {
+		// Переход в выключенный этап недоступен: решать по нему нечего.
+		if v.Landing.Unavailable != "" {
+			continue
+		}
+		for _, gate := range AwaitsHuman(v.Outcomes) {
+			if gate.Type == domain.GateChecklist && leaseHeld {
+				continue
+			}
+			out = append(out, humanWait{Transition: v.Transition, Landing: v.Landing, Gate: gate})
+		}
+	}
+	return out
 }
 
 func hasBlockingApproval(t domain.Transition) bool {
