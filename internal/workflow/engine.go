@@ -279,7 +279,8 @@ func (e *Engine) ExecuteAs(ctx context.Context, taskKey, transitionKey string, w
 		if err != nil {
 			return err
 		}
-		if _, err := mayTransition(who, task, transition, g.stageRole(task.StatusID)); err != nil {
+		verdict, err := mayTransition(who, task, transition, g.stageRole(task.StatusID))
+		if err != nil {
 			return err
 		}
 		land, err := planLanding(g, storedChoice(task.OptionalStages), transition)
@@ -372,6 +373,11 @@ func (e *Engine) ExecuteAs(ctx context.Context, taskKey, transitionKey string, w
 			"transition": transition.Key,
 			"from":       task.StatusKey,
 			"to":         toStatus.Key,
+			// Основание права и роль этапа, из которого ушла задача
+			// (CLAB-380): self_approval на переходе не пишется — признак
+			// стоит на решении по гейту.
+			"via":        verdict.Via,
+			"stage_role": verdict.StageRole,
 		}
 		if len(land.Skipped) > 0 {
 			payload["skips"] = res.Skips
@@ -593,7 +599,8 @@ func (e *Engine) DecideGateAs(ctx context.Context, taskKey, transitionKey, gateK
 		if err != nil {
 			return err
 		}
-		if _, err := mayDecide(who, principal, task, run, transition, *gate, stageRole, status); err != nil {
+		verdict, err := mayDecide(who, principal, task, run, transition, *gate, stageRole, status)
+		if err != nil {
 			return err
 		}
 		if seen != nil {
@@ -609,14 +616,20 @@ func (e *Engine) DecideGateAs(ctx context.Context, taskKey, transitionKey, gateK
 
 		// Событие пишется всегда: по нему считаются независимые апрувы для
 		// min_approvals, которого в одной строке gate_results не выразить.
-		if err := e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventGateDecided, actor,
-			map[string]any{
-				"gate_id":    gate.ID.String(),
-				"gate":       gate.Key,
-				"transition": transition.Key,
-				"status":     status,
-				"details":    json.RawMessage(details),
-			}); err != nil {
+		// Поля права и признак самоапрува (CLAB-380) считаются здесь же, под
+		// блокировкой задачи, для любого вердикта; CountApprovals читает
+		// только прежние ключи.
+		basis, err := e.selfBasisOf(ctx, tx, task, run, actor)
+		if err != nil {
+			return err
+		}
+		payload := decisionFields(who, verdict, basis)
+		payload["gate_id"] = gate.ID.String()
+		payload["gate"] = gate.Key
+		payload["transition"] = transition.Key
+		payload["status"] = status
+		payload["details"] = json.RawMessage(details)
+		if err := e.store.AppendEvent(ctx, tx, task.ID, &run.ID, domain.EventGateDecided, actor, payload); err != nil {
 			return err
 		}
 
