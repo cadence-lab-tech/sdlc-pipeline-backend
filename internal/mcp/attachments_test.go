@@ -342,15 +342,17 @@ func TestToolSetHasNoFileContentTools(t *testing.T) {
 	}
 	sort.Strings(names)
 	want := []string{
-		"sdlc_add_repository", "sdlc_apply_instruction", "sdlc_assign_task", "sdlc_check_gates", "sdlc_claim_task",
+		"sdlc_add_repository", "sdlc_apply_instruction", "sdlc_approve_role_proposal", "sdlc_assign_task",
+		"sdlc_check_gates", "sdlc_claim_task",
 		"sdlc_create_task", "sdlc_export_bundle", "sdlc_get_artifact", "sdlc_get_document",
 		"sdlc_get_drift", "sdlc_get_instruction", "sdlc_get_role", "sdlc_get_task", "sdlc_heartbeat",
 		"sdlc_import_bundle", "sdlc_import_guide", "sdlc_link_repo_ref", "sdlc_link_tasks",
-		"sdlc_list_documents", "sdlc_list_instructions", "sdlc_list_tasks", "sdlc_put_document",
-		"sdlc_put_instruction", "sdlc_put_role",
+		"sdlc_list_documents", "sdlc_list_instructions", "sdlc_list_role_proposals", "sdlc_list_tasks",
+		"sdlc_propose_role_version", "sdlc_put_document",
+		"sdlc_put_instruction", "sdlc_put_role", "sdlc_reject_role_proposal",
 		"sdlc_release", "sdlc_report_usage", "sdlc_request_transition", "sdlc_resolve_drift",
 		"sdlc_search_context", "sdlc_submit_artifact", "sdlc_update_task",
-		"sdlc_update_task_scope", "sdlc_whoami",
+		"sdlc_update_task_scope", "sdlc_whoami", "sdlc_withdraw_role_proposal",
 	}
 	if strings.Join(names, " ") != strings.Join(want, " ") {
 		t.Fatalf("набор тулов изменился:\n%v\nждали\n%v", names, want)

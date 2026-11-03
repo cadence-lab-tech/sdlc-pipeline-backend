@@ -53,6 +53,9 @@ func TestInstructionLibraryMigration(t *testing.T) {
 		}
 		return s
 	}
+	// Откат идёт в обратном порядке: документы предложений версий ролей
+	// (000044) ссылаются на версии инструкций.
+	execProposalsMigration(t, pool, ".down.sql")
 	execLibraryMigration(t, pool, ".down.sql")
 	if regclass(t, pool, "public.instructions") || regclass(t, pool, "public.instruction_versions") {
 		t.Fatal("down не снял таблицы библиотеки")
@@ -77,6 +80,7 @@ func TestInstructionLibraryMigration(t *testing.T) {
 		t.Fatal("нет документов ролей для проверки")
 	}
 	execLibraryMigration(t, pool, ".up.sql")
+	execProposalsMigration(t, pool, ".up.sql")
 	if after := digest(); after != before {
 		t.Fatalf("миграция изменила документы ролей: %s → %s", before, after)
 	}

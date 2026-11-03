@@ -58,6 +58,7 @@ func (s *Server) registerCatalogTools() {
 			"и контракт вывода. У документа, закреплённого за библиотекой, — instruction {key, version}; "+
 			"у роли, отстающей от библиотеки, — role.instruction_lag.",
 		s.getRole)
+	s.registerRoleProposalTools()
 	s.registerInstructionTools()
 	add(s, "sdlc_put_document",
 		"Положить проектный документ: содержимым, ссылкой или путём в репозитории. "+
@@ -194,7 +195,7 @@ type putRoleInput struct {
 
 func (s *Server) putRole(ctx context.Context, in putRoleInput) (*sdk.CallToolResult, any, error) {
 	if err := s.allow(ctx, domain.MemberMaintainer); err != nil {
-		return fail(err)
+		return fail(s.roleVersionRefusal(ctx, err))
 	}
 	key, _ := projectKey(ctx)
 	report, err := s.authoring.Import(ctx, key, actor(ctx).ID, workflow.Bundle{
@@ -329,3 +330,18 @@ func (s *Server) getDocument(ctx context.Context, in documentInput) (*sdk.CallTo
 // тулом или промптом и действует по нему. Источник один —
 // internal/importguide: тот же текст печатает clab import-guide.
 const ImportGuide = importguide.Text
+
+// roleVersionRefusal — отказ участнику уровня agent на sdlc_put_role с
+// подсказкой про предложение версии (решение 0072, п. 5); правило текста
+// одно с REST — workflow.Auth.RoleVersionRefusal.
+func (s *Server) roleVersionRefusal(ctx context.Context, err error) error {
+	key, kerr := projectKey(ctx)
+	if kerr != nil {
+		return err
+	}
+	project, perr := s.store.GetProjectByKey(ctx, s.store.DB(), key)
+	if perr != nil {
+		return err
+	}
+	return s.auth.RoleVersionRefusal(ctx, identity(ctx), project.ID, err)
+}

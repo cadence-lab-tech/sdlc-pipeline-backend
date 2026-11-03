@@ -288,8 +288,9 @@ func (s *Store) putRoleDocumentBlobs(ctx context.Context, q Querier, docs []Role
 // идентификатором роли (параметр или колонка внешнего запроса); результат —
 // скалярный подзапрос с id версии, NULL у роли без версий. Его подставляют
 // PrimaryRole, переезд задач при активации цикла (MoveWaitingTasks) и
-// LatestRoleVersion; через эту точку CLAB-307 проведёт черновик версии с
-// апрувом. 000011_orchestration несёт свою копию, но она применена и не
+// LatestRoleVersion. Предложения версий (000044, решение 0072) живут в
+// своей таблице и сюда не попадают: версию из предложения заводит только
+// утверждение. 000011_orchestration несёт свою копию, но она применена и не
 // правится.
 func latestRoleVersionOf(roleID string) string {
 	return `(SELECT id FROM role_versions WHERE role_id = ` + roleID + ` ORDER BY version DESC LIMIT 1)`
@@ -323,65 +324,9 @@ func (s *Store) AttachRoleDocuments(ctx context.Context, q Querier, versions []d
 	for i, v := range versions {
 		ids[i] = v.ID
 	}
-	rows, err := q.Query(ctx, `
-		SELECT d.role_version_id, d.position, d.name, d.kind, d.blob_sha, b.size_bytes,
-		       CASE WHEN $2 AND b.storage = 'inline' THEN b.content END, b.storage,
-		       iv.id, i.key, iv.version
-		FROM role_version_documents d
-		JOIN blobs b ON b.sha256 = d.blob_sha
-		LEFT JOIN instruction_versions iv ON iv.id = d.instruction_version_id
-		LEFT JOIN instructions i ON i.id = iv.instruction_id
-		WHERE d.role_version_id = ANY($1)
-		ORDER BY d.role_version_id, d.position`, ids, withContent)
+	byVersion, err := s.documentsOf(ctx, q, "role_version_documents", "role_version_id", ids, withContent)
 	if err != nil {
-		return translate(err)
-	}
-	type external struct {
-		id  uuid.UUID
-		idx int
-	}
-	byVersion := map[uuid.UUID][]domain.RoleDocument{}
-	var pending []external
-	for rows.Next() {
-		var id uuid.UUID
-		var d domain.RoleDocument
-		var content []byte
-		var storage string
-		var pinID *uuid.UUID
-		var pinKey *string
-		var pinVersion *int
-		if err := rows.Scan(&id, &d.Position, &d.Name, &d.Kind, &d.SHA256, &d.SizeBytes, &content, &storage,
-			&pinID, &pinKey, &pinVersion); err != nil {
-			rows.Close()
-			return translate(err)
-		}
-		if pinID != nil {
-			d.Instruction = &domain.RoleDocumentPin{ID: *pinID, Key: *pinKey, Version: *pinVersion}
-		}
-		if withContent {
-			if storage == "inline" {
-				text := string(content)
-				d.Content = &text
-			} else {
-				pending = append(pending, external{id, len(byVersion[id])})
-			}
-		}
-		byVersion[id] = append(byVersion[id], d)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return translate(err)
-	}
-	// Вынесенное во внешнее хранилище читается после закрытия выборки: на
-	// том же соединении транзакции второй запрос посреди чтения строк нельзя.
-	for _, p := range pending {
-		d := &byVersion[p.id][p.idx]
-		content, _, err := s.BlobContent(ctx, q, d.SHA256)
-		if err != nil {
-			return err
-		}
-		text := string(content)
-		d.Content = &text
+		return err
 	}
 
 	for i := range versions {
@@ -444,4 +389,72 @@ func (s *Store) LockRole(ctx context.Context, q Querier, roleID uuid.UUID) error
 	var id uuid.UUID
 	err := q.QueryRow(ctx, `SELECT id FROM roles WHERE id = $1 FOR UPDATE`, roleID).Scan(&id)
 	return notFound(err, "роль не найдена")
+}
+
+// documentsOf читает документы владельцев ids одним запросом: версий роли
+// (role_version_documents) или предложений (role_version_proposal_documents,
+// 000044) — форма строк у них одна. table и owner — имена из кода, не из
+// запроса. withContent — читать ли содержимое: списки его не отдают.
+func (s *Store) documentsOf(ctx context.Context, q Querier, table, owner string, ids []uuid.UUID, withContent bool) (map[uuid.UUID][]domain.RoleDocument, error) {
+	rows, err := q.Query(ctx, `
+		SELECT d.`+owner+`, d.position, d.name, d.kind, d.blob_sha, b.size_bytes,
+		       CASE WHEN $2 AND b.storage = 'inline' THEN b.content END, b.storage,
+		       iv.id, i.key, iv.version
+		FROM `+table+` d
+		JOIN blobs b ON b.sha256 = d.blob_sha
+		LEFT JOIN instruction_versions iv ON iv.id = d.instruction_version_id
+		LEFT JOIN instructions i ON i.id = iv.instruction_id
+		WHERE d.`+owner+` = ANY($1)
+		ORDER BY d.`+owner+`, d.position`, ids, withContent)
+	if err != nil {
+		return nil, translate(err)
+	}
+	type external struct {
+		id  uuid.UUID
+		idx int
+	}
+	byOwner := map[uuid.UUID][]domain.RoleDocument{}
+	var pending []external
+	for rows.Next() {
+		var id uuid.UUID
+		var d domain.RoleDocument
+		var content []byte
+		var storage string
+		var pinID *uuid.UUID
+		var pinKey *string
+		var pinVersion *int
+		if err := rows.Scan(&id, &d.Position, &d.Name, &d.Kind, &d.SHA256, &d.SizeBytes, &content, &storage,
+			&pinID, &pinKey, &pinVersion); err != nil {
+			rows.Close()
+			return nil, translate(err)
+		}
+		if pinID != nil {
+			d.Instruction = &domain.RoleDocumentPin{ID: *pinID, Key: *pinKey, Version: *pinVersion}
+		}
+		if withContent {
+			if storage == "inline" {
+				text := string(content)
+				d.Content = &text
+			} else {
+				pending = append(pending, external{id, len(byOwner[id])})
+			}
+		}
+		byOwner[id] = append(byOwner[id], d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, translate(err)
+	}
+	// Вынесенное во внешнее хранилище читается после закрытия выборки: на
+	// том же соединении транзакции второй запрос посреди чтения строк нельзя.
+	for _, p := range pending {
+		d := &byOwner[p.id][p.idx]
+		content, _, err := s.BlobContent(ctx, q, d.SHA256)
+		if err != nil {
+			return nil, err
+		}
+		text := string(content)
+		d.Content = &text
+	}
+	return byOwner, nil
 }
