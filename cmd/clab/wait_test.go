@@ -38,13 +38,37 @@ const waitRoot = "bootstrap-token-clab-323-0123456789"
 var fastTiming = waitTiming{longPoll: 25 * time.Second, gap: 50 * time.Millisecond,
 	poll: 300 * time.Millisecond, retryFirst: 50 * time.Millisecond, retryMax: 200 * time.Millisecond, recheck: 4}
 
-type dbCounter struct{ n atomic.Int64 }
+type dbCounter struct {
+	n atomic.Int64
+	// Ловушка на запрос (CLAB-390): хук между запросами одной ручки.
+	trap atomic.Pointer[queryTrap]
+}
 
-func (d *dbCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+// queryTrap срабатывает один раз: когда запрос с marker в тексте закончился
+// в nth-й раз после взвода. Хук идёт синхронно, в горутине обработчика, —
+// ровно между этим запросом и следующим.
+type queryTrap struct {
+	marker string
+	nth    int64
+	seen   atomic.Int64
+	fire   func()
+}
+
+type trapKey struct{}
+
+func (d *dbCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	d.n.Add(1)
+	if tr := d.trap.Load(); tr != nil && strings.Contains(data.SQL, tr.marker) && tr.seen.Add(1) == tr.nth {
+		return context.WithValue(ctx, trapKey{}, tr)
+	}
 	return ctx
 }
-func (d *dbCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (d *dbCounter) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if tr, ok := ctx.Value(trapKey{}).(*queryTrap); ok && d.trap.CompareAndSwap(tr, nil) {
+		tr.fire()
+	}
+}
 
 type waitWorld struct {
 	t        *testing.T
@@ -54,7 +78,11 @@ type waitWorld struct {
 	requests atomic.Int64
 }
 
-func newWaitWorld(t *testing.T) *waitWorld {
+func newWaitWorld(t *testing.T) *waitWorld { return newWaitWorldPool(t, 0) }
+
+// newWaitWorldPool — мир с пулом сервера в maxConns соединений (0 — как
+// есть): с одним соединением любой второй захват внутри обработчика виснет.
+func newWaitWorldPool(t *testing.T, maxConns int32) *waitWorld {
 	t.Helper()
 	testdb.Store(t)
 	w := &waitWorld{t: t, db: &dbCounter{}}
@@ -63,6 +91,9 @@ func newWaitWorld(t *testing.T) *waitWorld {
 		t.Fatal(err)
 	}
 	pc.ConnConfig.Tracer = w.db
+	if maxConns > 0 {
+		pc.MaxConns = maxConns
+	}
 	pool, err := pgxpool.NewWithConfig(context.Background(), pc)
 	if err != nil {
 		t.Fatal(err)
