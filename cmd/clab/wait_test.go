@@ -44,31 +44,22 @@ type dbCounter struct {
 	trap atomic.Pointer[queryTrap]
 }
 
-// queryTrap срабатывает один раз: когда запрос с marker в тексте закончился
-// в nth-й раз после взвода. Хук идёт синхронно, в горутине обработчика, —
-// ровно между этим запросом и следующим.
+// queryTrap срабатывает один раз, синхронно, в горутине обработчика: перед
+// первым запросом с marker в тексте. Так хук ложится ровно между
+// запросами одной ручки.
 type queryTrap struct {
 	marker string
-	nth    int64
-	seen   atomic.Int64
 	fire   func()
 }
 
-type trapKey struct{}
-
 func (d *dbCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	d.n.Add(1)
-	if tr := d.trap.Load(); tr != nil && strings.Contains(data.SQL, tr.marker) && tr.seen.Add(1) == tr.nth {
-		return context.WithValue(ctx, trapKey{}, tr)
+	if tr := d.trap.Load(); tr != nil && strings.Contains(data.SQL, tr.marker) && d.trap.CompareAndSwap(tr, nil) {
+		tr.fire()
 	}
 	return ctx
 }
-
-func (d *dbCounter) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
-	if tr, ok := ctx.Value(trapKey{}).(*queryTrap); ok && d.trap.CompareAndSwap(tr, nil) {
-		tr.fire()
-	}
-}
+func (d *dbCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 type waitWorld struct {
 	t        *testing.T

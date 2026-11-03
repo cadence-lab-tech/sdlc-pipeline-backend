@@ -15,10 +15,9 @@ import (
 // карточку: статус новый, открытый прогон старый (или наоборот), а clab wait
 // на такой карточке возвращал не тот исход.
 
-// taskCardMarker — запрос задачи по ключу (taskSelect + WHERE по ключам).
-// Его делает и проверка доступа до обработчика, поэтому ловушка берёт
-// второе вхождение — запрос самого getTask.
-const taskCardMarker = "WHERE p.key = $1 AND t.key = $2"
+// runsMarker — запрос прогонов задачи (ListStageRuns): первый запрос карточки
+// после чтения самой задачи. Ловушка срабатывает перед ним.
+const runsMarker = "WHERE sr.task_id = $1 ORDER BY sr.entered_at"
 
 type cardView struct {
 	Task struct {
@@ -80,7 +79,7 @@ func (w *waitWorld) toArchitecture(key string) {
 
 // AC-1: переход, лёгший между запросом задачи и запросами прогонов, не
 // даёт рваной карточки. Хук в трассировщике пула выполняет возврат сразу
-// после запроса задачи в getTask — на main до снимка этот тест красный.
+// после чтения задачи в getTask, перед запросом прогонов — на main до снимка этот тест красный.
 func TestCardSnapshotAcrossTransition(t *testing.T) {
 	w := newWaitWorld(t)
 	w.toArchitecture("SDLC-1")
@@ -89,7 +88,7 @@ func TestCardSnapshotAcrossTransition(t *testing.T) {
 	}
 
 	var rejectErr error
-	w.db.trap.Store(&queryTrap{marker: taskCardMarker, nth: 2, fire: func() {
+	w.db.trap.Store(&queryTrap{marker: runsMarker, fire: func() {
 		resp, err := w.postRaw("/v1/tasks/SDLC-1/transitions/reject_to_analysis", map[string]any{"comment": "гонка"})
 		if err != nil {
 			rejectErr = err
@@ -101,7 +100,7 @@ func TestCardSnapshotAcrossTransition(t *testing.T) {
 	}})
 	c := w.card("SDLC-1")
 	if w.db.trap.Load() != nil {
-		t.Fatal("ловушка не сработала: запрос задачи в getTask не найден")
+		t.Fatal("ловушка не сработала: запрос прогонов карточки не найден")
 	}
 	if rejectErr != nil {
 		t.Fatalf("хук: %v", rejectErr)
