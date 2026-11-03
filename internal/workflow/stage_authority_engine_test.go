@@ -490,3 +490,81 @@ func TestApprovalsAgentZone(t *testing.T) {
 		t.Fatalf("запросов было %d, с пятью задачами чужого этапа стало %d", base, after)
 	}
 }
+
+// AC-6 на цикле Epic (CLAB-379, проверка тестировщика): in_progress — статус
+// без исполнителя. children_done и replan из него, решения по их гейтам и
+// cancel эпика agent закрыты при любом наборе ролей, в том числе NULL и
+// с ролью соседнего этапа (orchestrator); предсказание совпадает с отказом;
+// сопровождающему — как раньше.
+func TestStageAuthorityEpicWithoutExecutor(t *testing.T) {
+	w := newRightsWorld(t)
+	epic, err := w.engine.CreateTask(w.ctx, "SDLC", w.system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{TaskType: "epic", Title: "эпик без исполнителя"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.move(epic.Key, "start")
+	for _, g := range []string{"artifacts", "human_approval"} {
+		if _, err := w.engine.DecideGate(w.ctx, epic.Key, "breakdown_done", g, w.lead.ID, nil,
+			domain.GateResultWaived, json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("waive %s: %v", g, err)
+		}
+	}
+	w.move(epic.Key, "breakdown_done")
+	epic, err = w.store.GetTaskByKey(w.ctx, w.store.DB(), epic.Key)
+	if err != nil || epic.StatusKey != "in_progress" {
+		t.Fatalf("эпик не в in_progress: %s %v", epic.StatusKey, err)
+	}
+
+	agents := []Actor{
+		{Principal: w.lead, Level: domain.MemberAgent},
+		{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"orchestrator", "analyst"}},
+	}
+	for _, who := range agents {
+		views, err := w.engine.PreviewFor(w.ctx, epic, &who)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range views {
+			if v.ActorMay == nil || *v.ActorMay || v.ActorDeny == nil || v.ActorDeny.Reason != DenyNoStageRole {
+				t.Fatalf("%v: предсказание %s: %+v", who.Roles, v.Key, v)
+			}
+			for _, g := range v.Gates {
+				if g.ActorMayDecide == nil || *g.ActorMayDecide {
+					t.Fatalf("%v: предсказание решения %s/%s: %+v", who.Roles, v.Key, g.GateKey, g)
+				}
+			}
+		}
+		for _, tr := range []string{"children_done", "replan", "cancel"} {
+			if _, err := w.engine.ExecuteAs(w.ctx, epic.Key, tr, who, ""); !forbidden(err) || reasonOf(err) != DenyNoStageRole {
+				t.Fatalf("%v: %s agent: %v", who.Roles, tr, err)
+			}
+		}
+		for _, c := range []struct{ tr, gate string }{{"children_done", "children"}, {"replan", "problem_report"}} {
+			for _, s := range []string{domain.GateResultPassed, domain.GateResultWaived} {
+				_, err := w.engine.DecideGateAs(w.ctx, epic.Key, c.tr, c.gate, who, s, json.RawMessage(`{}`), nil)
+				if !forbidden(err) || reasonOf(err) != DenyNoStageRole {
+					t.Fatalf("%v: решение %s %s/%s agent: %v", who.Roles, s, c.tr, c.gate, err)
+				}
+			}
+		}
+	}
+	after, err := w.store.GetTaskByKey(w.ctx, w.store.DB(), epic.Key)
+	if err != nil || after.StatusKey != "in_progress" {
+		t.Fatalf("эпик сдвинулся от отказов: %s %v", after.StatusKey, err)
+	}
+	var decided int
+	if err := w.store.DB().QueryRow(w.ctx, `
+		SELECT count(*) FROM gate_results gr JOIN gates g ON g.id = gr.gate_id
+		JOIN workflow_transitions tr ON tr.id = g.transition_id
+		WHERE gr.stage_run_id = $1 AND tr.key IN ('children_done', 'replan') AND gr.decided_by IS NOT NULL`,
+		w.run(after).ID).Scan(&decided); err != nil || decided != 0 {
+		t.Fatalf("отказы записали решения: %d %v", decided, err)
+	}
+
+	maintainer := Actor{Principal: w.lead, Level: domain.MemberMaintainer}
+	if res, err := w.engine.ExecuteAs(w.ctx, epic.Key, "children_done", maintainer, ""); err != nil ||
+		res.Blocked || res.Task.StatusKey != "done" {
+		t.Fatalf("children_done сопровождающим: %v %+v", err, res)
+	}
+}
