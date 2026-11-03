@@ -127,17 +127,68 @@ func (s *Store) SetInstallationState(ctx context.Context, q Querier, installatio
 
 // SetRepositoryAvailability помечает репозиторий установки недоступным или
 // снова доступным: GitHub сообщает, что его убрали из установки или вернули.
+// Повторная пометка недоступным время не переписывает (coalesce, как у
+// установок): вебхук и опрос установок (CLAB-395) приносят одно и то же
+// событие в любом порядке, и метка остаётся временем первого.
 func (s *Store) SetRepositoryAvailability(ctx context.Context, q Querier, installationID int64, owner, name string, available bool) (int, error) {
-	var at *time.Time
-	if !available {
-		now := time.Now()
-		at = &now
-	}
-	tag, err := q.Exec(ctx, `UPDATE repositories SET unavailable_at = $4
+	tag, err := q.Exec(ctx, `UPDATE repositories
+		SET unavailable_at = CASE WHEN $4 THEN NULL ELSE coalesce(unavailable_at, now()) END
 		WHERE installation_id = $1 AND lower(owner) = lower($2) AND lower(name) = lower($3)`,
-		installationID, owner, name, at)
+		installationID, owner, name, available)
 	if err != nil {
 		return 0, translate(err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+// AllInstallations — все подключённые установки инстанса, для сверки с
+// провайдером. Установок на инстансе единицы и десятки, страниц не нужно.
+func (s *Store) AllInstallations(ctx context.Context, q Querier) ([]domain.GitHubInstallation, error) {
+	rows, err := q.Query(ctx, `SELECT `+installationCols+` FROM github_installations
+		ORDER BY installation_id`)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []domain.GitHubInstallation{}
+	for rows.Next() {
+		i, err := scanInstallation(rows)
+		if err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, i)
+	}
+	return out, translate(rows.Err())
+}
+
+// InstallationRepository — репозиторий, привязанный установкой, с его
+// доступностью: то, что сверка сравнивает со списком установки у провайдера.
+type InstallationRepository struct {
+	ID            uuid.UUID
+	Owner         string
+	Name          string
+	UnavailableAt *time.Time
+}
+
+// RepositoriesOfInstallation — репозитории, которые помнят эту установку
+// (repositories.installation_id). Установка только на уровне проекта сюда не
+// попадает — так же, как её не задевает вебхук installation_repositories.
+func (s *Store) RepositoriesOfInstallation(ctx context.Context, q Querier, installationID int64) ([]InstallationRepository, error) {
+	rows, err := q.Query(ctx, `SELECT id, owner, name, unavailable_at FROM repositories
+		WHERE installation_id = $1 ORDER BY lower(owner), lower(name), id`, installationID)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	out := []InstallationRepository{}
+	for rows.Next() {
+		var r InstallationRepository
+		if err := rows.Scan(&r.ID, &r.Owner, &r.Name, &r.UnavailableAt); err != nil {
+			return nil, translate(err)
+		}
+		out = append(out, r)
+	}
+	return out, translate(rows.Err())
 }

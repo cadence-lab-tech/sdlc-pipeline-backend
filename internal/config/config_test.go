@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -204,6 +205,8 @@ var positiveDurationVars = []struct{ name, negative string }{
 	{"SDLC_INDEX_INTERVAL", "-5m"},
 	{"SDLC_INDEX_STUCK_AFTER", "-30m"},
 	{"SDLC_INDEX_POLL_INTERVAL", "-15s"},
+	{"SDLC_REPO_REF_SYNC_INTERVAL", "-5m"},
+	{"SDLC_INSTALLATION_SYNC_INTERVAL", "-5m"},
 	{"SDLC_SHUTDOWN_TIMEOUT", "-15s"},
 }
 
@@ -387,6 +390,8 @@ func TestNumericDefaults(t *testing.T) {
 		{"IndexInterval", c.IndexInterval, 5 * time.Minute},
 		{"IndexStuckAfter", c.IndexStuckAfter, 30 * time.Minute},
 		{"IndexPollInterval", c.IndexPollInterval, 15 * time.Second},
+		{"RepoRefSyncInterval", c.RepoRefSyncInterval, 5 * time.Minute},
+		{"InstallationSyncInterval", c.InstallationSyncInterval, 5 * time.Minute},
 		{"ShutdownTimeout", c.ShutdownTimeout, 15 * time.Second},
 		{"RequestTimeout", c.RequestTimeout, 30 * time.Second},
 		{"UploadTimeout", c.UploadTimeout, 10 * time.Minute},
@@ -430,6 +435,8 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		"SDLC_EMBEDDING_CACHE_TOUCH_AFTER": "13s",
 		"SDLC_UPLOAD_TIMEOUT":              "14s",
 		"SDLC_DOWNLOAD_TIMEOUT":            "15s",
+		"SDLC_REPO_REF_SYNC_INTERVAL":      "16s",
+		"SDLC_INSTALLATION_SYNC_INTERVAL":  "17s",
 	}
 	for k, v := range env {
 		t.Setenv(k, v)
@@ -474,6 +481,8 @@ func TestPositiveNumericValuesPassThrough(t *testing.T) {
 		{"SDLC_EMBEDDING_CACHE_TOUCH_AFTER", c.EmbeddingCacheTouchAfter, 13 * time.Second},
 		{"SDLC_UPLOAD_TIMEOUT", c.UploadTimeout, 14 * time.Second},
 		{"SDLC_DOWNLOAD_TIMEOUT", c.DownloadTimeout, 15 * time.Second},
+		{"SDLC_REPO_REF_SYNC_INTERVAL", c.RepoRefSyncInterval, 16 * time.Second},
+		{"SDLC_INSTALLATION_SYNC_INTERVAL", c.InstallationSyncInterval, 17 * time.Second},
 	}
 	for _, f := range durations {
 		if f.got != f.want {
@@ -920,4 +929,84 @@ func TestRouteTimeoutsRejectGarbage(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Периоды опросов воркера (CLAB-395, AC-1, AC-2): не заданная и пустая
+// переменная дают одно и то же умолчание, мусор — ошибка старта с именем
+// переменной. Период синхронизации PR без своей переменной идёт за
+// SDLC_INDEX_INTERVAL — поведение до CLAB-395.
+func TestPollIntervalsEmptyMeansDefault(t *testing.T) {
+	vars := []struct {
+		name string
+		get  func(Config) time.Duration
+		want time.Duration
+	}{
+		{"SDLC_INDEX_INTERVAL", func(c Config) time.Duration { return c.IndexInterval }, 5 * time.Minute},
+		{"SDLC_INDEX_POLL_INTERVAL", func(c Config) time.Duration { return c.IndexPollInterval }, 15 * time.Second},
+		{"SDLC_REPO_REF_SYNC_INTERVAL", func(c Config) time.Duration { return c.RepoRefSyncInterval }, 5 * time.Minute},
+		{"SDLC_INSTALLATION_SYNC_INTERVAL", func(c Config) time.Duration { return c.InstallationSyncInterval }, 5 * time.Minute},
+	}
+	for _, v := range vars {
+		t.Run(v.name+" не задана", func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv(v.name, "x")
+			os.Unsetenv(v.name)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.get(c); got != v.want {
+				t.Fatalf("%s не задана: %s, ждали %s", v.name, got, v.want)
+			}
+		})
+		t.Run(v.name+" пустая", func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv(v.name, "")
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.get(c); got != v.want {
+				t.Fatalf("%s пустая: %s, ждали %s", v.name, got, v.want)
+			}
+		})
+		t.Run(v.name+" не длительность", func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv(v.name, "abc")
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), v.name) {
+				t.Fatalf("%s=abc: ошибка без имени переменной: %v", v.name, err)
+			}
+		})
+	}
+
+	for _, ref := range []string{"", "unset"} {
+		t.Run("период PR идёт за SDLC_INDEX_INTERVAL, SDLC_REPO_REF_SYNC_INTERVAL="+ref, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+			t.Setenv("SDLC_INDEX_INTERVAL", "10m")
+			t.Setenv("SDLC_REPO_REF_SYNC_INTERVAL", "")
+			if ref == "unset" {
+				os.Unsetenv("SDLC_REPO_REF_SYNC_INTERVAL")
+			}
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.RepoRefSyncInterval != 10*time.Minute {
+				t.Fatalf("период PR %s, ждали 10m за SDLC_INDEX_INTERVAL", c.RepoRefSyncInterval)
+			}
+		})
+	}
+	t.Run("свой период PR не трогает SDLC_INDEX_INTERVAL", func(t *testing.T) {
+		t.Setenv("SDLC_DATABASE_URL", testDatabaseURL)
+		t.Setenv("SDLC_INDEX_INTERVAL", "10m")
+		t.Setenv("SDLC_REPO_REF_SYNC_INTERVAL", "1m")
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RepoRefSyncInterval != time.Minute || c.IndexInterval != 10*time.Minute {
+			t.Fatalf("периоды: PR %s, индексация %s", c.RepoRefSyncInterval, c.IndexInterval)
+		}
+	})
 }

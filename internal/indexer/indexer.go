@@ -175,9 +175,10 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 		src, err := ix.source.ForRepository(ctx, credentialsOf(t.CredentialRef, t.InstallationID, t.ProjectInstallationID, t.ProjectCredentialRef))
 		if err != nil {
 			// Недоступные учётные данные одного проекта не должны
-			// останавливать обход остальных.
-			ix.log.Warn("учётные данные репозитория не разрешились",
-				"repository", t.Repository(), "error", err)
+			// останавливать обход остальных. В лог — один раз на причину,
+			// как и нечитаемая голова (CLAB-395): снятая установка без
+			// вебхука иначе писала бы Warn на каждом проходе.
+			ix.logCredentialsError(t.Repository(), err)
 			// Без учётных данных не читается ни одна ветка: до головы дело
 			// не дошло, но для знания проекта это тот же провал чтения.
 			for _, branch := range t.Branches {
@@ -187,6 +188,7 @@ func (ix *Indexer) Enqueue(ctx context.Context) (int, error) {
 			}
 			continue
 		}
+		delete(ix.headErrors, credentialsKey(t.Repository()))
 		for _, branch := range t.Branches {
 			head, err := src.Head(ctx, Repo{t.Owner, t.Name}, branch)
 			if err != nil {
@@ -255,6 +257,24 @@ func (ix *Indexer) logHeadError(repository, branch string, err error) string {
 	ix.log.Warn("голова ветки не прочитана",
 		"repository", repository, "branch", branch, "error", err, "hint", hint)
 	return hint
+}
+
+// credentialsKey — ключ жалобы на учётные данные в headErrors: у
+// репозитория она одна на все ветки.
+func credentialsKey(repository string) string { return repository + "#credentials" }
+
+// logCredentialsError — та же дедупликация, что у logHeadError: прежняя
+// причина уходит в debug, новая — в warn.
+func (ix *Indexer) logCredentialsError(repository string, err error) {
+	key, message := credentialsKey(repository), err.Error()
+	if ix.headErrors[key] == message {
+		ix.log.Debug("учётные данные репозитория по-прежнему не разрешаются",
+			"repository", repository, "error", err)
+		return
+	}
+	ix.headErrors[key] = message
+	ix.log.Warn("учётные данные репозитория не разрешились",
+		"repository", repository, "error", err)
 }
 
 // RunNext забирает из очереди один прогон и исполняет его.
