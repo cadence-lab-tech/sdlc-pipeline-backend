@@ -433,6 +433,22 @@ func (a *Auth) AllowedRoles(ctx context.Context, id Identity, projectID uuid.UUI
 	return intersectRoles(memberRoles(grants), fromToken), nil
 }
 
+// Actor — актор для права этапа (решение 0072): уровень и набор ролей в
+// проекте задачи, вид токена. Считается один раз на запрос; транспорты
+// передают его движку, а не сравнивают уровни и роли сами. В режиме
+// заголовка уровень максимальный, и право этапа не ограничивает ничего.
+func (a *Auth) Actor(ctx context.Context, id Identity, projectID uuid.UUID) (Actor, error) {
+	level, err := a.Level(ctx, id, projectID)
+	if err != nil {
+		return Actor{}, err
+	}
+	roles, err := a.AllowedRoles(ctx, id, projectID)
+	if err != nil {
+		return Actor{}, err
+	}
+	return Actor{Principal: id.Principal, Level: level, Roles: roles, Bound: a.Bound(id)}, nil
+}
+
 // memberRoles сводит пути участия к одному набору: nil — любые роли.
 func memberRoles(grants []postgres.RoleGrant) []string {
 	union := []string{}

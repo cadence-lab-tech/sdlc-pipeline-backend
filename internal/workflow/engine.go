@@ -8,7 +8,6 @@ package workflow
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -97,6 +96,67 @@ type TransitionPreview struct {
 	Unavailable string        `json:"unavailable,omitempty"`
 	Allowed     bool          `json:"allowed"`
 	Gates       []GateOutcome `json:"gates"`
+	// Право того, кто спрашивает (решение 0072, п. 9): вправе ли он
+	// запросить этот переход, и почему нет. Гейты и выключенный этап здесь
+	// не учитываются — это Allowed и Unavailable. Только в ответах с
+	// актором (PreviewFor); прочие ответы поля не несут.
+	ActorMay  *bool        `json:"actor_may,omitempty"`
+	ActorDeny *ActorDenial `json:"actor_deny,omitempty"`
+}
+
+// ActorDenial — почему актору нельзя: код ошибки ответа (forbidden,
+// invalid_input), код причины права этапа (details.reason) и текст — те же,
+// что вернул бы сам запрос.
+type ActorDenial struct {
+	Code    string `json:"code"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message"`
+}
+
+func denialOf(err error) *ActorDenial {
+	e := apperr.As(err)
+	d := &ActorDenial{Code: string(e.Code), Message: e.Message}
+	if m, ok := e.Details.(map[string]any); ok {
+		d.Reason, _ = m["reason"].(string)
+	}
+	return d
+}
+
+// actorVerdicts — вердикты, которые человек выносит руками, в порядке
+// ответа actor_decisions.
+var actorVerdicts = []string{domain.GateResultPassed, domain.GateResultFailed, domain.GateResultWaived}
+
+// withActor заполняет право актора у перехода и его гейтов: те же
+// mayTransition и mayDecide, что у ExecuteAs и DecideGateAs, на тех же
+// фактах — предсказание и исход запроса не расходятся.
+func withActor(p *TransitionPreview, actor Actor, task domain.Task, run domain.StageRun, t domain.Transition, stageRole string) {
+	_, err := mayTransition(actor, task, t, stageRole)
+	may := err == nil
+	p.ActorMay = &may
+	if err != nil {
+		p.ActorDeny = denialOf(err)
+	}
+	for i := range p.Gates {
+		gate := t.Gates[i]
+		var first error
+		decisions := []string{}
+		for _, status := range actorVerdicts {
+			if _, err := mayDecide(actor, actor.Principal, task, run, t, gate, stageRole, status); err != nil {
+				if first == nil {
+					first = err
+				}
+				continue
+			}
+			decisions = append(decisions, status)
+		}
+		ok := len(decisions) > 0
+		p.Gates[i].ActorMayDecide = &ok
+		if ok {
+			p.Gates[i].ActorDecisions = decisions
+		} else {
+			p.Gates[i].ActorDeny = denialOf(first)
+		}
+	}
 }
 
 // TransitionResult — итог выполненного (или заблокированного) перехода.
@@ -114,6 +174,12 @@ type TransitionResult struct {
 // Preview прогоняет гейты всех доступных переходов, ничего не меняя.
 // Это то, что рисует карточка задачи: какие кнопки активны и чего не хватает.
 func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPreview, error) {
+	return e.PreviewFor(ctx, task, nil)
+}
+
+// PreviewFor — Preview с правом актора (actor_may, actor_may_decide); nil —
+// без него, как Preview.
+func (e *Engine) PreviewFor(ctx context.Context, task domain.Task, actor *Actor) ([]TransitionPreview, error) {
 	q := e.store.DB()
 
 	g, err := e.cycleGraph(ctx, q, task.WorkflowID)
@@ -143,32 +209,49 @@ func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPre
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, TransitionPreview{
+		p := TransitionPreview{
 			Key: t.Key, Name: t.Name, Kind: t.Kind,
 			ToStatus: g.byID[t.ToStatusID].Key, LandsIn: land.landsIn(), Skips: land.skipKeys(),
 			Unavailable: land.Unavailable,
 			Allowed:     allowed && land.Unavailable == "", Gates: outcomes,
-		})
+		}
+		if actor != nil {
+			withActor(&p, *actor, task, run, t, g.stageRole(task.StatusID))
+		}
+		out = append(out, p)
 	}
 	return out, nil
 }
 
-// Execute переводит задачу по переходу, если гейты пропускают.
+// Execute переводит задачу по переходу без права этапа — для внутренних
+// путей и тестов движка (UncheckedActor). Транспорты зовут ExecuteAs.
+func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, comment string) (TransitionResult, error) {
+	return e.ExecuteAs(ctx, taskKey, transitionKey, UncheckedActor(actor, nil), comment)
+}
+
+// ExecuteBound — Execute с привязкой токена задачи (Auth.Bound): исполнитель
+// этапа двигает только свою задачу и только вперёд или возвратом (решение
+// человека к 0049). Права этапа нет (UncheckedActor): транспорты зовут
+// ExecuteAs с актором, собранным Auth.Actor.
+func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, bound *TaskBinding, comment string) (TransitionResult, error) {
+	return e.ExecuteAs(ctx, taskKey, transitionKey, UncheckedActor(actor, bound), comment)
+}
+
+// ExecuteAs переводит задачу по переходу, если актору хватает права и гейты
+// пропускают.
 //
 // Всё идёт одной транзакцией под блокировкой строки задачи: иначе два
 // одновременных запроса прогонят гейты на одном состоянии и переведут задачу
 // дважды. Результаты гейтов пишутся в любом случае — заблокированный переход
 // должен оставить в базе объяснение, почему он не состоялся.
-func (e *Engine) Execute(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, comment string) (TransitionResult, error) {
-	return e.ExecuteBound(ctx, taskKey, transitionKey, actor, nil, comment)
-}
-
-// ExecuteBound — Execute с привязкой токена задачи (Auth.Bound): исполнитель
-// этапа двигает только свою задачу и только вперёд или возвратом (решение
-// человека к 0049). nil — переход человека или агента с личным токеном,
-// правила те же, что у Execute. Транспорты зовут его, а не Execute.
-func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string, actor uuid.UUID, bound *TaskBinding, comment string) (TransitionResult, error) {
+//
+// Порядок отказов (решение 0072): переход не из текущего статуса
+// (transition_not_allowed) → право актора (403: рамка токена задачи или
+// право этапа; статус и его роль читаются под блокировкой) → выключенный
+// этап → гейты (409).
+func (e *Engine) ExecuteAs(ctx context.Context, taskKey, transitionKey string, who Actor, comment string) (TransitionResult, error) {
 	res := TransitionResult{Skips: []string{}}
+	actor := who.Principal.ID
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
@@ -182,14 +265,8 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 		if err != nil {
 			return err
 		}
-		if transition.FromStatusID != nil && *transition.FromStatusID != task.StatusID {
-			return apperr.New(apperr.CodeTransitionNotAllowed,
-				"переход %q недоступен из статуса %q", transitionKey, task.StatusKey)
-		}
-		if bound != nil {
-			if err := executorTransition(bound, task, transition); err != nil {
-				return err
-			}
+		if err := availableFrom(task, transition); err != nil {
+			return err
 		}
 
 		// Куда встанет задача, решает её выбор этапов под той же блокировкой
@@ -197,8 +274,12 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 		// видит либо прежний набор, либо новый целиком. Возврат в
 		// выключенный этап отбивается до гейтов — иначе в gate_results лёг бы
 		// след и завелась бы перепроверка перехода, который не состоится.
+		// Тот же граф даёт основную роль статуса для права актора.
 		g, err := e.cycleGraph(ctx, tx, task.WorkflowID)
 		if err != nil {
+			return err
+		}
+		if _, err := mayTransition(who, task, transition, g.stageRole(task.StatusID)); err != nil {
 			return err
 		}
 		land, err := planLanding(g, storedChoice(task.OptionalStages), transition)
@@ -327,6 +408,42 @@ func (e *Engine) ExecuteBound(ctx context.Context, taskKey, transitionKey string
 	return res, err
 }
 
+// availableFrom — переход идёт из текущего статуса задачи или из любого.
+func availableFrom(task domain.Task, t domain.Transition) error {
+	if t.FromStatusID != nil && *t.FromStatusID != task.StatusID {
+		return apperr.New(apperr.CodeTransitionNotAllowed,
+			"переход %q недоступен из статуса %q", t.Key, task.StatusKey)
+	}
+	return nil
+}
+
+// MayTransition — предпроверка права актора на переход без блокировки и
+// побочных эффектов, теми же availableFrom и mayTransition, что у
+// ExecuteAs. Нужна там, где запрос перехода делает что-то до него: MCP
+// sdlc_request_transition сдаёт артефакты, и отказ по праву, пришедший
+// после сдачи, оставил бы их записанными. ExecuteAs проверяет право
+// повторно под блокировкой задачи.
+func (e *Engine) MayTransition(ctx context.Context, taskKey, transitionKey string, actor Actor) error {
+	q := e.store.DB()
+	task, err := e.store.GetTaskByKey(ctx, q, taskKey)
+	if err != nil {
+		return err
+	}
+	transition, err := e.store.GetTransitionByKey(ctx, q, task.WorkflowID, transitionKey)
+	if err != nil {
+		return err
+	}
+	if err := availableFrom(task, transition); err != nil {
+		return err
+	}
+	stageRole, err := e.stageRoleOf(ctx, q, task.StatusID)
+	if err != nil {
+		return err
+	}
+	_, err = mayTransition(actor, task, transition, stageRole)
+	return err
+}
+
 // finishSemantics переводит вид перехода в то, чем закончилась попытка этапа.
 //
 // Откат — это не провал этапа: ревьюер, нашедший проблему, свою работу сделал.
@@ -404,10 +521,8 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 	return stage, all, nil
 }
 
-// DecideGate записывает решение человека или агента по гейту.
-//
-// Само по себе решение задачу не двигает: переход остаётся отдельным действием,
-// потому что гейтов на переходе несколько и закрывать их можно в любом порядке.
+// DecideGate записывает решение по гейту без права этапа — для внутренних
+// путей и тестов движка (UncheckedActor). Транспорты зовут DecideGateAs.
 //
 // bound — привязка токена задачи (Auth.Bound), nil у людей и личных токенов.
 // Исполнитель этапа решает только passed по чек-листу своего этапа, а гейты
@@ -415,16 +530,30 @@ func (e *Engine) artifacts(ctx context.Context, q postgres.Querier, task domain.
 // перепроверок, stage_time_limit) не закрывает, даже если держатель аренды —
 // человек.
 func (e *Engine) DecideGate(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage) (GateOutcome, error) {
-	return e.DecideGateSeen(ctx, taskKey, transitionKey, gateKey, actor, bound, status, details, nil)
+	return e.DecideGateAs(ctx, taskKey, transitionKey, gateKey, UncheckedActor(actor, bound), status, details, nil)
 }
 
-// DecideGateSeen — DecideGate с условием сверки (CLAB-326): seen — id
-// последнего артефакта текущего этапа, который видел решающий, "" — «на
-// этапе артефактов не было». Последний артефакт этапа под блокировкой задачи
-// другой — 409 conflict, решение не пишется: человек решал бы о том, чего не
-// видел (решение 0042). nil — условия нет, поведение прежнее.
+// DecideGateSeen — DecideGate с условием сверки (CLAB-326), тоже без права
+// этапа.
 func (e *Engine) DecideGateSeen(ctx context.Context, taskKey, transitionKey, gateKey string, actor uuid.UUID, bound *TaskBinding, status string, details json.RawMessage, seen *string) (GateOutcome, error) {
+	return e.DecideGateAs(ctx, taskKey, transitionKey, gateKey, UncheckedActor(actor, bound), status, details, seen)
+}
+
+// DecideGateAs записывает решение актора по гейту.
+//
+// Само по себе решение задачу не двигает: переход остаётся отдельным действием,
+// потому что гейтов на переходе несколько и закрывать их можно в любом порядке.
+//
+// Право (mayDecide) считается под блокировкой задачи: рамка токена задачи,
+// право этапа (решение 0072), вид принципала у гейтов, которые решает только
+// человек. seen — условие сверки (CLAB-326): id последнего артефакта
+// текущего этапа, который видел решающий, "" — «на этапе артефактов не
+// было». Последний артефакт этапа под блокировкой задачи другой — 409
+// conflict, решение не пишется: человек решал бы о том, чего не видел
+// (решение 0042). nil — условия нет. Право (403) проверяется раньше сверки.
+func (e *Engine) DecideGateAs(ctx context.Context, taskKey, transitionKey, gateKey string, who Actor, status string, details json.RawMessage, seen *string) (GateOutcome, error) {
 	var out GateOutcome
+	actor := who.Principal.ID
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
@@ -452,38 +581,19 @@ func (e *Engine) DecideGateSeen(ctx context.Context, taskKey, transitionKey, gat
 			return err
 		}
 
-		rule, onlyHuman := humanOnly(*gate)
-
-		// Токен задачи апрув не ставит, даже если аренду держит человек
-		// (/clab-run): проверка по виду токена, а не только принципала.
-		if bound != nil && onlyHuman {
-			return executorRefused(bound, fmt.Sprintf("гейт %q закрывает человек", gate.Key))
-		}
-		if bound != nil {
-			if err := executorGate(bound, task, run, transition, *gate, status); err != nil {
+		// Вид принципала у гейтов, которые решает только человек, читается
+		// из базы, а не берётся из запроса.
+		principal := who.Principal
+		if _, onlyHuman := humanOnly(*gate); onlyHuman {
+			if principal, err = e.store.GetPrincipal(ctx, tx, actor); err != nil {
 				return err
 			}
 		}
-
-		// Апрув человека ставит человек. Агент, представившийся человеком,
-		// в режиме токенов не пройдёт аутентификацию; в режиме заголовка
-		// это защита от случайного самоапрува агентом, а не от злого умысла.
-		if onlyHuman {
-			who, err := e.store.GetPrincipal(ctx, tx, actor)
-			if err != nil {
-				return err
-			}
-			if who.Kind != domain.PrincipalUser {
-				return apperr.Forbidden("гейт %q закрывает человек, а не %s %q",
-					gate.Key, who.Kind, who.Handle)
-			}
-			if rule.waiveOnly && status != domain.GateResultWaived {
-				return apperr.InvalidInput(
-					"по гейту %q вердикт выносит движок; человек может только снять его: "+
-						"status waived, а не %q", gate.Key, status)
-			}
+		stageRole, err := e.stageRoleOf(ctx, tx, task.StatusID)
+		if err != nil {
+			return err
 		}
-		if err := enteredVia(task, run, transition, *gate); err != nil {
+		if _, err := mayDecide(who, principal, task, run, transition, *gate, stageRole, status); err != nil {
 			return err
 		}
 		if seen != nil {

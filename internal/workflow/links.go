@@ -147,11 +147,17 @@ func (e *Engine) Drift(ctx context.Context, taskKey string, states []string) (Dr
 
 // CheckGates — вердикт гейтов конкретного перехода без побочных эффектов.
 func (e *Engine) CheckGates(ctx context.Context, taskKey, transitionKey string) (TransitionPreview, error) {
+	return e.CheckGatesFor(ctx, taskKey, transitionKey, nil)
+}
+
+// CheckGatesFor — CheckGates с правом актора (actor_may, actor_may_decide);
+// nil — без него.
+func (e *Engine) CheckGatesFor(ctx context.Context, taskKey, transitionKey string, actor *Actor) (TransitionPreview, error) {
 	task, err := e.store.GetTaskByKey(ctx, e.store.DB(), taskKey)
 	if err != nil {
 		return TransitionPreview{}, err
 	}
-	previews, err := e.Preview(ctx, task)
+	previews, err := e.PreviewFor(ctx, task, actor)
 	if err != nil {
 		return TransitionPreview{}, err
 	}

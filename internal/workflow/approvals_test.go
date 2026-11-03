@@ -131,6 +131,11 @@ func newApprovalsWorld(t *testing.T) approvalsWorld {
 	return approvalsWorld{t: t, ctx: ctx, store: store, engine: engine, system: system, human: human, other: other, pid: project.ID}
 }
 
+// lead — сопровождающий для «Ждут меня»: видит гейты всего проекта.
+func (w approvalsWorld) lead() Actor {
+	return Actor{Principal: w.human, Level: domain.MemberMaintainer}
+}
+
 func (w approvalsWorld) task(typ, title string, moves ...string) string {
 	w.t.Helper()
 	task, err := w.engine.CreateTask(w.ctx, "SDLC", w.system.ID, CreateTaskInput{
@@ -194,7 +199,7 @@ func (w approvalsWorld) lease(key string, held bool) {
 // list — элементы выборки строками «КЛЮЧ переход/гейт».
 func (w approvalsWorld) list() []string {
 	w.t.Helper()
-	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 0)
+	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), 0)
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -283,7 +288,7 @@ func TestApprovalsTwoCycles(t *testing.T) {
 
 	// Элемент несёт задачу, переход с подписью статуса, гейт и прогон с
 	// последним артефактом этапа.
-	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 0)
+	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,17 +322,17 @@ func TestApprovalsTwoCycles(t *testing.T) {
 	}
 
 	// Предел и признак обрезки.
-	cut, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 2)
+	cut, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), 2)
 	if err != nil || len(cut.Approvals) != 2 || !cut.Truncated {
 		t.Fatalf("предел 2: %+v %v", cut, err)
 	}
-	full, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 500)
+	full, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), 500)
 	if err != nil || full.Truncated {
 		t.Fatalf("предел сверху: %+v %v", full, err)
 	}
 
 	// Без права решать — пусто и признак.
-	none, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, false, 0)
+	none, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, Actor{Principal: w.human, Level: domain.MemberViewer}, 0)
 	if err != nil || none.CanDecide || none.Approvals == nil || len(none.Approvals) != 0 {
 		t.Fatalf("без права: %+v %v", none, err)
 	}
@@ -358,7 +363,7 @@ func TestApprovalsSkipsTaskWithoutRun(t *testing.T) {
 		t.Fatalf("выборка:\n%v\nwant\n%v", got, want)
 	}
 	// Пропущенная задача не попадает и в признак обрезки.
-	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, 1)
+	got, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), 1)
 	if err != nil || got.Truncated || len(got.Approvals) != 1 {
 		t.Fatalf("предел 1 без обрезки: %+v %v", got, err)
 	}
@@ -395,7 +400,7 @@ func TestApprovalsQueriesBounded(t *testing.T) {
 	w := newApprovalsWorld(t)
 	count := func() int {
 		q := &countingQ{Querier: w.store.DB()}
-		if _, err := w.engine.Approvals(w.ctx, q, w.pid, true, 0); err != nil {
+		if _, err := w.engine.Approvals(w.ctx, q, w.pid, w.lead(), 0); err != nil {
 			t.Fatal(err)
 		}
 		return q.n
@@ -509,7 +514,7 @@ func TestTasksAwaitingApproval(t *testing.T) {
 			}
 		}
 	}
-	approvals, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, true, ApprovalsMaxLimit)
+	approvals, err := w.engine.Approvals(w.ctx, w.store.DB(), w.pid, w.lead(), ApprovalsMaxLimit)
 	if err != nil {
 		t.Fatal(err)
 	}

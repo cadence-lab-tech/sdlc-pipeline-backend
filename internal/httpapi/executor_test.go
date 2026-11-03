@@ -209,12 +209,13 @@ func TestExecutorOverREST(t *testing.T) {
 	if code, _ := decide(tm, "SDLC-3", "analysis_done", "selfhosted", "passed"); code != http.StatusForbidden {
 		t.Errorf("чек-лист чужой задачи: %d", code)
 	}
-	// Тот же человек личным токеном — апрув проходит; агент — 403 по уровню, как раньше.
+	// Тот же человек личным токеном — апрув проходит. Агент личным токеном
+	// отмечает чек-лист этапа своей роли (решение 0072, CLAB-379): рамка
+	// токена задачи на него не действует, порог решения — agent.
 	if code, body := decide(alice, "SDLC-1", "analysis_done", "human_approval", "passed"); code != http.StatusOK {
 		t.Errorf("апрув личным токеном: %d %v", code, body)
 	}
-	code, body := decide(pool, "SDLC-1", "analysis_done", "selfhosted", "passed")
-	if e, _ := body["error"].(map[string]any); code != http.StatusForbidden || e["message"] != "нужен уровень maintainer, а есть agent" {
+	if code, body := decide(pool, "SDLC-1", "analysis_done", "selfhosted", "passed"); code != http.StatusOK {
 		t.Errorf("чек-лист личным токеном агента: %d %v", code, body)
 	}
 

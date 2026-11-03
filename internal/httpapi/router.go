@@ -313,13 +313,15 @@ func (s *Server) Handler() http.Handler {
 		v1.POST("/tasks/:taskKey/attachments", s.uploadDeadline(), s.limitUpload(), viewer, s.attachFile)
 
 		v1.GET("/tasks/:taskKey/transitions", viewer, s.listTransitions)
+		// Переход и решение по гейту — порог agent, дальше решает движок
+		// (решение 0072): agent — на этапе своей роли, maintainer и выше —
+		// всё; human_approval движок дополнительно требует от человека, а не
+		// агента. Исполнитель этапа токеном задачи двигает свою задачу вперёд
+		// или возвратом и отмечает только чек-лист своего этапа (0049). Гейт
+		// закрывается отдельно от перехода: на переходе их несколько и
+		// закрывать их можно в любом порядке и разными людьми.
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey", agent, s.executeTransition)
-		// Гейт закрывается отдельно от перехода: на переходе их несколько и
-		// закрывать их можно в любом порядке и разными людьми. Решение по
-		// гейту — за сопровождающим; human_approval движок дополнительно
-		// требует человека, а не агента. Исполнитель этапа токеном задачи
-		// отмечает только чек-лист своего этапа (guardDecision, DecideGate).
-		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", s.guardDecision(), s.decideGate)
+		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", agent, s.decideGate)
 
 		v1.GET("/workflows/:workflowID", viewer, s.getWorkflowVersion)
 		// Типы задач правятся только у черновика: у активной версии по ним уже
