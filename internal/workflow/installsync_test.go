@@ -477,3 +477,71 @@ func TestInstallationSyncWithoutInstallationsMakesNoRequests(t *testing.T) {
 		t.Fatalf("без подключённых установок список запрошен %d раз", n)
 	}
 }
+
+// AC-5, перепроверки: сбой запроса, которым подтверждается снятие установки
+// или пропажа репозитория, не считается подтверждением. Ложное «снята»
+// останавливает индексацию клиента, а сбой (5xx, лимит, обрыв) не доказывает,
+// что GitHub ответил 404 (CLAB-395, тестировщик).
+func TestInstallationSyncFailedRecheckConfirmsNothing(t *testing.T) {
+	failures := []struct {
+		name string
+		code int
+	}{
+		{"5xx", http.StatusBadGateway},
+		{"429", http.StatusTooManyRequests},
+		{"403 по лимиту", http.StatusForbidden},
+		{"сеть", githubtest.Drop},
+	}
+	for _, tc := range failures {
+		t.Run("установка: "+tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.connect(631) // у GitHub её нет ни в списке, ни по идентификатору
+			f.repo(631, "acme/a")
+			before := f.snapshot()
+			f.gh.Fail = map[string]int{githubtest.KindGet: tc.code}
+			changes, err := f.engine.SyncInstallations(f.ctx, f.src)
+			if err == nil {
+				t.Fatal("сбой подтверждения снятия не дал ошибки прохода")
+			}
+			if len(changes) != 0 || f.snapshot() != before {
+				t.Fatalf("установка снята по сбою запроса: %s", changeSet(changes))
+			}
+			if f.installation(631).RemovedAt != nil {
+				t.Fatal("removed_at проставлен по сбою")
+			}
+		})
+		t.Run("репозиторий: "+tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.connect(632)
+			f.repo(632, "acme/b")
+			f.gh.Installations[632] = &githubtest.Installation{Repos: []string{"acme/other"}}
+			before := f.snapshot()
+			f.gh.Fail = map[string]int{githubtest.KindRepo: tc.code}
+			changes, err := f.engine.SyncInstallations(f.ctx, f.src)
+			if err == nil {
+				t.Fatal("сбой перепроверки репозитория не дал ошибки прохода")
+			}
+			if len(changes) != 0 || f.snapshot() != before {
+				t.Fatalf("репозиторий помечен по сбою запроса: %s", changeSet(changes))
+			}
+			if f.unavailableAt("acme/b") != nil {
+				t.Fatal("unavailable_at проставлен по сбою")
+			}
+		})
+		t.Run("список репозиториев: "+tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.connect(633)
+			f.repo(633, "acme/c")
+			f.gh.Installations[633] = &githubtest.Installation{Repos: []string{"acme/other"}}
+			before := f.snapshot()
+			f.gh.Fail = map[string]int{githubtest.KindRepos: tc.code}
+			changes, err := f.engine.SyncInstallations(f.ctx, f.src)
+			if err == nil {
+				t.Fatal("сбой списка репозиториев не дал ошибки прохода")
+			}
+			if len(changes) != 0 || f.snapshot() != before {
+				t.Fatalf("база изменилась по сбою списка репозиториев: %s", changeSet(changes))
+			}
+		})
+	}
+}
