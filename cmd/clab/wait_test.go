@@ -38,10 +38,25 @@ const waitRoot = "bootstrap-token-clab-323-0123456789"
 var fastTiming = waitTiming{longPoll: 25 * time.Second, gap: 50 * time.Millisecond,
 	poll: 300 * time.Millisecond, retryFirst: 50 * time.Millisecond, retryMax: 200 * time.Millisecond, recheck: 4}
 
-type dbCounter struct{ n atomic.Int64 }
+type dbCounter struct {
+	n atomic.Int64
+	// Ловушка на запрос (CLAB-390): хук между запросами одной ручки.
+	trap atomic.Pointer[queryTrap]
+}
 
-func (d *dbCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+// queryTrap срабатывает один раз, синхронно, в горутине обработчика: перед
+// первым запросом с marker в тексте. Так хук ложится ровно между
+// запросами одной ручки.
+type queryTrap struct {
+	marker string
+	fire   func()
+}
+
+func (d *dbCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	d.n.Add(1)
+	if tr := d.trap.Load(); tr != nil && strings.Contains(data.SQL, tr.marker) && d.trap.CompareAndSwap(tr, nil) {
+		tr.fire()
+	}
 	return ctx
 }
 func (d *dbCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
@@ -54,7 +69,11 @@ type waitWorld struct {
 	requests atomic.Int64
 }
 
-func newWaitWorld(t *testing.T) *waitWorld {
+func newWaitWorld(t *testing.T) *waitWorld { return newWaitWorldPool(t, 0) }
+
+// newWaitWorldPool — мир с пулом сервера в maxConns соединений (0 — как
+// есть): с одним соединением любой второй захват внутри обработчика виснет.
+func newWaitWorldPool(t *testing.T, maxConns int32) *waitWorld {
 	t.Helper()
 	testdb.Store(t)
 	w := &waitWorld{t: t, db: &dbCounter{}}
@@ -63,6 +82,9 @@ func newWaitWorld(t *testing.T) *waitWorld {
 		t.Fatal(err)
 	}
 	pc.ConnConfig.Tracer = w.db
+	if maxConns > 0 {
+		pc.MaxConns = maxConns
+	}
 	pool, err := pgxpool.NewWithConfig(context.Background(), pc)
 	if err != nil {
 		t.Fatal(err)

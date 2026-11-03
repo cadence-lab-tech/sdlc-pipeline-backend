@@ -303,7 +303,24 @@ func (s *Server) requireAdmin() gin.HandlerFunc {
 	}
 }
 
+// projectOfKey — где в контексте запроса лежит найденный проект: путь на
+// запрос один, и проект по нему не меняется, а guard, уровень и ручка
+// спрашивали бы базу каждый раз заново (CLAB-390: ручке карточки лишний
+// запрос задачи стоил целого прохода по её репозиториям).
+const projectOfKey = "clab.project_of"
+
 func (s *Server) projectOf(c *gin.Context) (uuid.UUID, error) {
+	if id, ok := c.Get(projectOfKey); ok {
+		return id.(uuid.UUID), nil
+	}
+	id, err := s.lookupProject(c)
+	if err == nil {
+		c.Set(projectOfKey, id)
+	}
+	return id, err
+}
+
+func (s *Server) lookupProject(c *gin.Context) (uuid.UUID, error) {
 	ctx, q := c.Request.Context(), s.store.DB()
 	switch {
 	case c.Param("projectKey") != "":
