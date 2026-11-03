@@ -379,7 +379,14 @@ func (s *Server) getTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	transitions, err := s.engine.Preview(ctx, task)
+	// Переходы карточки — тот же предпросмотр, что GET …/transitions, с
+	// правом того, кто смотрит (решение 0072, п. 9).
+	who, err := s.auth.Actor(ctx, identity(c), task.ProjectID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	transitions, err := s.engine.PreviewFor(ctx, task, &who)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -555,7 +562,14 @@ func (s *Server) listTransitions(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	transitions, err := s.engine.Preview(c.Request.Context(), task)
+	// actor_may и actor_may_decide (решение 0072, п. 9): право того, кто
+	// спрашивает, считает движок той же функцией, что и сам запрос.
+	who, err := s.auth.Actor(c.Request.Context(), identity(c), task.ProjectID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	transitions, err := s.engine.PreviewFor(c.Request.Context(), task, &who)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -583,8 +597,13 @@ func (s *Server) executeTransition(c *gin.Context) {
 		return
 	}
 
-	res, err := s.engine.ExecuteBound(c.Request.Context(),
-		c.Param("taskKey"), c.Param("transitionKey"), actor(c).ID, s.auth.Bound(identity(c)), req.Comment)
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	res, err := s.engine.ExecuteAs(c.Request.Context(),
+		c.Param("taskKey"), c.Param("transitionKey"), who, req.Comment)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -631,9 +650,14 @@ func (s *Server) decideGate(c *gin.Context) {
 		req.Details = json.RawMessage(`{}`)
 	}
 
-	out, err := s.engine.DecideGateSeen(c.Request.Context(),
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	out, err := s.engine.DecideGateAs(c.Request.Context(),
 		c.Param("taskKey"), c.Param("transitionKey"), c.Param("gateKey"),
-		actor(c).ID, s.auth.Bound(identity(c)), req.Status, req.Details, req.SeenArtifactID)
+		who, req.Status, req.Details, req.SeenArtifactID)
 	if err != nil {
 		fail(c, s.log, err)
 		return

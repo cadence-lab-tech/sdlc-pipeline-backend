@@ -133,6 +133,20 @@ func (s *Server) allow(ctx context.Context, need domain.MemberRole) error {
 	return s.auth.Require(ctx, identity(ctx), project.ID, need)
 }
 
+// stageActor — актор для права этапа (решение 0072) в проекте подключения:
+// тул передаёт его движку и сам уровни и роли не сравнивает.
+func (s *Server) stageActor(ctx context.Context) (workflow.Actor, error) {
+	key, err := projectKey(ctx)
+	if err != nil {
+		return workflow.Actor{}, err
+	}
+	project, err := s.store.GetProjectByKey(ctx, s.store.DB(), key)
+	if err != nil {
+		return workflow.Actor{}, err
+	}
+	return s.auth.Actor(ctx, identity(ctx), project.ID)
+}
+
 // allowedRoles — роли специалистов, доступные актору в проекте подключения:
 // рамки участия, суженные токеном (решение 0030).
 func (s *Server) allowedRoles(ctx context.Context) ([]string, error) {

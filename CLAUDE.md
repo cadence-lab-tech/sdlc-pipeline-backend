@@ -147,7 +147,7 @@ MCP-тулы и REST-хендлеры вызывают одни и те же с�
   в `engine.go`): `human_approval` и `attempts_limit` (решение 0061), а
   `agent_review` — только с `max_attempts` в config (CLAB-218). Правило в
   наборе — от гейта, а не от типа (`humanOnly(gate)`): его зовут и
-  `DecideGate`, и пропуск перезаписи `waived` в `ExecuteBound`.
+  `DecideGate`, и пропуск перезаписи `waived` в `ExecuteAs`.
   У `attempts_limit` вердикт выносит движок, человек может лишь снять гейт
   (`waived` — ещё одна попытка), `passed` и `failed` — неверный ввод.
   Номер следующей попытки гейт считает тем же выражением, что `EnterStatus`
@@ -173,12 +173,12 @@ MCP-тулы и REST-хендлеры вызывают одни и те же с�
   человека на переходе входа текущего прогона (`enteredVia` в
   `DecideGate`), до конца этого прогона. Задачу предел не двигает и
   аренду не трогает.
-- **Пропуск выключенного этапа — цепочка внутри `ExecuteBound`, а не
+- **Пропуск выключенного этапа — цепочка внутри `ExecuteAs`, а не
   переходы** (решение 0066, `workflow/optionalstages.go`). Выбор задачи
   (`tasks.optional_stages`, полный набор) и отметка статуса
   (`is_optional`) — данные; обход — единственный исходящий `advance` из
   самого статуса. Куда встанет задача, считает одна функция
-  `planLanding` для `Preview`, `gatesAhead` и `ExecuteBound`: предпросмотр
+  `planLanding` для `Preview`, `gatesAhead` и `ExecuteAs`: предпросмотр
   и переход не расходятся. Гейты вычисляются только у запрошенного
   перехода, у обходных — нет и в `gate_results` не пишутся; у
   пропущенного статуса нет прогона и попытки, след — `stage.skipped`.
@@ -570,8 +570,24 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   перечень с зарегистрированными тулами и `gin.Engine.Routes()`. Внутри
   разрешённого: запись — своя задача и её дети (`RequireWriteCircle`,
   `RequireLink`), гейт — только `passed` по чек-листу своего этапа
-  (`DecideGate` с привязкой), переход — `advance` и `reject`
-  (`ExecuteBound`). Транспорты передают `Auth.Bound`, а не зовут `Execute`.
+  (`DecideGateAs` с привязкой), переход — `advance` и `reject`
+  (`ExecuteAs`). Транспорты передают актора `Auth.Actor` (в нём и
+  `Auth.Bound`), а не зовут `Execute`.
+- **Право этапа — одна функция движка** (решение 0072, CLAB-379,
+  `workflow/stage_authority.go`). Участник уровня `agent` на этапе своей
+  роли (основная роль текущего статуса ∈ `Auth.AllowedRoles`) решает
+  `human_approval` passed/failed и чек-лист passed и двигает задачу
+  `advance`/`reject`; остальное — `maintainer` и выше. `StageAuthority`
+  чистая; `mayTransition` и `mayDecide` (рамка токена задачи, право этапа,
+  вид принципала у гейтов «только человек») зовут `ExecuteAs`,
+  `DecideGateAs` под блокировкой задачи, предпросмотр (`PreviewFor`:
+  `actor_may`, `actor_may_decide`, `actor_decisions`, `actor_deny`),
+  предпроверка MCP (`MayTransition`, до сдачи артефактов) и «Ждут меня»
+  (`can_decide` элемента): предсказание и исход не расходятся. Порог
+  маршрутов перехода и решения — `agent`, ручки и тулы уровни и роли не
+  сравнивают. `Execute`, `ExecuteBound`, `DecideGate`, `DecideGateSeen` —
+  обёртки без права этапа (`UncheckedActor`) для тестов и внутренних путей;
+  вне тестов их не зовут — держит `TestTransportsUseStageAuthority`.
 - **Роли специалистов выдаёт участие, токен их только сужает**
   ([решение 0030](../docs/decisions/0030-member-roles-github-login-open-projects.md)).
   `project_members.role_keys` и `project_teams.role_keys` ставит администратор

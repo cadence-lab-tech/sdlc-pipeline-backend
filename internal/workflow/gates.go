@@ -45,6 +45,12 @@ type GateOutcome struct {
 	Status   string         `json:"status"`
 	Reason   string         `json:"reason,omitempty"`
 	Details  map[string]any `json:"details,omitempty"`
+	// Право того, кто спрашивает (решение 0072, п. 9): может ли он вынести
+	// по гейту хоть один вердикт, какие именно (passed, failed, waived) и
+	// почему нет. Только в предпросмотре с актором (Engine.PreviewFor).
+	ActorMayDecide *bool        `json:"actor_may_decide,omitempty"`
+	ActorDecisions []string     `json:"actor_decisions,omitempty"`
+	ActorDeny      *ActorDenial `json:"actor_deny,omitempty"`
 }
 
 // Passed — прошёл ли гейт настолько, чтобы не держать переход.

@@ -234,6 +234,20 @@ func (s *Server) level(c *gin.Context) (domain.MemberRole, error) {
 	return s.auth.Level(c.Request.Context(), identity(c), projectID)
 }
 
+// stageActor — актор для права этапа (решение 0072) в проекте из пути: уровень,
+// роли специалистов, привязка токена задачи. Ручка передаёт его движку и
+// сама уровни и роли не сравнивает.
+func (s *Server) stageActor(c *gin.Context) (workflow.Actor, error) {
+	projectID := uuid.Nil
+	if s.auth.Enforced() {
+		var err error
+		if projectID, err = s.projectOf(c); err != nil {
+			return workflow.Actor{}, err
+		}
+	}
+	return s.auth.Actor(c.Request.Context(), identity(c), projectID)
+}
+
 // guard проверяет уровень прав в проекте, к которому относится запрос.
 //
 // Проект вычисляется из пути: ключ проекта, ключ задачи, версия цикла,
@@ -275,20 +289,6 @@ func (s *Server) executorOnly() gin.HandlerFunc {
 			return
 		}
 		c.Next()
-	}
-}
-
-// guardDecision — решение по гейту. Людям и личным токенам — уровень
-// maintainer, как раньше; токену задачи — agent: ему разрешён только
-// чек-лист своего этапа, и это правило проверяет DecideGate.
-func (s *Server) guardDecision() gin.HandlerFunc {
-	maintainer, agent := s.guard(domain.MemberMaintainer), s.guard(domain.MemberAgent)
-	return func(c *gin.Context) {
-		if s.auth.Bound(identity(c)) != nil {
-			agent(c)
-			return
-		}
-		maintainer(c)
 	}
 }
 

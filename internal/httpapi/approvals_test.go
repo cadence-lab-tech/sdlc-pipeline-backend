@@ -8,17 +8,25 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 )
 
-// «Ждут меня» по REST (CLAB-326, AC-13): ответ объектом, решать — с
-// maintainer; ниже — пустой список и can_decide=false.
+// «Ждут меня» по REST (CLAB-326, AC-13): ответ объектом. Зона решений —
+// maintainer и выше весь проект, agent — этапы своих ролей (решение 0072,
+// CLAB-379): участник agent с role_keys = NULL решает на любом этапе с
+// исполнителем, с [] — нигде; viewer — пустой список и can_decide=false.
 func TestListApprovalsByLevel(t *testing.T) {
 	f := newAuditFixture(t)
 	for _, c := range []struct {
 		who       string
 		token     string
 		canDecide bool
-	}{{"администратор", f.root, true}, {"агент", f.bot, false}} {
+	}{
+		{"администратор", f.root, true}, {"агент", f.bot, true},
+		{"agent без ролей", f.memberToken("user:noroles", domain.MemberAgent, []string{}), false},
+		{"viewer", f.memberToken("user:watcher", domain.MemberViewer, nil), false},
+	} {
 		code, body := f.json(http.MethodGet, "/v1/projects/SDLC/approvals", c.token, nil)
 		if code != http.StatusOK {
 			t.Fatalf("%s: %d %v", c.who, code, body)

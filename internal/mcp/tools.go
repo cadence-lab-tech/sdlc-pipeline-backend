@@ -424,7 +424,12 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
-	previews, err := s.engine.Preview(ctx, task)
+	// Переходы — с правом актора, как в sdlc_check_gates (решение 0072).
+	who, err := s.auth.Actor(ctx, identity(ctx), task.ProjectID)
+	if err != nil {
+		return fail(err)
+	}
+	previews, err := s.engine.PreviewFor(ctx, task, &who)
 	if err != nil {
 		return fail(err)
 	}
@@ -743,14 +748,24 @@ func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallT
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
+	// actor_may и actor_may_decide (решение 0072, п. 9) — та же функция
+	// права, что у sdlc_request_transition и решения по гейту.
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
 	if in.Transition != "" {
-		p, err := s.engine.CheckGates(ctx, in.TaskKey, in.Transition)
+		p, err := s.engine.CheckGatesFor(ctx, in.TaskKey, in.Transition, &who)
 		if err != nil {
 			return fail(err)
 		}
 		view := map[string]any{
 			"transition": p.Key, "can_transition": p.Allowed, "gates": p.Gates,
 			"to_status": p.ToStatus, "lands_in": p.LandsIn, "skips": p.Skips,
+			"actor_may": p.ActorMay,
+		}
+		if p.ActorDeny != nil {
+			view["actor_deny"] = p.ActorDeny
 		}
 		if p.Unavailable != "" {
 			view["unavailable"] = p.Unavailable
@@ -762,7 +777,7 @@ func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallT
 	if err != nil {
 		return fail(err)
 	}
-	previews, err := s.engine.Preview(ctx, task)
+	previews, err := s.engine.PreviewFor(ctx, task, &who)
 	if err != nil {
 		return fail(err)
 	}
@@ -795,6 +810,16 @@ func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sd
 	if err != nil {
 		return fail(err)
 	}
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	// Право — до сдачи артефактов (решение 0072): отказанный запрос не
+	// оставляет записанного. ExecuteAs проверяет его ещё раз под
+	// блокировкой задачи.
+	if err := s.engine.MayTransition(ctx, taskKey, in.Transition, who); err != nil {
+		return fail(err)
+	}
 
 	for _, a := range in.Artifacts {
 		title := a.Title
@@ -813,8 +838,7 @@ func (s *Server) requestTransition(ctx context.Context, in transitionInput) (*sd
 	if in.Reason != "" {
 		comment = in.Reason
 	}
-	res, err := s.engine.ExecuteBound(ctx, taskKey, in.Transition, actor(ctx).ID,
-		s.auth.Bound(identity(ctx)), comment)
+	res, err := s.engine.ExecuteAs(ctx, taskKey, in.Transition, who, comment)
 	if err != nil {
 		return fail(err)
 	}

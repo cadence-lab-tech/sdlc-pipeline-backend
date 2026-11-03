@@ -62,8 +62,10 @@ const (
 	ApprovalsMaxLimit     = 200
 )
 
-// Approvals — ответ выборки. CanDecide — вправе ли вызывающий решать гейты
-// человека по уровню (maintainer и выше); без права список пуст.
+// Approvals — ответ выборки. CanDecide — есть ли у вызывающего зона решений
+// вообще: maintainer и выше — весь проект, agent — этапы его ролей (решение
+// 0072), если роль хоть одна; без зоны список пуст. Поле для клиентов
+// прежней версии: решать ли по элементу, говорит его CanDecide.
 type Approvals struct {
 	Approvals []Approval `json:"approvals"`
 	CanDecide bool       `json:"can_decide"`
@@ -77,6 +79,9 @@ type Approval struct {
 	Transition ApprovalTransition `json:"transition"`
 	Gate       GateOutcome        `json:"gate"`
 	StageRun   ApprovalRun        `json:"stage_run"`
+	// Может ли вызывающий вынести по гейту passed — та же mayDecide, что у
+	// самого решения (решение 0072, п. 9).
+	CanDecide bool `json:"can_decide"`
 }
 
 type ApprovalTask struct {
@@ -110,15 +115,33 @@ type ApprovalRun struct {
 	LatestArtifactID *string   `json:"latest_artifact_id"`
 }
 
-// Approvals — гейты проекта, ждущие решения человека.
+// approvalZone — чьи гейты видит актор в «Ждут меня»: весь проект
+// (maintainer и выше), этапы своих ролей (agent) или ничего. Зону agent
+// выражает фильтр выборки (ApprovalFilter), поэтому задачи чужих этапов до
+// вычисления гейтов не доходят и число запросов от них не растёт.
+func approvalZone(actor Actor) (canDecide bool, filter postgres.ApprovalFilter) {
+	switch {
+	case actor.Level.Covers(domain.MemberMaintainer):
+		return true, postgres.ApprovalFilter{}
+	case !actor.Level.Covers(domain.MemberAgent):
+		return false, postgres.ApprovalFilter{}
+	case actor.Roles != nil && len(actor.Roles) == 0:
+		return false, postgres.ApprovalFilter{}
+	}
+	return true, postgres.ApprovalFilter{OwnStage: true, Roles: actor.Roles}
+}
+
+// Approvals — гейты проекта, ждущие решения, в зоне актора.
 //
 // Задачи отбирает один запрос по графу цикла (ApprovalCandidates): дальше
 // идут только те, у чьего статуса есть переход вперёд с блокирующим апрувом
-// или чек-листом. Граф версии читается один раз на версию, гейты — только у
-// таких переходов. Чек-лист при живой аренде прогона в выборку не входит:
-// его, по циклу, отмечает исполнитель этапа, и человеку он достаётся, только
-// когда исполнителя нет.
-func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uuid.UUID, canDecide bool, limit int) (Approvals, error) {
+// или чек-листом, а для agent — ещё и статус с основной ролью из его набора
+// и переход не глобальный. Граф версии читается один раз на версию, гейты —
+// только у таких переходов. Чек-лист при живой аренде прогона в выборку не
+// входит: его, по циклу, отмечает исполнитель этапа, и человеку он
+// достаётся, только когда исполнителя нет.
+func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uuid.UUID, actor Actor, limit int) (Approvals, error) {
+	canDecide, filter := approvalZone(actor)
 	out := Approvals{Approvals: []Approval{}, CanDecide: canDecide}
 	if !canDecide {
 		return out, nil
@@ -128,7 +151,7 @@ func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uu
 	}
 	limit = min(limit, ApprovalsMaxLimit)
 
-	tasks, err := e.store.ApprovalCandidates(ctx, q, projectID, humanGateTypes)
+	tasks, err := e.store.ApprovalCandidates(ctx, q, projectID, humanGateTypes, filter)
 	if err != nil {
 		return out, err
 	}
@@ -139,7 +162,7 @@ func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uu
 		if err != nil {
 			return out, err
 		}
-		items, err := e.taskApprovals(ctx, q, task, g, now)
+		items, err := e.taskApprovals(ctx, q, task, g, now, actor, filter.OwnStage)
 		if err != nil {
 			return out, err
 		}
@@ -154,8 +177,9 @@ func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uu
 	return out, nil
 }
 
-// taskApprovals — элементы выборки одной задачи, по переходам в порядке цикла.
-func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task domain.Task, g cycleGraph, now time.Time) ([]Approval, error) {
+// taskApprovals — элементы выборки одной задачи, по переходам в порядке
+// цикла. ownStage — зона agent: глобальные переходы не показываются.
+func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task domain.Task, g cycleGraph, now time.Time, actor Actor, ownStage bool) ([]Approval, error) {
 	if !hasCandidates(g, task.StatusID, hasBlockingHuman) {
 		return nil, nil
 	}
@@ -192,10 +216,23 @@ func (e *Engine) taskApprovals(ctx context.Context, q postgres.Querier, task dom
 	if err != nil {
 		return nil, err
 	}
+	stageRole := g.stageRole(task.StatusID)
 	var out []Approval
 	for _, w := range humanWaits(verdicts, runView.LeaseHeld) {
+		if ownStage && w.Transition.FromStatusID == nil {
+			continue
+		}
+		var canDecide bool
+		for _, gate := range w.Transition.Gates {
+			if gate.Key == w.Gate.GateKey {
+				_, err := mayDecide(actor, actor.Principal, task, run, w.Transition, gate, stageRole, domain.GateResultPassed)
+				canDecide = err == nil
+				break
+			}
+		}
 		out = append(out, Approval{
-			Task: taskView,
+			CanDecide: canDecide,
+			Task:      taskView,
 			Transition: ApprovalTransition{
 				Key: w.Transition.Key, Name: w.Transition.Name, ToStatus: g.byID[w.Transition.ToStatusID].Key,
 				LandsIn: w.Landing.To.Key, LandsInName: w.Landing.To.Name,

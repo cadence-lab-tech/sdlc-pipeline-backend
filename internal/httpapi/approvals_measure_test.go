@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/domain"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
@@ -31,6 +32,8 @@ func TestApprovalsMeasure(t *testing.T) {
 	f := newAuditFixture(t)
 	ctx := context.Background()
 	store := postgres.New(f.pool)
+	analystTok := f.memberToken("user:ana", domain.MemberAgent, []string{"analyst"})
+	developerTok := f.memberToken("user:dev", domain.MemberAgent, []string{"developer"})
 
 	must := func(code int, what string, rec interface{ String() string }) {
 		t.Helper()
@@ -215,13 +218,13 @@ func TestApprovalsMeasure(t *testing.T) {
 		}
 
 		var snap snapshot
-		get := func(name, path string) []byte {
+		getAs := func(name, path, token string) []byte {
 			var times []time.Duration
 			var body []byte
-			f.do("GET", path, f.root, nil) // прогрев
+			f.do("GET", path, token, nil) // прогрев
 			for i := 0; i < 7; i++ {
 				at := time.Now()
-				rec := f.do("GET", path, f.root, nil)
+				rec := f.do("GET", path, token, nil)
 				times = append(times, time.Since(at))
 				if rec.Code != http.StatusOK {
 					t.Fatalf("%s: %d %s", name, rec.Code, rec.Body)
@@ -232,6 +235,7 @@ func TestApprovalsMeasure(t *testing.T) {
 			t.Logf("[%s] %-42s медиана %s, худшее %s", state, name, fmtD(med), fmtD(worst))
 			return body
 		}
+		get := func(name, path string) []byte { return getAs(name, path, f.root) }
 		var list struct {
 			Tasks []struct {
 				Key              string `json:"key"`
@@ -268,6 +272,24 @@ func TestApprovalsMeasure(t *testing.T) {
 		}
 		slices.Sort(snap.approvals)
 		t.Logf("[%s] ждут апрува в списке: %d, в очереди /approvals: %d", state, len(snap.awaiting), len(snap.approvals))
+
+		// Зона agent (CLAB-379, AC-A4): аналитик видит те же гейты этапа
+		// analysis, что сопровождающий; разработчик — ни одного, и чужие
+		// задачи до гейтов не доходят.
+		for _, c := range []struct {
+			name, token string
+			same        bool
+		}{{"approvals agent [analyst]", analystTok, true}, {"approvals agent [developer]", developerTok, false}} {
+			var zone struct {
+				Approvals []json.RawMessage `json:"approvals"`
+			}
+			if err := json.Unmarshal(getAs(c.name, "/v1/projects/SDLC/approvals", c.token), &zone); err != nil {
+				t.Fatal(err)
+			}
+			if c.same && len(zone.Approvals) != len(snap.approvals) || !c.same && len(zone.Approvals) != 0 {
+				t.Errorf("[%s] %s: %d элементов, у сопровождающего %d", state, c.name, len(zone.Approvals), len(snap.approvals))
+			}
+		}
 
 		// План одного вызова с гейтом, у которого есть решения.
 		var pr, pg uuid.UUID
