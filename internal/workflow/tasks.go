@@ -341,9 +341,11 @@ func checkArtifactSchema(kind string, schema json.RawMessage, content []byte) er
 
 type UpdateScopeInput struct {
 	// Ссылки на репозитории проекта: owner/name, name или role_hint.
+	// Расширение области — решение человека (решение 0015, 0072 п. 6):
+	// движок требует уровень не ниже сопровождающего.
 	AddRepositories []string
 	// Репозитории, которые уходят из области; ссылки — те же, что у
-	// AddRepositories. Сужение — решение человека: агентский тул его не
+	// AddRepositories. Сужение — тоже решение человека: тул MCP его не
 	// передаёт, а движок требует уровень не ниже сопровождающего.
 	RemoveRepositories []string
 	// Свойства, которые нужно поменять: JSON-объект, сливаемый с текущими.
@@ -366,7 +368,19 @@ type UpdateScopeInput struct {
 // Сужение идёт раньше расширения: так одним вызовом можно заменить
 // единственный репозиторий однорепозиторной задачи, и пустой область
 // оказывается только посередине, а не на коммите.
+//
+// Область меняет в обе стороны только сопровождающий: расширение — граница,
+// которую не закрывает и самоапрув этапа (решение 0072 п. 6), иначе агент
+// расширил бы область, сдал работу и утвердил её сам. Свойства без
+// репозиториев — уровень agent, как и прежде. Отказ — до транзакции: свойства
+// из того же запроса не применяются.
 func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUID, in UpdateScopeInput) (domain.Task, error) {
+	if len(in.AddRepositories) > 0 && in.Level != "" && !in.Level.Covers(domain.MemberMaintainer) {
+		return domain.Task{}, apperr.Forbidden(
+			"расширить область задачи может сопровождающий проекта: " +
+				"добавить репозиторий в область — решение человека, не агента; " +
+				"опишите нужный репозиторий и причину в артефакте этапа и в отчёте")
+	}
 	if len(in.RemoveRepositories) > 0 && in.Level != "" && !in.Level.Covers(domain.MemberMaintainer) {
 		return domain.Task{}, apperr.Forbidden(
 			"сузить область задачи может сопровождающий проекта: " +

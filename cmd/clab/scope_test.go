@@ -135,3 +135,33 @@ func TestScopeRefusesEmptyChange(t *testing.T) {
 		}
 	}
 }
+
+// CLAB-391, AC-5: расширение области — решение сопровождающего. Отказ 403
+// печатается кодом и текстом сервера без подсказки про --multi-repo, а
+// справка команды называет уровень, как у --remove.
+func TestScopeShowsForbiddenAndNamesMaintainer(t *testing.T) {
+	withJSON(t, false)
+	const refusal = "расширить область задачи может сопровождающий проекта: " +
+		"добавить репозиторий в область — решение человека, не агента"
+	c, _ := newInviteClient(t, http.StatusForbidden,
+		`{"error":{"code":"forbidden","message":"`+refusal+`"}}`)
+	_, _, err := capture(t, func() error {
+		return cmdScope(context.Background(), c, []string{"CLAB-92", "--add", "acme/web", "--reason", "x"})
+	})
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "forbidden" || api.Message != refusal {
+		t.Fatalf("ждали отказ сервера как есть, получили %#v (%v)", api, err)
+	}
+
+	for _, cmd := range commands() {
+		if cmd.name != "scope" {
+			continue
+		}
+		if !strings.Contains(cmd.summary, "maintainer") || !strings.Contains(cmd.usage, "сопровождающий") ||
+			!strings.Contains(cmd.usage, "решение человека") {
+			t.Fatalf("справка scope не называет уровень: %q / %q", cmd.summary, cmd.usage)
+		}
+		return
+	}
+	t.Fatal("команды scope нет в справке")
+}
