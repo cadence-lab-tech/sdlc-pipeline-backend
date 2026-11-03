@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
@@ -282,13 +284,13 @@ func TestUpdateScopeEnablesMultiRepoWithAdd(t *testing.T) {
 
 	// Без multi_repo расширение отбивается, область и свойства целы.
 	_, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
-		AddRepositories: []string{"acme/web"}, Level: domain.MemberAgent,
+		AddRepositories: []string{"acme/web"}, Level: domain.MemberMaintainer,
 	})
 	wantCode(t, err, apperr.CodeScopeExpansionForbidden, "без multi_repo")
 
 	out, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
 		AddRepositories: []string{"acme/web"}, Note: "нужен фронт",
-		Properties: json.RawMessage(`{"multi_repo":true}`), Level: domain.MemberAgent,
+		Properties: json.RawMessage(`{"multi_repo":true}`), Level: domain.MemberMaintainer,
 	})
 	if err != nil {
 		t.Fatalf("расширение с multi_repo: %v", err)
@@ -358,7 +360,7 @@ func TestUpdateScopeMergesProperties(t *testing.T) {
 	// Расширение с неполным куском свойств: multi_repo не теряется.
 	out, err = engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
 		AddRepositories: []string{"acme/web"}, Properties: json.RawMessage(`{"needs_migration":true}`),
-		Level: domain.MemberAgent,
+		Level: domain.MemberMaintainer,
 	})
 	if err != nil {
 		t.Fatalf("расширение с неполными свойствами: %v", err)
@@ -418,7 +420,7 @@ func TestUpdateScopeDisablesMultiRepo(t *testing.T) {
 	store, engine, _, _, system := setupPhase4(t, AuthHeader)
 	task := singleRepoTask(t, ctx, engine, system, `{"multi_repo":true}`)
 	if _, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
-		AddRepositories: []string{"acme/web"}, Level: domain.MemberAgent,
+		AddRepositories: []string{"acme/web"}, Level: domain.MemberMaintainer,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -446,5 +448,64 @@ func TestUpdateScopeDisablesMultiRepo(t *testing.T) {
 	}
 	if names, _ := scopeNames(out); len(names) != 1 || out.MultiRepo() {
 		t.Fatalf("область %v, multi_repo %v", names, out.MultiRepo())
+	}
+}
+
+// CLAB-391, AC-8: расширение области — с уровня maintainer. Отказ agent — до
+// транзакции, свойства из того же вызова не применяются, событий нет; без
+// add_repositories agent свойства по-прежнему правит; пустой уровень
+// (режим header и внутренние вызовы) правила не включает.
+func TestUpdateScopeExpansionNeedsMaintainer(t *testing.T) {
+	ctx := context.Background()
+	store, engine, _, _, system := setupPhase4(t, AuthHeader)
+	task := singleRepoTask(t, ctx, engine, system, "")
+
+	for _, level := range []domain.MemberRole{domain.MemberAgent, domain.MemberViewer} {
+		_, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
+			AddRepositories: []string{"acme/web"}, Properties: json.RawMessage(`{"multi_repo":true}`),
+			Level: level,
+		})
+		wantCode(t, err, apperr.CodeForbidden, "расширение уровнем "+string(level))
+		if msg := apperr.As(err).Message; !strings.Contains(msg, "решение человека") ||
+			!strings.Contains(msg, "сопровождающ") || strings.HasPrefix(msg, ExecutorRefusal) {
+			t.Fatalf("текст отказа: %q", msg)
+		}
+	}
+	again, err := store.GetTaskByKey(ctx, store.DB(), task.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := scopeNames(again); len(names) != 1 || again.MultiRepo() {
+		t.Fatalf("отказ изменил задачу: %v, multi_repo %v", names, again.MultiRepo())
+	}
+	if n := countRows(t, ctx, store, fmt.Sprintf(
+		`SELECT count(*) FROM task_events WHERE task_id = '%s' AND type = 'task.scope_updated'`, task.ID)); n != 0 {
+		t.Fatalf("отказ оставил в ленте %d событий", n)
+	}
+
+	// Свойства без репозиториев — agent вправе.
+	if _, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
+		Properties: json.RawMessage(`{"multi_repo":true}`), Level: domain.MemberAgent,
+	}); err != nil {
+		t.Fatalf("свойства agent: %v", err)
+	}
+
+	// maintainer, admin и пустой уровень расширяют.
+	for _, repo := range []string{"acme/docs", "acme/infra"} {
+		if _, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: repo}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, level := range []domain.MemberRole{domain.MemberMaintainer, domain.MemberAdmin, ""} {
+		repo := []string{"acme/web", "acme/docs", "acme/infra"}[i]
+		out, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
+			AddRepositories: []string{repo}, Level: level,
+		})
+		if err != nil {
+			t.Fatalf("расширение уровнем %q: %v", level, err)
+		}
+		if names, _ := scopeNames(out); !slices.Contains(names, repo) {
+			t.Fatalf("уровень %q: область %v", level, names)
+		}
 	}
 }

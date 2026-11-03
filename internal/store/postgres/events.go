@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -174,4 +175,38 @@ func (s *Store) ListTeamEvents(ctx context.Context, q Querier, teamID uuid.UUID,
 		out = append(out, e)
 	}
 	return out, translate(rows.Err())
+}
+
+// runSelfBasisSQL — запрос RunSelfBasis, вынесенный в константу, чтобы тест
+// плана гонял ровно его текст (export_test.go). Типы событий — литералы, а
+// не параметры, по той же причине, что в countApprovalsSQL: аренда берёт
+// частичный индекс task_events_stage_claimed (000032), который
+// планировщик в общем плане с `type = $n` не доказывает. Сдача артефакта
+// своего индекса не имеет: она читается по ленте задачи (task_id,
+// created_at), сжатой снизу входом в этап — события прогона раньше него не
+// бывают.
+const runSelfBasisSQL = `
+		SELECT
+		  EXISTS (
+		    SELECT 1 FROM task_events
+		    WHERE stage_run_id = $2 AND actor_id = $3
+		      AND type = '` + domain.EventStageClaimed + `'),
+		  EXISTS (
+		    SELECT 1 FROM task_events
+		    WHERE task_id = $1 AND created_at >= $4
+		      AND stage_run_id = $2 AND actor_id = $3
+		      AND type = '` + domain.EventArtifactSubmitted + `')`
+
+// RunSelfBasis — на каком основании актор «свой» в прогоне (CLAB-380): брал
+// ли он аренду этого прогона и сдавал ли в нём артефакты. Источник — события
+// ленты, а не claimed_by и artifacts: release, протухание аренды и новая
+// версия артефакта прежних следов не стирают в ленте, а в этих таблицах
+// стирают или прячут. entered — вход в этап (stage_runs.entered_at), нижняя
+// граница чтения ленты.
+func (s *Store) RunSelfBasis(ctx context.Context, q Querier, taskID, runID, actor uuid.UUID, entered time.Time) (lease, artifact bool, err error) {
+	err = q.QueryRow(ctx, runSelfBasisSQL, taskID, runID, actor, entered).Scan(&lease, &artifact)
+	if err != nil {
+		return false, false, translate(err)
+	}
+	return lease, artifact, nil
 }

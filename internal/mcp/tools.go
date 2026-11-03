@@ -79,7 +79,10 @@ func (s *Server) registerTools() {
 		"Привязать к задаче PR, ветку или коммит. Сам код изменений живёт в PR, а не в артефакте.",
 		s.linkRepoRef)
 	add(s, "sdlc_update_task_scope",
-		"Расширить область задачи ещё одним репозиторием. Работает только при multi_repo=true.",
+		"Расширить область задачи ещё одним репозиторием. Работает только при multi_repo=true. "+
+			"Расширение области — решение человека: нужен уровень maintainer и выше, участнику "+
+			"уровня agent и токену задачи тул отказывает; нужный репозиторий и причину агент "+
+			"описывает в артефакте этапа и в отчёте.",
 		s.updateScope)
 	add(s, "sdlc_get_drift",
 		"Открытые расхождения с main и пересечения с другими задачами, вместе с базовыми линиями. "+
@@ -647,8 +650,14 @@ func (s *Server) updateScope(ctx context.Context, in scopeInput) (*sdk.CallToolR
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
+	// Уровень обязателен: пустой движок читает как «права выключены», и
+	// расширение области прошло бы мимо правила сопровождающего (CLAB-391).
+	level, err := s.level(ctx)
+	if err != nil {
+		return fail(err)
+	}
 	task, err := s.engine.UpdateScope(ctx, in.TaskKey, actor(ctx).ID, workflow.UpdateScopeInput{
-		AddRepositories: in.Add, Note: in.Reason,
+		AddRepositories: in.Add, Note: in.Reason, Level: level,
 	})
 	if err != nil {
 		return fail(err)
