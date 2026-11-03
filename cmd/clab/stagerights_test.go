@@ -207,7 +207,7 @@ func TestDenialHints(t *testing.T) {
 		name, body, want string
 	}{
 		{"stage_role", forbiddenBody("stage_role", ""), "роли, которой у вас нет"},
-		{"no_stage_role", forbiddenBody("no_stage_role", ""), "нет роли-исполнителя"},
+		{"no_stage_role", forbiddenBody("no_stage_role", ""), "нет исполнителя, переход глобальный"},
 		{"maintainer_action", forbiddenBody("maintainer_action", ""), "за сопровождающим проекта"},
 		{"level", forbiddenBody("level", ""), "уровня участия в проекте не хватает"},
 		{"token", forbiddenBody("", "task"), "решение человека"},
