@@ -46,6 +46,34 @@ func (s *Store) InTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return runInTx(ctx, s.pool, fn)
 }
 
+// InSnapshot прогоняет fn в одном снимке чтения: транзакция REPEATABLE READ,
+// READ ONLY. Все запросы fn видят базу такой, какой она была на первом из
+// них, — переход, лёгший посреди сборки карточки, её не рвёт (CLAB-390).
+//
+// fn обязана ходить только через переданный q: любое обращение к DB() внутри
+// берёт второе соединение пула при уже удерживаемом первом, и под нагрузкой
+// пул встаёт в дедлок. Соединение держится только на время fn.
+func (s *Store) InSnapshot(ctx context.Context, fn func(q Querier) error) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return apperr.Internal(err, "начало снимка чтения")
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+			panic(p)
+		}
+	}()
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return translate(err)
+	}
+	return nil
+}
+
 // beginner — то, на чём можно начать транзакцию: и пул, и отдельное
 // соединение из него. Соединение нужно там, где транзакция обязана идти в той
 // же сессии, что и взятый до неё сессионный замок (см. withBlobLock).

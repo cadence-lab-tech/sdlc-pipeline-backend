@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -354,42 +355,60 @@ func (s *Server) createTask(c *gin.Context) {
 // актуальные артефакты и вердикт гейтов по каждому доступному переходу.
 // Одним запросом — потому что именно это и есть экран карточки.
 func (s *Server) getTask(c *gin.Context) {
-	ctx, q := c.Request.Context(), s.store.DB()
+	ctx := c.Request.Context()
 
-	task, err := s.store.GetTaskByKey(ctx, q, c.Param("taskKey"))
+	// Актор — вид и уровень принципала, а не состояние задачи: считается до
+	// снимка, на своём соединении. Внутри снимка второго соединения пула нет,
+	// иначе под нагрузкой пул встаёт в дедлок. Проект задачи не меняется.
+	who, err := s.stageActor(c)
 	if err != nil {
 		fail(c, s.log, err)
 		return
+	}
+
+	// Вся карточка — в одном снимке чтения (CLAB-390): задача, прогоны и
+	// вердикты видят одно состояние базы. Раньше статус задачи читался раньше
+	// прогонов, переход между чтениями давал «рваную» карточку, и clab wait
+	// принимал её за исход.
+	var card gin.H
+	err = s.store.InSnapshot(ctx, func(q postgres.Querier) error {
+		var err error
+		card, err = s.taskCard(ctx, q, c.Param("taskKey"), who)
+		return err
+	})
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, card)
+}
+
+// taskCard собирает карточку на q — запросы снимка, не пула.
+func (s *Server) taskCard(ctx context.Context, q postgres.Querier, taskKey string, who workflow.Actor) (gin.H, error) {
+	task, err := s.store.GetTaskByKey(ctx, q, taskKey)
+	if err != nil {
+		return nil, err
 	}
 	// У каждого прогона — его учёт (CLAB-264): одним запросом на задачу.
 	runs, err := s.store.CardStageRuns(ctx, q, task.ID)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	artifacts, err := s.store.ListArtifacts(ctx, q, task.ID, false)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	// Вложения — соседним полем (решение 0064): в artifacts их нет, а
 	// карточка показывает их отдельно, метаданными без содержимого.
 	attachments, err := s.engine.Attachments(ctx, q, task.ID, false)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	// Переходы карточки — тот же предпросмотр, что GET …/transitions, с
 	// правом того, кто смотрит (решение 0072, п. 9).
-	who, err := s.auth.Actor(ctx, identity(c), task.ProjectID)
+	transitions, err := s.engine.PreviewForQ(ctx, q, task, &who)
 	if err != nil {
-		fail(c, s.log, err)
-		return
-	}
-	transitions, err := s.engine.PreviewFor(ctx, task, &who)
-	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	// Дети, связи и стоимость едут вместе с задачей: карточка эпика — это
 	// дерево нарезки со счётом, а не отдельный экран. У ребёнка — категория
@@ -397,36 +416,31 @@ func (s *Server) getTask(c *gin.Context) {
 	// прежняя, поля только добавлены.
 	children, err := s.engine.ChildCards(ctx, q, task.ID)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	links, err := s.store.ListTaskLinks(ctx, q, task.ID)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	usage, err := s.store.TaskUsage(ctx, q, task.ID)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	// Привязанные PR и ветки — соседним полем (CLAB-324): карточка плагина
 	// показывает PR вторым планом и укладывается в два запроса на задачу.
 	// Ручка /repo-refs остаётся: поле только добавлено.
 	refs, err := s.store.ListRepoRefs(ctx, q, task.ID)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 	// Предел этапа — соседним полем к transitions (CLAB-221): форма
 	// массива переходов не меняется, старые клиенты поля не видят.
-	limit, err := s.engine.StageLimit(ctx, task)
+	limit, err := s.engine.StageLimitQ(ctx, q, task)
 	if err != nil {
-		fail(c, s.log, err)
-		return
+		return nil, err
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"task":        task,
 		"stage_runs":  runs,
 		"artifacts":   artifacts,
@@ -437,7 +451,7 @@ func (s *Server) getTask(c *gin.Context) {
 		"links":       links,
 		"usage":       usage,
 		"repo_refs":   refs,
-	})
+	}, nil
 }
 
 type linkTasksRequest struct {

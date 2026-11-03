@@ -180,8 +180,13 @@ func (e *Engine) Preview(ctx context.Context, task domain.Task) ([]TransitionPre
 // PreviewFor — Preview с правом актора (actor_may, actor_may_decide); nil —
 // без него, как Preview.
 func (e *Engine) PreviewFor(ctx context.Context, task domain.Task, actor *Actor) ([]TransitionPreview, error) {
-	q := e.store.DB()
+	return e.PreviewForQ(ctx, e.store.DB(), task, actor)
+}
 
+// PreviewForQ — PreviewFor на заданном Querier: карточка считает
+// предпросмотр внутри своего снимка чтения (Store.InSnapshot), не беря
+// второго соединения пула.
+func (e *Engine) PreviewForQ(ctx context.Context, q postgres.Querier, task domain.Task, actor *Actor) ([]TransitionPreview, error) {
 	g, err := e.cycleGraph(ctx, q, task.WorkflowID)
 	if err != nil {
 		return nil, err

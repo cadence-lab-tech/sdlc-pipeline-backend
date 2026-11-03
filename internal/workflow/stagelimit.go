@@ -276,7 +276,11 @@ func (e *Engine) limitOfStage(ctx context.Context, q postgres.Querier, run domai
 // StageLimit — предел текущего этапа задачи для карточки, предпросмотра
 // переходов и sdlc_check_gates. nil — предела нет.
 func (e *Engine) StageLimit(ctx context.Context, task domain.Task) (*StageLimit, error) {
-	q := e.store.DB()
+	return e.StageLimitQ(ctx, e.store.DB(), task)
+}
+
+// StageLimitQ — StageLimit на заданном Querier, для снимка чтения карточки.
+func (e *Engine) StageLimitQ(ctx context.Context, q postgres.Querier, task domain.Task) (*StageLimit, error) {
 	run, err := e.store.CurrentStageRun(ctx, q, task.ID, task.StatusID)
 	if err != nil {
 		return nil, err

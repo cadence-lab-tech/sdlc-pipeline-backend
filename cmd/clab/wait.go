@@ -101,6 +101,7 @@ type waitCard struct {
 	} `json:"task"`
 	StageRuns []struct {
 		ID          string     `json:"id"`
+		StatusKey   string     `json:"status_key"`
 		Kind        string     `json:"kind"`
 		FinishedAt  *time.Time `json:"finished_at"`
 		GateResults []struct {
@@ -142,6 +143,24 @@ func (c waitCard) currentRun() string {
 	}
 	return ""
 }
+
+// torn — карточка «рваная»: статус задачи и открытый прогон этапа из разных
+// моментов (прогон другого статуса). Сервер со снимком чтения такой не
+// отдаёт; страховка от сервера старше снимка и от будущих читателей без
+// него. Нет открытого прогона (задача закрыта) или сервер не сообщил его
+// статус — несогласованности нет.
+func (c waitCard) torn() bool {
+	for i := len(c.StageRuns) - 1; i >= 0; i-- {
+		if r := c.StageRuns[i]; r.Kind == "stage" && r.FinishedAt == nil {
+			return r.StatusKey != "" && r.StatusKey != c.Task.StatusKey
+		}
+	}
+	return false
+}
+
+// waitTornRetries — сколько раз перечитать «рваную» карточку, прежде чем
+// решать по последней: отдаваться вечному опросу нельзя.
+const waitTornRetries = 5
 
 // waitStart — с чего начали: статус, прогон, виды переходов из статуса и
 // какие из них ждём.
@@ -540,6 +559,18 @@ func (w *waiter) card() (waitCard, error) {
 		err := w.c.get(w.ctx, w.path, nil, &card)
 		if err == nil {
 			w.backoff = w.t.retryFirst
+			// Рваную карточку перечитываем после паузы; на пределе повторов
+			// или срока решаем по последней.
+			for n := 0; card.torn() && n < waitTornRetries; n++ {
+				if !w.pause(w.t.gap) {
+					break
+				}
+				var again waitCard
+				if err := w.c.get(w.ctx, w.path, nil, &again); err != nil {
+					continue
+				}
+				card = again
+			}
 			return card, nil
 		}
 		if waitStatus(err) == http.StatusNotFound {
