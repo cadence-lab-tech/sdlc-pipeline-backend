@@ -40,8 +40,13 @@ passed and why, what is needed from the human. Read artifact contents with
 
 ## Approval
 
-A `human_approval` gate is closed by a human — on the task card or with a
-command, and **only when explicitly asked**:
+A `human_approval` gate is closed by a human who holds the right of the
+stage — a member at level `agent` whose roles include the role of the
+task's current status, or a maintainer or admin — on the task card or with a
+command, and **only when explicitly asked**. A task token never closes it.
+Check the right with `clab gates ABC-12` (it prints, per transition and per
+gate, whether the actor may and why not) instead of guessing. Approving the
+work of one's own agent is allowed and is visible in the task feed:
 
 ```bash
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed

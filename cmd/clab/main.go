@@ -470,11 +470,36 @@ func cmdShow(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 
+	// Право — первым запросом, сводка — последним: так сводка остаётся
+	// «ответом команды», а упавшее право её не задерживает.
+	var rights map[string]transitionPreview
+	if !jsonOut {
+		rights = transitionRights(ctx, c, task)
+	}
 	var out json.RawMessage
 	if err := c.get(ctx, "/tasks/"+task+"/state", nil, &out); err != nil {
 		return err
 	}
-	return emit(out, render(renderState, out))
+	return emit(out, func() error { return renderStateRights(out, rights) })
+}
+
+// transitionRights — право актора по переходам из текущего статуса: тот же
+// ответ /transitions, что печатает clab gates, поэтому show и gates не
+// расходятся, а второго источника права в CLI нет (решение 0072, п. 9).
+// Право — подсказка к сводке: нет ответа или нет полей (сервер прежней
+// версии) — show печатает сводку без него.
+func transitionRights(ctx context.Context, c *Client, task string) map[string]transitionPreview {
+	var out struct {
+		Transitions []transitionPreview `json:"transitions"`
+	}
+	if err := c.get(ctx, "/tasks/"+task+"/transitions", nil, &out); err != nil {
+		return nil
+	}
+	rights := make(map[string]transitionPreview, len(out.Transitions))
+	for _, t := range out.Transitions {
+		rights[t.Key] = t
+	}
+	return rights
 }
 
 func cmdClaim(ctx context.Context, c *Client, args []string) error {
@@ -798,7 +823,7 @@ func cmdTransition(ctx context.Context, c *Client, args []string) error {
 	var out json.RawMessage
 	if err := c.post(ctx, "/tasks/"+task+"/transitions/"+to,
 		map[string]any{"comment": comment}, &out); err != nil {
-		return blockedTransition(task, to, err)
+		return withDenialHint(blockedTransition(task, to, err))
 	}
 	return emit(out, render(renderTransitionResult, out))
 }
@@ -856,7 +881,7 @@ func cmdDecide(ctx context.Context, c *Client, args []string) error {
 	if err := c.post(ctx,
 		"/tasks/"+task+"/transitions/"+transition+"/gates/"+gate+"/decision",
 		body, &out); err != nil {
-		return err
+		return withDenialHint(err)
 	}
 	return emit(out, render(renderDecision, out))
 }

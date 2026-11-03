@@ -154,6 +154,9 @@ type stateView struct {
 			Blocking bool   `json:"blocking"`
 		} `json:"gates"`
 	} `json:"gates_ahead"`
+	// Право актора по ключу перехода: show берёт его вторым запросом
+	// /transitions (там его считает движок), claim — нет. Не из ответа.
+	rights map[string]transitionPreview
 }
 
 // artifactRef — ссылка на артефакт в контексте этапа: входы и то, что
@@ -167,11 +170,15 @@ type artifactRef struct {
 	Version int    `json:"version"`
 }
 
-func renderState(raw json.RawMessage) error {
+func renderState(raw json.RawMessage) error { return renderStateRights(raw, nil) }
+
+// renderStateRights — renderState с правом актора у переходов (clab show).
+func renderStateRights(raw json.RawMessage, rights map[string]transitionPreview) error {
 	var s stateView
 	if err := decode(raw, &s); err != nil {
 		return err
 	}
+	s.rights = rights
 	printSummary(s, true)
 	printAttachments(s.Context.Attachments)
 	return nil
@@ -269,6 +276,24 @@ func printSummary(s stateView, rejectionLine bool) {
 				gates = append(gates, name)
 			}
 			fmt.Printf("  %s → %s   гейты: %s\n", tr.Transition, tr.landing.text(), joinOr(gates, "нет"))
+			s.printRights(tr.Transition)
+		}
+	}
+}
+
+// printRights печатает право актора под строкой перехода: на сам переход и на
+// решение каждого гейта. Сервер право не отдал — ничего.
+func (s stateView) printRights(transition string) {
+	p, ok := s.rights[transition]
+	if !ok {
+		return
+	}
+	if line := p.rightLine(); line != "" {
+		fmt.Println("      " + line)
+	}
+	for _, g := range p.Gates {
+		if line := g.decideLine(); line != "" {
+			fmt.Printf("      гейт %s — %s\n", g.GateKey, line)
 		}
 	}
 }
@@ -471,20 +496,66 @@ func indent(text, prefix string) string {
 	return prefix + strings.ReplaceAll(text, "\n", "\n"+prefix)
 }
 
+// actorDenial — почему актору нельзя (решение 0072, п. 9): CLI печатает
+// текст сервера и не пересчитывает право.
+type actorDenial struct {
+	Code    string `json:"code"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
 type gateOutcome struct {
 	GateKey  string `json:"gate_key"`
 	Type     string `json:"type"`
 	Blocking bool   `json:"blocking"`
 	Status   string `json:"status"`
 	Reason   string `json:"reason"`
+	// Право актора (CLAB-379): поля необязательные, сервер прежней версии
+	// их не отдаёт — тогда строк права нет.
+	ActorMayDecide *bool        `json:"actor_may_decide"`
+	ActorDecisions []string     `json:"actor_decisions"`
+	ActorDeny      *actorDenial `json:"actor_deny"`
 }
 
 type transitionPreview struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
 	landing
-	Allowed bool          `json:"allowed"`
-	Gates   []gateOutcome `json:"gates"`
+	Allowed   bool          `json:"allowed"`
+	Gates     []gateOutcome `json:"gates"`
+	ActorMay  *bool         `json:"actor_may"`
+	ActorDeny *actorDenial  `json:"actor_deny"`
+}
+
+// rightLine — право актора на переход: «вправе» или «не вправе: <текст
+// сервера>». Пусто, если сервер право не отдал.
+func (p transitionPreview) rightLine() string {
+	if p.ActorMay == nil {
+		return ""
+	}
+	if *p.ActorMay {
+		return "право: вправе"
+	}
+	return "право: не вправе" + denialText(p.ActorDeny)
+}
+
+// decideLine — право актора решить гейт: вердикты, которые он вправе
+// вынести, или причина отказа. Пусто, если сервер право не отдал.
+func (g gateOutcome) decideLine() string {
+	if g.ActorMayDecide == nil {
+		return ""
+	}
+	if *g.ActorMayDecide {
+		return "решить: " + joinOr(g.ActorDecisions, "—")
+	}
+	return "решить: нельзя" + strings.Replace(denialText(g.ActorDeny), ": ", " — ", 1)
+}
+
+func denialText(d *actorDenial) string {
+	if d == nil || strings.TrimSpace(d.Message) == "" {
+		return ""
+	}
+	return ": " + strings.TrimSpace(d.Message)
 }
 
 func renderTransitions(items []transitionPreview) error {
@@ -498,6 +569,9 @@ func renderTransitions(items []transitionPreview) error {
 			mark = "✓"
 		}
 		fmt.Printf("%s %s → %s (%s)\n", mark, tr.Key, tr.landing.text(), tr.Name)
+		if line := tr.rightLine(); line != "" {
+			fmt.Println("    " + line)
+		}
 		printGates(tr.Gates)
 	}
 	return nil
@@ -514,6 +588,9 @@ func printGates(gates []gateOutcome) {
 			line += " — " + trunc(g.Reason, 100)
 		}
 		fmt.Println(line)
+		if right := g.decideLine(); right != "" {
+			fmt.Println("        " + right)
+		}
 	}
 }
 
