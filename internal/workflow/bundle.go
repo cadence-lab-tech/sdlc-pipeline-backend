@@ -463,13 +463,13 @@ func (a *Authoring) importRole(ctx context.Context, tx pgx.Tx, projectID, actor 
 		Detail: fmt.Sprintf("версия %d", rv.Version)}, nil
 }
 
-// bundleDocumentsIn — документы роли связки во вход версии; nil остаётся
-// nil, чтобы роль формата 1–2 шла путём instructions.
 // BundleDocuments — документы роли в форме связки и sdlc_put_role (ссылка
 // на инструкцию — ключ и номер или ключ с содержимым) как вход версии или
 // предложения версии роли.
 func BundleDocuments(docs []BundleRoleDocument) []RoleDocumentInput { return bundleDocumentsIn(docs) }
 
+// bundleDocumentsIn — документы роли связки во вход версии; nil остаётся
+// nil, чтобы роль формата 1–2 шла путём instructions.
 func bundleDocumentsIn(docs []BundleRoleDocument) []RoleDocumentInput {
 	if docs == nil {
 		return nil
