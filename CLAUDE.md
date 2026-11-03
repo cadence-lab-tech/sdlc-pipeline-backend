@@ -598,6 +598,19 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   сравнивают. `Execute`, `ExecuteBound`, `DecideGate`, `DecideGateSeen` —
   обёртки без права этапа (`UncheckedActor`) для тестов и внутренних путей;
   вне тестов их не зовут — держит `TestTransportsUseStageAuthority`.
+- **Лента показывает, кто решил и «свой» ли он** (CLAB-380, решение 0072
+  п. 4, `workflow/selfapproval.go`). `gate.decided` несёт `level`, `via`
+  (`stage_role` | `level` | `task`), `token_kind` (`api` | `session` | `task`,
+  без токена `none`), `stage_role`, `self_approval` и `self_basis` ⊆
+  {`lease`, `artifact`}; `task.advanced` и `task.rejected` — `via` и
+  `stage_role`. Значения берутся из `StageVerdict` и `Actor` (вид токена
+  кладёт `Auth.Actor` значением) под блокировкой задачи в `DecideGateAs` и
+  `ExecuteAs`; транспорты ключей не пишут. «Свой» — решающий брал аренду
+  прогона или сдавал в нём артефакты по **событиям** `stage.claimed` и
+  `artifact.submitted` (`Store.RunSelfBasis`): release, протухание и
+  заменённая версия следов в ленте не стирают. Только добавочные ключи
+  payload: `CountApprovals` и его индекс их не читают, старые события не
+  переписываются, отсутствие ключа у клиента — «неизвестно».
 - **Роли специалистов выдаёт участие, токен их только сужает**
   ([решение 0030](../docs/decisions/0030-member-roles-github-login-open-projects.md)).
   `project_members.role_keys` и `project_teams.role_keys` ставит администратор

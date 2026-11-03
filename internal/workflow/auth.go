@@ -446,7 +446,11 @@ func (a *Auth) Actor(ctx context.Context, id Identity, projectID uuid.UUID) (Act
 	if err != nil {
 		return Actor{}, err
 	}
-	return Actor{Principal: id.Principal, Level: level, Roles: roles, Bound: a.Bound(id)}, nil
+	kind := TokenNone
+	if id.Token != nil {
+		kind = id.Token.TokenKind
+	}
+	return Actor{Principal: id.Principal, Level: level, Roles: roles, Bound: a.Bound(id), TokenKind: kind}, nil
 }
 
 // memberRoles сводит пути участия к одному набору: nil — любые роли.
