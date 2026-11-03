@@ -41,7 +41,7 @@ func samplePath(tpl string) string {
 		":transitionKey", "analysis_done", ":gateKey", "artifacts",
 	)
 	out := r.Replace(tpl)
-	for _, p := range []string{":workflowID", ":tokenID", ":inviteID", ":documentID", ":artifactID", ":signalID", ":runID"} {
+	for _, p := range []string{":workflowID", ":tokenID", ":inviteID", ":documentID", ":artifactID", ":signalID", ":runID", ":proposalID"} {
 		out = strings.ReplaceAll(out, p, "00000000-0000-0000-0000-000000000001")
 	}
 	return out
