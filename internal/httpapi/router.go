@@ -265,6 +265,8 @@ func (s *Server) Handler() http.Handler {
 		// основной трекер. Уровень agent — точное право проверяет движок, как
 		// и у области.
 		v1.PATCH("/tasks/:taskKey", agent, s.updateTask)
+		// Область: порог маршрута — agent ради свойств задачи; добавить или
+		// убрать репозиторий движок разрешает с maintainer (CLAB-391).
 		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
 		v1.POST("/tasks/:taskKey/links", agent, s.linkTasks)
 		v1.PUT("/tasks/:taskKey/assignee", agent, s.assignTask)
