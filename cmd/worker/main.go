@@ -1,8 +1,9 @@
 // Команда worker — фоновые задания, которые никто не дёргает запросом.
 //
-// Заданий пять: возврат задач с протухшей арендой, инкрементальная
-// индексация репозиториев с детектором дрейфа сразу после неё, синхронизация
-// состояния привязанных PR, векторизация артефактов и сборка мусора в блобах.
+// Задания: возврат задач с протухшей арендой, инкрементальная индексация
+// репозиториев с детектором дрейфа сразу после неё, синхронизация состояния
+// привязанных PR, опрос установок GitHub App, векторизация артефактов и
+// уборка — блобы, кэш эмбеддингов, журнал действий.
 //
 // Все они идут последовательно в одном цикле: воркер один, и параллелить
 // внутри него нечего — узкое место у всех заданий одно и то же, чужой API.
@@ -138,6 +139,10 @@ func run() error {
 	log.Info("воркер запущен", "version", version,
 		"lease_sweep_interval", cfg.LeaseSweepInterval, "lease_ttl", cfg.LeaseTTL,
 		"index_enabled", cfg.IndexEnabled, "index_interval", cfg.IndexInterval,
+		"index_poll_interval", cfg.IndexPollInterval,
+		"repo_ref_sync_interval", cfg.RepoRefSyncInterval,
+		"installation_sync_enabled", provider.HasApp(),
+		"installation_sync_interval", cfg.InstallationSyncInterval,
 		"embeddings", cfg.EmbeddingProvider, "embedding_model", embeddingModel(embedder),
 		"blob_gc_enabled", cfg.BlobGCEnabled, "blob_gc_interval", cfg.BlobGCInterval,
 		"blob_gc_dry_run", cfg.BlobGCDryRun,
@@ -146,48 +151,47 @@ func run() error {
 		"embedding_cache_gc_dry_run", cfg.EmbeddingCacheGCDryRun,
 		"audit_retention_days", cfg.AuditRetentionDays)
 
-	leaseTicker := time.NewTicker(cfg.LeaseSweepInterval)
-	defer leaseTicker.Stop()
-	indexTicker := time.NewTicker(cfg.IndexInterval)
-	defer indexTicker.Stop()
+	plan := newSchedule(cfg, provider.HasApp())
+	leaseTick, stopLease := plan.ticker(plan.LeaseSweep)
+	defer stopLease()
+	indexTick, stopIndex := plan.ticker(plan.Index)
+	defer stopIndex()
 	// Очередь прогонов опрашивается чаще, чем головы веток: вебхук кладёт
 	// коммит в очередь сразу, и ждать полного интервала до него незачем.
-	queueTicker := time.NewTicker(cfg.IndexPollInterval)
-	defer queueTicker.Stop()
+	queueTick, stopQueue := plan.ticker(plan.Queue)
+	defer stopQueue()
+	// Синхронизация PR — своим периодом (CLAB-395): задержку гейта
+	// external_check без вебхука задаёт именно она, а полный проход
+	// индексации тянет за собой Prune и досчёт эмбеддингов.
+	refsTick, stopRefs := plan.ticker(plan.RepoRefSync)
+	defer stopRefs()
+	// Опрос установок — подстраховка вебхуков installation и
+	// installation_repositories (CLAB-395); без приложения его нет.
+	installTick, stopInstall := plan.ticker(plan.InstallationSync)
+	defer stopInstall()
 	// Сборка мусора идёт реже всех: место освобождается не срочно, а каждый
 	// проход — это поход в объектное хранилище на каждый удалённый блоб.
-	// Выключенная не заводит тикера вовсе: nil-канал в select молчит всегда,
-	// и до базы дело не доходит ни разу.
-	var blobGC <-chan time.Time
-	if cfg.BlobGCEnabled {
-		blobGCTicker := time.NewTicker(cfg.BlobGCInterval)
-		defer blobGCTicker.Stop()
-		blobGC = blobGCTicker.C
-	}
+	blobGC, stopBlobGC := plan.ticker(plan.BlobGC)
+	defer stopBlobGC()
 	// Вытеснение кэша эмбеддингов идёт своим периодом, а не вместе с блобами:
 	// это чистый SQL по одной таблице, а сборщик блобов ходит во внешнее
 	// хранилище на каждый блоб — общий период был бы компромиссом без причины.
-	// Выключенное тикера не заводит: nil-канал в select молчит всегда.
-	var embedGC <-chan time.Time
-	if cfg.EmbeddingCacheGCEnabled {
-		embedGCTicker := time.NewTicker(cfg.EmbeddingCacheGCInterval)
-		defer embedGCTicker.Stop()
-		embedGC = embedGCTicker.C
-	}
-
-	// Уборка журнала действий по сроку (CLAB-210). Срок 0 — хранить вечно:
-	// тикера нет, nil-канал в select молчит всегда.
-	var auditGC <-chan time.Time
-	if cfg.AuditRetentionDays > 0 {
-		auditGCTicker := time.NewTicker(auditGCInterval)
-		defer auditGCTicker.Stop()
-		auditGC = auditGCTicker.C
-	}
+	embedGC, stopEmbedGC := plan.ticker(plan.EmbedCacheGC)
+	defer stopEmbedGC()
+	// Уборка журнала действий по сроку (CLAB-210).
+	auditGC, stopAuditGC := plan.ticker(plan.AuditGC)
+	defer stopAuditGC()
 
 	sweepLeases(ctx, engine, log, system.ID, m)
 	refreshState(ctx, store, log, m)
+	if plan.InstallationSync > 0 {
+		// До индексации: снятая установка не должна получить ещё один проход
+		// отказов на старте.
+		syncInstallations(ctx, engine, provider, log, m)
+	}
 	if cfg.IndexEnabled {
 		indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns, m)
+		syncRepoRefs(ctx, ix, log, m)
 	}
 
 	for {
@@ -195,17 +199,17 @@ func run() error {
 		case <-ctx.Done():
 			log.Info("получен сигнал, останавливаемся")
 			return nil
-		case <-leaseTicker.C:
+		case <-leaseTick:
 			sweepLeases(ctx, engine, log, system.ID, m)
 			refreshState(ctx, store, log, m)
-		case <-indexTicker.C:
-			if cfg.IndexEnabled {
-				indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns, m)
-			}
-		case <-queueTicker.C:
-			if cfg.IndexEnabled {
-				drainQueue(ctx, ix, engine, log, system.ID, m)
-			}
+		case <-indexTick:
+			indexPass(ctx, ix, engine, log, system.ID, cfg.IndexRetainRuns, m)
+		case <-queueTick:
+			drainQueue(ctx, ix, engine, log, system.ID, m)
+		case <-refsTick:
+			syncRepoRefs(ctx, ix, log, m)
+		case <-installTick:
+			syncInstallations(ctx, engine, provider, log, m)
 		case <-blobGC:
 			collectBlobs(ctx, store, log, cfg, m)
 		case <-embedGC:
@@ -213,6 +217,71 @@ func run() error {
 		case <-auditGC:
 			purgeAudit(ctx, store, log, cfg.AuditRetentionDays, m)
 		}
+	}
+}
+
+// schedule — периоды тикеров воркера. Ноль — задание не заводит тикера:
+// nil-канал в select молчит всегда, и до базы и провайдера дело не доходит
+// ни разу.
+type schedule struct {
+	LeaseSweep       time.Duration
+	Index            time.Duration
+	Queue            time.Duration
+	RepoRefSync      time.Duration
+	InstallationSync time.Duration
+	BlobGC           time.Duration
+	EmbedCacheGC     time.Duration
+	AuditGC          time.Duration
+}
+
+// newSchedule решает, какие задания идут и с каким периодом. Выключенная
+// индексация выключает и очередь, и синхронизацию PR: обе читают провайдера
+// теми же учётными данными, что индексация (так было и до CLAB-395). Опрос
+// установок от индексации не зависит — его включает приложение.
+func newSchedule(cfg config.Config, appConfigured bool) schedule {
+	s := schedule{LeaseSweep: cfg.LeaseSweepInterval}
+	if cfg.IndexEnabled {
+		s.Index, s.Queue, s.RepoRefSync = cfg.IndexInterval, cfg.IndexPollInterval, cfg.RepoRefSyncInterval
+	}
+	if appConfigured {
+		s.InstallationSync = cfg.InstallationSyncInterval
+	}
+	if cfg.BlobGCEnabled {
+		s.BlobGC = cfg.BlobGCInterval
+	}
+	if cfg.EmbeddingCacheGCEnabled {
+		s.EmbedCacheGC = cfg.EmbeddingCacheGCInterval
+	}
+	// Срок 0 — хранить журнал вечно.
+	if cfg.AuditRetentionDays > 0 {
+		s.AuditGC = auditGCInterval
+	}
+	return s
+}
+
+// ticker заводит тикер периода d; при нуле отдаёт nil-канал.
+func (schedule) ticker(d time.Duration) (<-chan time.Time, func()) {
+	if d <= 0 {
+		return nil, func() {}
+	}
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// syncInstallations сверяет установки GitHub App с провайдером. В лог на
+// info — только изменения: согласованное состояние — не событие.
+func syncInstallations(ctx context.Context, engine *workflow.Engine, src workflow.InstallationSource, log *slog.Logger, m *metrics.Worker) {
+	var changes []workflow.InstallationChange
+	err := m.Job(ctx, jobInstallationSync, func() (err error) {
+		changes, err = engine.SyncInstallations(ctx, src)
+		return err
+	})
+	for _, c := range changes {
+		log.Info("состояние установки GitHub обновлено опросом",
+			"installation", c.InstallationID, "change", c.Change, "repository", c.Repository)
+	}
+	if err != nil {
+		logJobError(ctx, log, "опрос установок GitHub", err)
 	}
 }
 
@@ -404,7 +473,9 @@ func embeddingModel(e embed.Embedder) string {
 // Порядок неслучаен: сперва ставим в очередь новые коммиты, потом исполняем
 // прогоны и сразу за каждым гоняем детектор дрейфа (задача, проехавшая мимо
 // расхождения, узнает о нём на следующем этапе, когда чинить дороже), затем
-// состояние PR для гейта external_check и в конце — векторизация артефактов.
+// векторизация артефактов. Состояние PR для гейта external_check идёт своим
+// тикером (SDLC_REPO_REF_SYNC_INTERVAL, CLAB-395) и после исполненных
+// прогонов очереди (drainQueue).
 func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine, log *slog.Logger, system uuid.UUID, retain int, m *metrics.Worker) {
 	if err := m.Job(ctx, jobIndexEnqueue, func() error {
 		_, err := ix.Enqueue(ctx)
@@ -426,8 +497,6 @@ func indexPass(ctx context.Context, ix *indexer.Indexer, engine *workflow.Engine
 	} else if pruned > 0 {
 		log.Info("старые прогоны индексации удалены", "count", pruned, "retain_per_branch", retain)
 	}
-
-	syncRepoRefs(ctx, ix, log, m)
 
 	var artifacts, documents int
 	if err := m.Job(ctx, jobKnowledge, func() (err error) {
@@ -560,11 +629,13 @@ const (
 	jobEmbedCacheGC = "embed_cache_gc"
 	jobOpsState     = "ops_state"
 	jobAuditGC      = "audit_gc"
+	// jobInstallationSync — опрос установок GitHub App (CLAB-395).
+	jobInstallationSync = "installation_sync"
 )
 
 var workerJobs = []string{jobLeaseSweep, jobIndexEnqueue, jobIndexRun, jobDrift,
 	jobIndexPrune, jobRepoRefSync, jobKnowledge, jobEmbedRefresh, jobOverlaps,
-	jobBlobGC, jobEmbedCacheGC, jobOpsState, jobAuditGC}
+	jobBlobGC, jobEmbedCacheGC, jobOpsState, jobAuditGC, jobInstallationSync}
 
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo

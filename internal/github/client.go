@@ -111,6 +111,10 @@ type TreeEntry struct {
 // Repository — то, что провайдер знает о репозитории. Нужно проверке доступа
 // из настроек проекта.
 type Repository struct {
+	// FullName — owner/name, каким его знает провайдер сейчас: по старому
+	// имени переименованного репозитория он отвечает переадресацией, и здесь
+	// уже новое.
+	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 	Private       bool   `json:"private"`
 	Archived      bool   `json:"archived"`

@@ -87,6 +87,18 @@ type Config struct {
 	IndexMaxFiles     int
 	ChunkMaxChars     int
 
+	// RepoRefSyncInterval — период синхронизации привязанных PR под гейт
+	// external_check (CLAB-395). Пусто — тот же, что SDLC_INDEX_INTERVAL:
+	// так было, пока синхронизация шла внутри полного прохода индексации.
+	// Свой период нужен, потому что задержку гейта задаёт именно он, а
+	// частый полный проход гонял бы и Prune, и досчёт эмбеддингов.
+	RepoRefSyncInterval time.Duration
+	// InstallationSyncInterval — период опроса установок GitHub App
+	// (CLAB-395): подстраховка вебхуков installation и
+	// installation_repositories. Задание идёт, только когда приложение
+	// настроено.
+	InstallationSyncInterval time.Duration
+
 	// Эмбеддинги: voyage — модель Voyage, openai — любой OpenAI-совместимый
 	// эндпоинт (OpenAI, Ollama, TEI, vLLM), hash — детерминированная заглушка
 	// для локального прогона без ключа, none — вектора не считаются и поиск
@@ -417,6 +429,14 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.IndexInterval, err = envPositiveDuration("SDLC_INDEX_INTERVAL", c.IndexInterval); err != nil {
+		return c, err
+	}
+	// Умолчание — уже прочитанный SDLC_INDEX_INTERVAL: без новой переменной
+	// PR синхронизируются с тем же периодом, что до CLAB-395.
+	if c.RepoRefSyncInterval, err = envPositiveDuration("SDLC_REPO_REF_SYNC_INTERVAL", c.IndexInterval); err != nil {
+		return c, err
+	}
+	if c.InstallationSyncInterval, err = envPositiveDuration("SDLC_INSTALLATION_SYNC_INTERVAL", defaultInstallationSyncInterval); err != nil {
 		return c, err
 	}
 	if c.IndexStuckAfter, err = envPositiveDuration("SDLC_INDEX_STUCK_AFTER", c.IndexStuckAfter); err != nil {
@@ -754,9 +774,15 @@ func envPositiveInt(key string, def int, hint string) (int, error) {
 	return n, nil
 }
 
+// defaultInstallationSyncInterval — период опроса установок по умолчанию:
+// запрос списка на сто установок и по одному на живую установку за проход,
+// за пять минут лимит GitHub почти не тратится.
+const defaultInstallationSyncInterval = 5 * time.Minute
+
 // envPositiveDuration читает период или срок, у которого нет осмысленного
 // нуля. Периоды тикеров воркера (SDLC_LEASE_SWEEP_INTERVAL,
-// SDLC_INDEX_INTERVAL, SDLC_INDEX_POLL_INTERVAL) иначе роняют его паникой
+// SDLC_INDEX_INTERVAL, SDLC_INDEX_POLL_INTERVAL, SDLC_REPO_REF_SYNC_INTERVAL,
+// SDLC_INSTALLATION_SYNC_INTERVAL) иначе роняют его паникой
 // time.NewTicker — даже при выключенной индексации, сроки аренды, сессии и
 // застрявшего прогона молча подменяются умолчанием слоем ниже, а нулевой
 // SDLC_SHUTDOWN_TIMEOUT рвёт незавершённые запросы при остановке.
