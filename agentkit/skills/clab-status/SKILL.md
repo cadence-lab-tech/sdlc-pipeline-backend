@@ -19,9 +19,10 @@ clab metrics --period 30d       # where tasks get stuck, which gates fail
 clab index                      # index state of the repositories
 ```
 
-Web interface: the board `https://<instance>/p/<KEY>/board`, a task card
-`https://<instance>/p/<KEY>/tasks/<task key>` (the instance address —
-`clab whoami`).
+Web interface: the project Overview `https://<instance>/p/<KEY>/overview` —
+what awaits a decision, what is stuck, what is in progress and in the queue;
+a task card `https://<instance>/p/<KEY>/tasks/<task key>` (the instance
+address — `clab whoami`).
 
 ## A task
 
