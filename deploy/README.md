@@ -94,22 +94,27 @@ Terraform, пароль базы, токен администратора и с�
 
 ## 3. Секреты в GitHub
 
-В **обоих** репозиториях, бэкенда и интерфейса:
+В **обоих** репозиториях, бэкенда и интерфейса. Секреты ssh лежат в
+окружении `production` (`--env production`), а не в секретах репозитория:
+окружение доступно только job'у `deploy` и только из ветки `main` (CLAB-142),
+иначе любой участник с правом записи прочитал бы ключ выкладки через workflow
+в своей ветке. Окружение и ограничение веткой — Settings → Environments →
+`production` → Deployment branches: только `main`.
 
 | | откуда |
 |---|---|
-| секрет `SSH_KEY` | `~/.ssh/sdlc-deploy` целиком |
-| секрет `SSH_HOST` | `./devops/bin/tf.sh output -raw server_ip` |
-| секрет `SSH_USER` | `deploy` |
-| секрет `SSH_KNOWN_HOSTS` | `ssh-keyscan <ip>` |
-| переменная `SDLC_DOMAIN` | домен — по нему workflow проверяет выкладку снаружи |
+| секрет окружения `SSH_KEY` | `~/.ssh/sdlc-deploy` целиком |
+| секрет окружения `SSH_HOST` | `./devops/bin/tf.sh output -raw server_ip` |
+| секрет окружения `SSH_USER` | `deploy` |
+| секрет окружения `SSH_KNOWN_HOSTS` | `ssh-keyscan <ip>` |
+| переменная репозитория `SDLC_DOMAIN` | домен — по нему workflow проверяет выкладку снаружи |
 
 ```bash
 for repo in sdlc-pipeline-backend sdlc-pipeline-frontend; do
-  gh secret set SSH_KEY -R cadence-lab-tech/$repo < ~/.ssh/sdlc-deploy
-  gh secret set SSH_HOST -R cadence-lab-tech/$repo --body "$(./devops/bin/tf.sh output -raw server_ip)"
-  gh secret set SSH_USER -R cadence-lab-tech/$repo --body deploy
-  ssh-keyscan "$(./devops/bin/tf.sh output -raw server_ip)" 2>/dev/null | gh secret set SSH_KNOWN_HOSTS -R cadence-lab-tech/$repo
+  gh secret set SSH_KEY -R cadence-lab-tech/$repo --env production < ~/.ssh/sdlc-deploy
+  gh secret set SSH_HOST -R cadence-lab-tech/$repo --env production --body "$(./devops/bin/tf.sh output -raw server_ip)"
+  gh secret set SSH_USER -R cadence-lab-tech/$repo --env production --body deploy
+  ssh-keyscan "$(./devops/bin/tf.sh output -raw server_ip)" 2>/dev/null | gh secret set SSH_KNOWN_HOSTS -R cadence-lab-tech/$repo --env production
   gh variable set SDLC_DOMAIN -R cadence-lab-tech/$repo --body "$(./devops/bin/tf.sh output -raw domain)"
 done
 ```

@@ -9,7 +9,8 @@
 # distroless тег nonroot версии не несёт — обновляется только digest;
 # следующий debian — другое имя образа, его Dependabot не предложит.
 #
-# Только docker: gomod и github-actions — не в этой политике.
+# Кроме образов — только actions workflow'ов (CLAB-142, ниже); gomod — не в
+# этой политике.
 version: 2
 updates:
   - package-ecosystem: docker
@@ -23,3 +24,18 @@ updates:
         update-types:
           - version-update:semver-major
           - version-update:semver-minor
+
+  # Actions workflow'ов закреплены по SHA (CLAB-142): тег можно
+  # переписать, SHA — нет, и сам SHA без обновления протух бы. Dependabot
+  # двигает SHA вместе с версией в комментарии; все actions — одним PR в
+  # неделю, он проходит ci.yml, человек сливает после зелёного CI.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "Dependabot"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
