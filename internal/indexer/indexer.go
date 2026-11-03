@@ -115,6 +115,10 @@ type Indexer struct {
 	// каждый тик, и репозиторий без доступа кричал бы в лог круглые сутки:
 	// повтор той же ошибки уходит в debug, новая — снова в warn.
 	headErrors map[string]string
+	// legacySymbols — извлекать символы прежней версией (0, без разбора
+	// литералов). Только для тестов: ими строится индекс «как до CLAB-369»,
+	// чтобы проверить его доводку новым извлечением.
+	legacySymbols bool
 }
 
 // embedderModel — модель текущего эмбеддера; пусто, когда провайдера нет.
@@ -309,6 +313,9 @@ func (ix *Indexer) RunNext(ctx context.Context) (*postgres.IndexRun, error) {
 		// иначе не виден (CLAB-361).
 		"files_considered", stats.filesConsidered,
 		"files_skipped_content", stats.filesSkippedContent,
+		// Доводка до новой версии извлечения символов (CLAB-369): ненулевое
+		// число бывает один раз на ветку после выкладки.
+		"files_reextracted", stats.filesReextracted,
 		"took", time.Since(started).Round(time.Millisecond))
 	return &done, nil
 }
@@ -328,6 +335,9 @@ type runStats struct {
 	filesConsidered int
 	// filesSkippedContent — из них отсеянные по содержимому (SkipContent).
 	filesSkippedContent int
+	// filesReextracted — неизменённые файлы, чьи символы и куски прогон
+	// пересчитал под новую версию извлечения (входят в files_indexed).
+	filesReextracted int
 }
 
 func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres.IndexCounters, runStats, error) {
@@ -404,6 +414,19 @@ func (ix *Indexer) process(ctx context.Context, run postgres.IndexRun) (postgres
 		prev, existed := parentFiles[e.Path]
 
 		if existed && prev.SourceSHA != "" && prev.SourceSHA == e.SHA {
+			if prev.SymbolsVersion < ix.symbolsVersion() {
+				// Файл не изменился, но его символы и куски получены прежним
+				// извлечением: пересчитать их из сохранённого содержимого,
+				// без дельты и дрейфа (CLAB-369, R17-R18).
+				chunks, err := ix.reextract(ctx, run, e, prev, src, repo, batch)
+				if err != nil {
+					return counters, cache, err
+				}
+				counters.FilesIndexed++
+				counters.ChunksIndexed += chunks
+				cache.filesReextracted++
+				continue
+			}
 			// Файл не изменился: ни сети, ни модели он не стоит. Векторы
 			// прежней модели не наследуются — их пересчитает досчёт.
 			chunks, err := ix.store.CopyFileFromParent(ctx, ix.store.DB(), run.ID, prev.ID, ix.embedderModel())
@@ -513,7 +536,8 @@ func (ix *Indexer) clearRun(ctx context.Context, runID uuid.UUID) error {
 // вместе с его символами. Куски уходят в пачку эмбеддингов и записываются ею.
 func (ix *Indexer) writeFile(ctx context.Context, run postgres.IndexRun, e Entry, content []byte) (uuid.UUID, []Chunk, error) {
 	var fileID uuid.UUID
-	chunks := Chunks(e.Path, content, ix.opts.ChunkChars)
+	symbols := ix.symbols(e.Path, content)
+	chunks := chunksBy(content, symbols, ix.opts.ChunkChars)
 
 	err := ix.store.InTx(ctx, func(tx pgx.Tx) error {
 		sha, err := ix.store.PutBlob(ctx, tx, content, "text/plain")
@@ -523,13 +547,12 @@ func (ix *Indexer) writeFile(ctx context.Context, run postgres.IndexRun, e Entry
 		fileID, err = ix.store.InsertCodeFile(ctx, tx, postgres.CodeFileInput{
 			RunID: run.ID, RepositoryID: run.RepositoryID, Path: e.Path,
 			Lang: Lang(e.Path), SizeBytes: int64(len(content)),
-			BlobSHA: sha, SourceSHA: e.SHA,
+			BlobSHA: sha, SourceSHA: e.SHA, SymbolsVersion: ix.symbolsVersion(),
 		})
 		if err != nil {
 			return err
 		}
 
-		symbols := Symbols(e.Path, content)
 		rows := make([]postgres.CodeSymbolInput, 0, len(symbols))
 		for _, s := range symbols {
 			rows = append(rows, postgres.CodeSymbolInput{
@@ -540,6 +563,61 @@ func (ix *Indexer) writeFile(ctx context.Context, run postgres.IndexRun, e Entry
 		return ix.store.InsertCodeSymbols(ctx, tx, fileID, run.RepositoryID, rows)
 	})
 	return fileID, chunks, err
+}
+
+// symbols — извлечение текущей версии (или прежней в тестах доводки).
+func (ix *Indexer) symbols(filePath string, content []byte) []Symbol {
+	return extractSymbols(filePath, content, !ix.legacySymbols)
+}
+
+func (ix *Indexer) symbolsVersion() int {
+	if ix.legacySymbols {
+		return 0
+	}
+	return SymbolsVersion
+}
+
+// reextract доводит неизменённый файл до текущей версии извлечения: символы
+// и куски заново из содержимого, которое уже лежит в blobs, — без сети,
+// без записи в code_file_changes (содержимое не менялось, дрейфа нет) и без
+// модели для кусков с прежним текстом: их векторы переносятся из родителя.
+// Следующий прогон скопирует файл как обычно — версия уже текущая.
+//
+// Содержимого в blobs нет (вычищено вместе со старым прогоном) — файл
+// читается у провайдера, но дельты по-прежнему не даёт.
+func (ix *Indexer) reextract(ctx context.Context, run postgres.IndexRun, e Entry, prev postgres.ParentFile,
+	src Source, repo Repo, batch *embedBatch) (int, error) {
+	content, ok := ix.storedContent(ctx, prev)
+	if !ok {
+		var err error
+		if content, err = src.Blob(ctx, repo, e.SHA); err != nil {
+			return 0, fmt.Errorf("файл %s: %w", e.Path, err)
+		}
+	}
+	carried, err := ix.store.VectorSHAs(ctx, ix.store.DB(), prev.ID, ix.embedderModel())
+	if err != nil {
+		return 0, err
+	}
+	fileID, chunks, err := ix.writeFile(ctx, run, e, content)
+	if err != nil {
+		return 0, err
+	}
+	if err := batch.addCarried(ctx, fileID, chunks, prev.ID, carried); err != nil {
+		return 0, err
+	}
+	return len(chunks), nil
+}
+
+// storedContent — содержимое файла родителя из blobs; false — его там нет.
+func (ix *Indexer) storedContent(ctx context.Context, prev postgres.ParentFile) ([]byte, bool) {
+	if prev.BlobSHA == nil {
+		return nil, false
+	}
+	content, _, err := ix.store.BlobContent(ctx, ix.store.DB(), *prev.BlobSHA)
+	if err != nil {
+		return nil, false
+	}
+	return content, true
 }
 
 // previousContent достаёт содержимое файла из предыдущего прогона. Оно уже

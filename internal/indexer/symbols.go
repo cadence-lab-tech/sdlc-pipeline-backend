@@ -66,23 +66,58 @@ var (
 	mdRule = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
 )
 
+// SymbolsVersion — версия извлечения символов. Её пишет каждый файл индекса
+// (code_files.symbols_version), и прогон пересчитывает символы и куски
+// неизменённого файла, проиндексированного прежней версией, из его
+// содержимого в blobs, а не копирует их из родителя (CLAB-369). Поднимать
+// при каждом изменении правил, которое меняет символы уже проиндексированных
+// файлов: иначе новое извлечение достанется только изменённым файлам.
+//
+//	0 — регулярки по строкам без состояния (до CLAB-369);
+//	1 — объявления внутри многострочных литералов и заголовки внутри
+//	    ограждённых блоков markdown — не символы.
+const SymbolsVersion = 1
+
 // Symbols разбирает файл на объявления верхнего уровня. Для языка без правил
 // возвращает nil — дрейф по такому файлу останется на уровне файла.
 func Symbols(filePath string, content []byte) []Symbol {
+	return extractSymbols(filePath, content, true)
+}
+
+// extractSymbols — Symbols с выбором версии: literals=false — прежнее
+// извлечение без состояния между строками (версия 0). Им тесты строят индекс
+// «как до CLAB-369», чтобы проверить его доводку.
+func extractSymbols(filePath string, content []byte, literals bool) []Symbol {
 	lines := strings.Split(string(content), "\n")
 	ext := strings.ToLower(path.Ext(filePath))
 
+	var lex lineLexer
 	switch ext {
 	case ".go":
-		return byRules(lines, goRules, goPrefix(filePath))
+		lex = &goLexer{}
 	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
-		return byRules(lines, tsRules, modulePrefix(filePath))
+		lex = &tsLexer{}
 	case ".py":
-		return byRules(lines, pyRules, modulePrefix(filePath))
-	case ".sql":
-		return byRules(lines, sqlRules, "")
+		lex = &pyLexer{}
 	case ".md":
-		return headings(filePath, lines)
+		lex = &fenceLexer{}
+	}
+	var hidden []bool
+	if literals && lex != nil {
+		hidden = hiddenLines(lines, lex)
+	}
+
+	switch ext {
+	case ".go":
+		return byRules(lines, hidden, goRules, goPrefix(filePath))
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
+		return byRules(lines, hidden, tsRules, modulePrefix(filePath))
+	case ".py":
+		return byRules(lines, hidden, pyRules, modulePrefix(filePath))
+	case ".sql":
+		return byRules(lines, nil, sqlRules, "")
+	case ".md":
+		return headings(filePath, lines, hidden)
 	default:
 		return nil
 	}
@@ -104,9 +139,13 @@ func modulePrefix(filePath string) string {
 	return strings.TrimSuffix(filePath, path.Ext(filePath))
 }
 
-func byRules(lines []string, rules []declRule, prefix string) []Symbol {
+func byRules(lines []string, hidden []bool, rules []declRule, prefix string) []Symbol {
 	var out []Symbol
 	for i, line := range lines {
+		if i < len(hidden) && hidden[i] {
+			// Строка внутри многострочного литерала — текст, а не код.
+			continue
+		}
 		if line == "" || line[0] == ' ' || line[0] == '\t' {
 			// Объявления верхнего уровня начинаются с первой колонки. Вложенные
 			// (методы Python, замыкания) остаются внутри своего символа.
@@ -135,9 +174,14 @@ func byRules(lines []string, rules []declRule, prefix string) []Symbol {
 	return closeRanges(out, lines)
 }
 
-func headings(filePath string, lines []string) []Symbol {
+func headings(filePath string, lines []string, hidden []bool) []Symbol {
 	var out []Symbol
 	for i, line := range lines {
+		if i < len(hidden) && hidden[i] {
+			// Строка внутри ограждённого блока кода: # там — комментарий
+			// оболочки или код, а не заголовок.
+			continue
+		}
 		m := mdRule.FindStringSubmatch(line)
 		if m == nil {
 			continue

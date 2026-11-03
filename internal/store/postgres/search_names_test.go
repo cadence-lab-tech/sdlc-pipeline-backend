@@ -32,3 +32,39 @@ func TestNameWords(t *testing.T) {
 		}
 	}
 }
+
+// Слова-имена в регистре запроса (CLAB-369, R8): тот же отбор, что у
+// nameWords, без приведения к нижнему регистру.
+func TestExactNameWords(t *testing.T) {
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"listAttachments", []string{"listAttachments"}},
+		{"ListAttachments", []string{"ListAttachments"}},
+		{"listattachments", []string{"listattachments"}},
+		{"revoke task tokens RevokeRunTokens", []string{"RevokeRunTokens"}},
+		{"e.store.RevokeRunTokens", []string{"RevokeRunTokens"}},
+		{"Foo foo FOO", []string{"Foo", "FOO"}},
+		{"ротация токенов", []string{}},
+	}
+	for _, c := range cases {
+		if got := exactNameWords(c.query); !slices.Equal(got, c.want) {
+			t.Errorf("exactNameWords(%q) = %q, ждали %q", c.query, got, c.want)
+		}
+	}
+}
+
+// AC-11: признак тестового файла — закрытый перечень R10.
+func TestIsTestPath(t *testing.T) {
+	for _, p := range TestPaths {
+		if !isTestPath(p) {
+			t.Errorf("%s — тестовый файл", p)
+		}
+	}
+	for _, p := range NonTestPaths {
+		if isTestPath(p) {
+			t.Errorf("%s — не тестовый файл", p)
+		}
+	}
+}

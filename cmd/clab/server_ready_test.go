@@ -187,7 +187,8 @@ var routeCommands = []routeCommand{
 
 var modes = []string{"tls", "proxy"}
 
-// ready300 — таймаут по умолчанию: быстрый отказ не должен его ждать.
+// ready300 — прежний таймаут по умолчанию (до круга 2 CLAB-369): быстрый
+// отказ не должен его ждать.
 // Свежая карта на каждый запуск: installSetup дописывает в неё адрес релизов.
 func ready300() map[string]string { return map[string]string{"CADENCE_READY_TIMEOUT": "300"} }
 
