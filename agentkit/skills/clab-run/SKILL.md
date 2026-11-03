@@ -311,8 +311,12 @@ claim confirms it.
 
 ## Approval
 
-A `human_approval` gate is closed only by a human, and that is the only
-thing the orchestrator asks along the cycle. The human may answer in this
+A `human_approval` gate is closed only by a human who holds the right of
+the stage (a member at level `agent` whose roles include the
+role of the task's status, or a maintainer or admin; the person who drives
+the chat may approve the work of their own sub-agent, and that stays visible
+in the task feed), and that is the only thing the orchestrator asks along
+the cycle. The human may answer in this
 chat or approve wherever it suits them — the task card, the plugin panel,
 `clab decide` — and the orchestrator continues by the state of the server,
 not by a message. The question must be short and
@@ -324,7 +328,12 @@ before a merge — PRs with links and state, what the tester checked) — and
 `clab show <key> --json`, field `context.prior_artifacts`; contents —
 `clab artifact <id>` or `sdlc_get_artifact`. The orchestrator sets the
 approval with the human's personal token: a task token cannot close a
-`human_approval` gate.
+`human_approval` gate and changes no rules; the only gate decision it has is
+`passed` on a checklist of its own transition. Whether the human's token may
+decide the gate or request the transition is printed by `clab gates <key>`
+(the right per transition and per gate, with the reason of a refusal); when
+it says no, tell the human whom to turn to — the member who works the
+stage's role or a maintainer — and wait; do not pick another transition.
 
 Take the gate key and the transition from `clab gates --json`, not from
 memory. Then, in this order:

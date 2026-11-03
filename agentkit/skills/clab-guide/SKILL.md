@@ -56,8 +56,9 @@ does nothing in sessions without a window (`claude -p`, runners, executors).
 4. The agent reports the cost (`clab usage`), checks the gates
    (`clab gates`) and **requests a transition** (`clab transition`). Gates
    run on the server; a blocked transition says what is missing.
-5. A `human_approval` gate waits for a person: the agent stops and says the
-   task waits for approval.
+5. A `human_approval` gate waits for a person who holds the right of the
+   stage (section "Approvals"): the agent stops and says the task waits for
+   approval.
 6. A problem the stage cannot solve goes back with a return transition and
    a `problem.report` artifact; the earlier role sees it among its inputs.
 
@@ -164,6 +165,25 @@ passed`, and only when the human explicitly asks. Before approving, show
 them what they approve: the stage's artifacts with titles and the gist.
 A refusal — `--status failed --details '{"reason":"…"}'`.
 
+Who may close the gate is the **right of the stage**, not a
+level reserved for maintainers. The engine gives it to a person who works
+the stage's role: a member at level `agent` whose roles include the primary
+role of the task's current status approves or refuses that stage, and a
+maintainer or admin may do it on any stage. A task token never closes the
+gate (see "Task tokens"), and nothing changes in the gate itself: it still
+needs the artifacts the stage submitted, an approval goes stale when the
+stage submits again, and the gate has to be closed before the transition.
+A person who holds the right may approve the work of their own agent; that
+is allowed and it stays visible in the task feed, so the agent still asks
+the human and never decides for them.
+
+Do not guess who may do what: `clab gates <key>` and `clab show <key>` print
+what the server answers for the current actor — whether the transition may
+be requested, which verdicts the actor may give on each gate, and the reason
+for a refusal. When the actor may not, the reason says whom to turn to: the
+member who works the stage's role or a maintainer. Report that and stop; do
+not look for another transition or another token.
+
 An agent does not hold its turn waiting for an approval. It waits on the
 server: `clab wait <key> --gate human_approval [--transition <transition>]
 [--timeout 8h] [--json]` long-polls the task's events and returns once the
@@ -184,7 +204,8 @@ claimed: `clab token task <key> --config-dir <dir>`. The token lives as a
 (agent `clab-stage`) runs every command as `env -u SDLC_TOKEN -u
 SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab …`. A task token opens only the
 role's work on its own task: no rules, no scope changes, no tokens, no
-approvals; of gate decisions only checklist marks.
+approvals; of gate decisions only `passed` on a checklist of its own
+transition — the one decision a task token has.
 
 ## Recommended model level
 

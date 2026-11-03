@@ -338,3 +338,63 @@ func TestKitRulesRepoRefGate(t *testing.T) {
 		}
 	}
 }
+
+// CLAB-382 (решение 0072): набор говорит о праве этапа, а не о «апрув только
+// у сопровождающего», держит границу токена задачи и не предлагает обход
+// гейта. Правило «роли и циклы — maintainer» в clab-rules остаётся верным.
+func TestKitStageRightWording(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := map[string]string{}
+	for _, f := range k.Files {
+		flat[f.Path] = strings.ToLower(strings.Join(strings.Fields(f.Content), " "))
+	}
+	// Утверждения, которые после 0072 неверны.
+	forbidden := []string{
+		"only a maintainer", "only maintainers", "only maintainer", "maintainers only", "maintainer only",
+		"only an admin", "does not approve its own", "cannot approve its own", "may not approve its own",
+		"level agent does not approve", "bypass the gate", "bypass the approval", "get around the gate",
+		"around the gate", "skip the gate", "remove the approval", "waive the approval",
+	}
+	for path, text := range flat {
+		for _, s := range forbidden {
+			if strings.Contains(text, s) {
+				t.Errorf("%s: %q", path, s)
+			}
+		}
+	}
+	// AC-35.1: право этапа и проверка через clab gates.
+	for _, p := range []string{"clab-guide", "clab-run", "clab-work", "clab-status"} {
+		text := flat["skills/"+p+"/SKILL.md"]
+		for _, s := range []string{"right of the stage", "level `agent`", "maintainer or admin", "clab gates"} {
+			if !strings.Contains(text, s) {
+				t.Errorf("%s: нет %q", p, s)
+			}
+		}
+		if !strings.Contains(text, "task token never closes") && !strings.Contains(text, "task token cannot close") {
+			t.Errorf("%s: нет границы токена задачи", p)
+		}
+	}
+	// AC-35.3: единственное решение токена задачи — чек-лист своего перехода.
+	for _, p := range []string{"clab-guide", "clab-run"} {
+		if !strings.Contains(flat["skills/"+p+"/SKILL.md"], "checklist of its own transition") {
+			t.Errorf("%s: нет чек-листа своего перехода", p)
+		}
+	}
+	// AC-35.4: самоапрув допустим и виден; решает человек.
+	for _, p := range []string{"clab-guide", "clab-run", "clab-status"} {
+		text := flat["skills/"+p+"/SKILL.md"]
+		if !strings.Contains(text, "own agent") && !strings.Contains(text, "own sub-agent") {
+			t.Errorf("%s: нет самоапрува", p)
+		}
+		if !strings.Contains(text, "visible in the task feed") && !strings.Contains(text, "stays visible") {
+			t.Errorf("%s: самоапрув не назван видимым", p)
+		}
+	}
+	// AC-35.5: правило clab-rules остаётся.
+	if !strings.Contains(flat["skills/clab-rules/SKILL.md"], "`maintainer` level in the project") {
+		t.Error("clab-rules: пропало правило уровня maintainer")
+	}
+}

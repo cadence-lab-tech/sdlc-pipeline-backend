@@ -201,7 +201,11 @@ The steps are the same in both modes.
    what blocks each transition; close what blocks it (a checklist —
    `clab decide <key> --transition <transition> --gate <gate key> --status
    passed`) and run `clab transition <key> --to <transition> --summary "…"`.
-   A `human_approval` gate is closed by a human.
+   A `human_approval` gate is closed by a human who holds the right of the
+   stage (a member at level `agent` with the role of the status, or a
+   maintainer or admin); a task token never closes it. `clab gates <key>`
+   prints whether the actor may request each transition and decide each
+   gate, with the reason — read it instead of guessing.
    - **Stage executor** (task token): do not wait — request the transition,
      report and stop; the orchestrator waits for the approval.
    - **The human's AI**: wait for the decision on the server instead of
