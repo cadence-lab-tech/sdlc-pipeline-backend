@@ -1003,6 +1003,16 @@ type RunGateVerdict struct {
 	// Хэндл принципала, решившего гейт; null, если вердикт вынес движок.
 	DecidedByHandle *string    `json:"decided_by_handle"`
 	DecidedAt       *time.Time `json:"decided_at"`
+	// Пометка самоапрува (CLAB-393, AC-32 эпика CLAB-307): те же значения,
+	// что записаны в gate.decided того же решения (CLAB-380), — читаются из
+	// ленты, а не пересчитываются. Только у решений человека и токена по
+	// human_approval и checklist; у остальных вердиктов и у решений,
+	// записанных до CLAB-380, ключей нет (nil, а не null). Указатели нужны,
+	// чтобы omitempty не убирал false и пустой список: «чужое решение» —
+	// self_approval false и self_basis [].
+	SelfApproval *bool `json:"self_approval,omitempty"`
+	// Основания в фиксированном порядке: lease, artifact.
+	SelfBasis *[]string `json:"self_basis,omitempty"`
 }
 
 // RunExit — выход прогона: переход, которым он закончен. Берётся из события

@@ -115,22 +115,49 @@ func (s *Store) CountApprovals(ctx context.Context, q Querier, stageRunID, gateI
 	return n, nil
 }
 
-// GateVerdictsByTask — вердикты гейтов всех прогонов задачи одним запросом
-// (CLAB-283): этапы и вложенные перепроверки, по образцу RunUsageByTask.
-// Прогона без записей в ответе нет — пустой список дописывает тот, кто
-// склеивает (CardStageRuns). Порядок внутри прогона не зависит от плана
-// запроса: по времени записи, затем по позиции и ключу гейта.
-func (s *Store) GateVerdictsByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID][]domain.RunGateVerdict, error) {
-	rows, err := q.Query(ctx, `
+// gateVerdictsSQL — запрос GateVerdictsByTask, вынесенный в константу, чтобы
+// тест плана гонял ровно его текст (export_test.go).
+//
+// Пометка самоапрува (CLAB-393) читается из записанного решения: последнего
+// gate.decided того же гейта в том же прогоне от того же актора, что стоит в
+// gate_results.decided_by. Не пересчёт RunSelfBasis: после решения лента
+// дополняется событиями того же актора (сдача артефакта), и пересчёт дал бы
+// не то, что записано в gate.decided и показано в ленте. Условия на тип гейта
+// и непустой decided_by лежат внутри подзапроса, чтобы для остальных строк
+// он не читал ленту вовсе. Тип события — литерал по той же причине, что в
+// countApprovalsSQL: частичный индекс task_events_gate_decided (000042).
+const gateVerdictsSQL = `
 		SELECT gr.stage_run_id, g.key, g.name, g.type, t.key, gr.status, gr.details,
-		       p.handle, gr.decided_at
+		       p.handle, gr.decided_at, d.self_approval, d.self_basis
 		FROM gate_results gr
 		JOIN stage_runs sr           ON sr.id = gr.stage_run_id
 		JOIN gates g                 ON g.id = gr.gate_id
 		JOIN workflow_transitions t  ON t.id = gr.transition_id
 		LEFT JOIN principals p       ON p.id = gr.decided_by
+		LEFT JOIN LATERAL (
+		    SELECT (e.payload->>'self_approval')::boolean AS self_approval,
+		           e.payload->'self_basis'                AS self_basis
+		    FROM task_events e
+		    WHERE e.type = '` + domain.EventGateDecided + `'
+		      AND g.type IN ('` + domain.GateHumanApproval + `', '` + domain.GateChecklist + `')
+		      AND gr.decided_by IS NOT NULL
+		      AND e.stage_run_id = gr.stage_run_id
+		      AND e.actor_id = gr.decided_by
+		      AND e.payload->>'gate_id' = gr.gate_id::text
+		    ORDER BY e.created_at DESC, e.id DESC
+		    LIMIT 1
+		) d ON true
 		WHERE sr.task_id = $1
-		ORDER BY gr.stage_run_id, gr.created_at, g.position, g.key`, taskID)
+		ORDER BY gr.stage_run_id, gr.created_at, g.position, g.key`
+
+// GateVerdictsByTask — вердикты гейтов всех прогонов задачи одним запросом
+// (CLAB-283): этапы и вложенные перепроверки, по образцу RunUsageByTask.
+// Прогона без записей в ответе нет — пустой список дописывает тот, кто
+// склеивает (CardStageRuns). Порядок внутри прогона не зависит от плана
+// запроса: по времени записи, затем по позиции и ключу гейта. Пометка
+// самоапрува (CLAB-393) приходит в том же запросе — см. gateVerdictsSQL.
+func (s *Store) GateVerdictsByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID][]domain.RunGateVerdict, error) {
+	rows, err := q.Query(ctx, gateVerdictsSQL, taskID)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -141,10 +168,22 @@ func (s *Store) GateVerdictsByTask(ctx context.Context, q Querier, taskID uuid.U
 		var (
 			runID uuid.UUID
 			v     domain.RunGateVerdict
+			basis json.RawMessage
 		)
 		if err := rows.Scan(&runID, &v.GateKey, &v.GateName, &v.GateType, &v.TransitionKey,
-			&v.Status, &v.Details, &v.DecidedByHandle, &v.DecidedAt); err != nil {
+			&v.Status, &v.Details, &v.DecidedByHandle, &v.DecidedAt, &v.SelfApproval, &basis); err != nil {
 			return nil, translate(err)
+		}
+		if v.SelfApproval != nil {
+			// Ключ self_basis всегда пишется вместе с self_approval; на
+			// случай записи без него — пустой список, а не потеря признака.
+			list := []string{}
+			if len(basis) > 0 {
+				if err := json.Unmarshal(basis, &list); err != nil {
+					return nil, translate(err)
+				}
+			}
+			v.SelfBasis = &list
 		}
 		out[runID] = append(out[runID], v)
 	}
