@@ -595,11 +595,17 @@ func cmdRole(ctx context.Context, c *Client, args []string) error {
 		var out any
 		if err := c.post(ctx, "/projects/"+key+"/import",
 			map[string]any{"version": bundleVersion, "roles": []any{role}}, &out); err != nil {
-			return err
+			return withProposeHint(err)
 		}
 		return print(out)
+	case "propose":
+		return rolePropose(ctx, c, rest)
+	case "proposals":
+		return roleProposals(ctx, c, rest)
+	case "approve", "reject", "withdraw":
+		return roleDecide(ctx, c, sub, rest)
 	default:
-		return fmt.Errorf("clab role show|put")
+		return fmt.Errorf("clab role show|put|propose|proposals|approve|reject|withdraw")
 	}
 }
 

@@ -122,20 +122,14 @@ func (a *Authoring) AddRoleVersion(ctx context.Context, projectKey, roleKey stri
 }
 
 // addVersion — единственная точка заведения версии роли: REST, MCP, связка
-// и clab role put приходят сюда. Версия, документы и колонка instructions
-// (склейка) пишутся на одной транзакции tx; через эту точку CLAB-307
-// проведёт черновик версии с апрувом. Ссылки на инструкции библиотеки и
-// перенос закрепления разрешаются здесь же (prepareDocuments, решение
-// 0069): «обновить в ролях» и импорт связки другой точки не имеют.
+// и clab role put приходят сюда, и утверждение предложения версии
+// (roleproposals.go, решение 0072 п. 5) тоже. Версия, документы и колонка
+// instructions (склейка) пишутся на одной транзакции tx. Ссылки на
+// инструкции библиотеки и перенос закрепления разрешаются здесь же
+// (prepareDocuments, решение 0069): «обновить в ролях» и импорт связки
+// другой точки не имеют.
 func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, projectID, roleID uuid.UUID, actor uuid.UUID, in RoleVersionInput) (domain.RoleVersion, error) {
-	docs, err := a.prepareDocuments(ctx, tx, projectID, roleID, in)
-	if err != nil {
-		return domain.RoleVersion{}, err
-	}
-	if err := validateOutputContract(in.OutputContract); err != nil {
-		return domain.RoleVersion{}, err
-	}
-	level, err := roleModelLevel(in.ModelLevel)
+	docs, level, err := a.checkVersion(ctx, tx, projectID, roleID, in)
 	if err != nil {
 		return domain.RoleVersion{}, err
 	}
@@ -153,6 +147,25 @@ func (a *Authoring) addVersion(ctx context.Context, tx pgx.Tx, projectID, roleID
 		Changelog:      in.Changelog,
 		CreatedBy:      actor,
 	})
+}
+
+// checkVersion — все проверки и разрешения входа версии без записи: набор
+// документов с закреплениями, контракт выхода и уровень модели. Её же зовёт
+// подача предложения версии: негодное предложение отбивается тем же
+// текстом, что дала бы версия.
+func (a *Authoring) checkVersion(ctx context.Context, q postgres.Querier, projectID, roleID uuid.UUID, in RoleVersionInput) ([]RoleDocumentInput, *string, error) {
+	docs, err := a.prepareDocuments(ctx, q, projectID, roleID, in)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateOutputContract(in.OutputContract); err != nil {
+		return nil, nil, err
+	}
+	level, err := roleModelLevel(in.ModelLevel)
+	if err != nil {
+		return nil, nil, err
+	}
+	return docs, level, nil
 }
 
 // roleModelLevel проверяет уровень версии роли; пустая строка — «не задан».

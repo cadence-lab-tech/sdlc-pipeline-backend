@@ -52,6 +52,15 @@ func TestExecutorMay(t *testing.T) {
 		RESTAction("POST", "/v1/auth/cli/:code"), RESTAction("POST", "/v1/tasks/:taskKey/task-token"),
 		RESTAction("GET", "/v1/projects/:projectKey/workflow"), RESTAction("GET", "/v1/projects/:projectKey/index"),
 		RESTAction("GET", "/v1/projects/:projectKey/members"),
+		// Предложения версий ролей (решение 0072 п. 3) — ни одно действие.
+		"sdlc_propose_role_version", "sdlc_list_role_proposals", "sdlc_approve_role_proposal",
+		"sdlc_reject_role_proposal", "sdlc_withdraw_role_proposal",
+		RESTAction("POST", "/v1/projects/:projectKey/roles/:roleKey/proposals"),
+		RESTAction("GET", "/v1/projects/:projectKey/roles/:roleKey/proposals"),
+		RESTAction("GET", "/v1/projects/:projectKey/roles/:roleKey/proposals/:proposalID"),
+		RESTAction("POST", "/v1/projects/:projectKey/roles/:roleKey/proposals/:proposalID/approve"),
+		RESTAction("POST", "/v1/projects/:projectKey/roles/:roleKey/proposals/:proposalID/reject"),
+		RESTAction("POST", "/v1/projects/:projectKey/roles/:roleKey/proposals/:proposalID/withdraw"),
 	} {
 		refused(t, tokens.ExecutorMay(task, action), action)
 		refused(t, tokens.ExecutorMay(adm, action), action+" (is_admin)")
@@ -65,6 +74,11 @@ func TestExecutorMay(t *testing.T) {
 	for _, action := range ExecutorActions() {
 		if err := tokens.ExecutorMay(task, action); err != nil {
 			t.Fatalf("из перечня: %s: %v", action, err)
+		}
+		// Правила роли токену задачи не открываются ни чтением, ни записью
+		// предложений (решение 0072 п. 3, CLAB-381).
+		if strings.Contains(action, "proposal") {
+			t.Errorf("в перечне исполнителя действие предложений версий ролей: %s", action)
 		}
 	}
 	err := tokens.ExecutorMay(task, "sdlc_put_role")

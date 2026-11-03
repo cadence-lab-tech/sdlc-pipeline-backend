@@ -229,8 +229,17 @@ func (s *Server) Handler() http.Handler {
 		v1.DELETE("/projects/:projectKey/roles/:roleKey", maintainer, s.archiveRole)
 		v1.POST("/projects/:projectKey/roles/:roleKey/restore", maintainer, s.restoreRole)
 		v1.GET("/projects/:projectKey/roles/:roleKey/versions", viewer, s.listRoleVersions)
-		v1.POST("/projects/:projectKey/roles/:roleKey/versions", maintainer, s.createRoleVersion)
+		v1.POST("/projects/:projectKey/roles/:roleKey/versions", s.guardRoleVersion(), s.createRoleVersion)
 		v1.GET("/projects/:projectKey/roles/:roleKey/versions/:version", viewer, s.getRoleVersion)
+		// Предложения версий ролей (решение 0072, п. 5): маршрут ставит
+		// минимум, точное право — роль из набора, человек уровня maintainer,
+		// автор — считает workflow.Auth. Токену задачи закрыты все.
+		v1.POST("/projects/:projectKey/roles/:roleKey/proposals", agent, s.proposeRoleVersion)
+		v1.GET("/projects/:projectKey/roles/:roleKey/proposals", viewer, s.listRoleProposals)
+		v1.GET("/projects/:projectKey/roles/:roleKey/proposals/:proposalID", viewer, s.getRoleProposal)
+		v1.POST("/projects/:projectKey/roles/:roleKey/proposals/:proposalID/approve", maintainer, s.approveRoleProposal)
+		v1.POST("/projects/:projectKey/roles/:roleKey/proposals/:proposalID/reject", maintainer, s.rejectRoleProposal)
+		v1.POST("/projects/:projectKey/roles/:roleKey/proposals/:proposalID/withdraw", viewer, s.withdrawRoleProposal)
 
 		// Библиотека инструкций (решение 0069). Версия иммутабельна, как у
 		// роли: маршрута правки версии нет, PATCH меняет только вывеску.

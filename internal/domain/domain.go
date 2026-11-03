@@ -441,6 +441,53 @@ type RoleVersion struct {
 	Documents []RoleDocument `json:"documents,omitempty"`
 }
 
+// Состояния предложения версии роли (решение 0072, п. 5).
+const (
+	ProposalPending   = "pending"
+	ProposalApproved  = "approved"
+	ProposalRejected  = "rejected"
+	ProposalWithdrawn = "withdrawn"
+)
+
+// ValidProposalState — известно ли состояние предложения.
+func ValidProposalState(s string) bool {
+	switch s {
+	case ProposalPending, ProposalApproved, ProposalRejected, ProposalWithdrawn:
+		return true
+	}
+	return false
+}
+
+// RoleProposal — предложение новой версии роли (решение 0072, п. 5): поля
+// и документы будущей версии, база, от которой подано, и решение
+// сопровождающего. Версию заводит только утверждение; до него ни один
+// прогон предложения не видит.
+type RoleProposal struct {
+	ID             uuid.UUID       `json:"id"`
+	RoleID         uuid.UUID       `json:"role_id"`
+	Role           string          `json:"role"`
+	BaseVersion    int             `json:"base_version"`
+	State          string          `json:"state"`
+	Changelog      string          `json:"changelog"`
+	InputKinds     []string        `json:"input_kinds"`
+	OutputContract json.RawMessage `json:"output_contract"`
+	ToolPolicy     json.RawMessage `json:"tool_policy"`
+	ModelHint      *string         `json:"model_hint,omitempty"`
+	ModelLevel     *string         `json:"model_level,omitempty"`
+	RepoScope      []string        `json:"repo_scope"`
+	ContextBudget  json.RawMessage `json:"context_budget"`
+	CreatedBy      uuid.UUID       `json:"created_by"`
+	CreatedByName  string          `json:"created_by_handle"`
+	CreatedAt      time.Time       `json:"created_at"`
+	DecidedBy      *uuid.UUID      `json:"decided_by"`
+	DecidedByName  *string         `json:"decided_by_handle"`
+	DecidedAt      *time.Time      `json:"decided_at"`
+	DecisionNote   *string         `json:"decision_note"`
+	ResultVersion  *int            `json:"result_version"`
+	// Документы по возрастанию position; в списке — без содержимого.
+	Documents []RoleDocument `json:"documents"`
+}
+
 // RoleDocument — документ версии роли: имя, тип и позиция — на ссылке,
 // размер и sha — свойства байтов в blobs. Content — указатель: в списках
 // версий ключа нет вовсе, а не пустая строка.
