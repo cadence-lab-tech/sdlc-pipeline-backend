@@ -483,6 +483,56 @@ func TestWhoamiWithProject(t *testing.T) {
 	}
 }
 
+// CLAB-411, K-1: строка «С задачами» — текст сервера (access.task_work)
+// как есть; у сервера прежней версии её нет; --json несёт класс.
+func TestWhoamiTaskWork(t *testing.T) {
+	outsideRepo(t)
+	t.Setenv("SDLC_PROJECT", "CLAB")
+	withJSON(t, false)
+	const summary = "любая задача проекта без аренды: постановка и выбор этапов, заведение (и без родителя), назначение, связи, область"
+	access := `{"level":"agent","allowed_roles":null,"task_work":{"class":"employee","summary":"` + summary + `"}}`
+	routes := map[string]string{
+		"/v1/auth/me": meReply, "/v1/instance": instanceReply,
+		"/v1/projects/CLAB": projectReply(access), "/v1/projects/CLAB/roles": rolesReply,
+	}
+	c, _ := whoamiServer(t, routes)
+	out, _, err := capture(t, func() error { return cmdWhoami(context.Background(), c, nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "С задачами:") || !strings.Contains(out, summary) {
+		t.Fatalf("строки права нет:\n%s", out)
+	}
+	withJSON(t, true)
+	c, _ = whoamiServer(t, routes)
+	out, _, err = capture(t, func() error { return cmdWhoami(context.Background(), c, nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Project struct {
+			Access struct {
+				TaskWork struct {
+					Class string `json:"class"`
+				} `json:"task_work"`
+			} `json:"access"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil || v.Project.Access.TaskWork.Class != "employee" {
+		t.Fatalf("--json: %v %s", err, out)
+	}
+
+	withJSON(t, false)
+	c, _ = whoamiServer(t, map[string]string{
+		"/v1/auth/me": meReply, "/v1/instance": instanceReply,
+		"/v1/projects/CLAB": projectReply(`{"level":"agent","allowed_roles":null}`), "/v1/projects/CLAB/roles": rolesReply,
+	})
+	out, _, _ = capture(t, func() error { return cmdWhoami(context.Background(), c, nil) })
+	if strings.Contains(out, "С задачами:") {
+		t.Fatalf("строка права без поля сервера:\n%s", out)
+	}
+}
+
 // Критерий 13: явно названный несуществующий проект — ошибка сервера.
 func TestWhoamiUnknownProject(t *testing.T) {
 	outsideRepo(t)

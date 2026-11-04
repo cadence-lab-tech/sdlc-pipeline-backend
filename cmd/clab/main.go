@@ -60,7 +60,7 @@ func commands() []command {
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
-		{"scope", "расширить или сузить область задачи (уровень maintainer и выше)", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] [--multi-repo[=false]] --reason ... — добавить или убрать репозиторий может сопровождающий проекта: это решение человека, не агента", cmdScope},
+		{"scope", "расширить или сузить область задачи (человек: сотрудник уровня agent или maintainer и выше)", "clab scope SDLC-42 [--add acme/web] [--remove acme/api] [--multi-repo[=false]] --reason ... — добавить или убрать репозиторий может человек — сотрудник или сопровождающий проекта: это решение человека, не агента", cmdScope},
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file] — --artifact только для текста, бинарный файл сдаётся до перехода: clab submit --file", cmdTransition},
 		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
@@ -338,6 +338,11 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 				roles = joinOr(*a.AllowedRoles, "ни одной")
 			}
 			pairs = append(pairs, "Уровень:", dash(a.Level), "Можно забирать:", roles)
+			// Что можно с задачами (CLAB-411) — строка сервера как есть:
+			// право считает сервер, сервер прежней версии строки не отдаёт.
+			if a.TaskWork != nil && a.TaskWork.Summary != "" {
+				pairs = append(pairs, "С задачами:", a.TaskWork.Summary)
+			}
 		}
 		if project.Roles != nil {
 			pairs = append(pairs, "Роли проекта:", joinOr(project.Roles, "нет"))
@@ -356,6 +361,12 @@ type whoamiProject struct {
 	Access *struct {
 		Level        string    `json:"level"`
 		AllowedRoles *[]string `json:"allowed_roles"`
+		// Класс актора и что он может с задачами проекта (CLAB-411);
+		// nil — сервер прежней версии.
+		TaskWork *struct {
+			Class   string `json:"class"`
+			Summary string `json:"summary"`
+		} `json:"task_work,omitempty"`
 	} `json:"access"`
 	Roles []string `json:"roles"`
 }

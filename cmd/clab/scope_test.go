@@ -157,8 +157,9 @@ func TestScopeShowsForbiddenAndNamesMaintainer(t *testing.T) {
 		if cmd.name != "scope" {
 			continue
 		}
+		// CLAB-411: справка называет и сотрудника уровня agent.
 		if !strings.Contains(cmd.summary, "maintainer") || !strings.Contains(cmd.usage, "сопровождающий") ||
-			!strings.Contains(cmd.usage, "решение человека") {
+			!strings.Contains(cmd.usage, "сотрудник") || !strings.Contains(cmd.usage, "решение человека") {
 			t.Fatalf("справка scope не называет уровень: %q / %q", cmd.summary, cmd.usage)
 		}
 		return
