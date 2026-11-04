@@ -61,7 +61,8 @@ Then show the top of the list with `clab backlog` (for an epic —
 Over MCP, without the CLI, there is no `--next`: call `sdlc_list_tasks` with
 `backlog: true` and `top_level: true`, take the first row without
 `blocked_by`; for an epic in work (`in_work: true`) take its first free child
-from the same call with `parent=<epic>`. The CLI chooses the same way.
+with a second call, `sdlc_list_tasks` with `parent=<epic>`. The CLI chooses the
+same way.
 
 **Priority.** `clab edit ABC-12 --priority low|normal|high|urgent` (MCP —
 `sdlc_update_task`). A priority **does not change the place in the
