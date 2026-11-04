@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -103,6 +104,16 @@ func (s *Server) registerTools() {
 			"unavailable: stage_disabled — возврат в выключенный этап недоступен. Побочных "+
 			"эффектов нет — чистая проверка.",
 		s.checkGates)
+	add(s, "sdlc_decide_gate",
+		"Решение человека по гейту перехода: status passed, failed или waived, details — объект "+
+			"решения (у чек-листа {\"checked\": [id пунктов]}), seen_artifact_id — id последнего "+
+			"артефакта этапа, который видел решающий (\"\" — артефактов не было): сдан новый — 409 "+
+			"stage_result_changed, решение не пишется. Что вправе решить вызывающий — "+
+			"actor_decisions у гейта в sdlc_check_gates. Те же правила и коды, что у clab decide и "+
+			"POST /v1/tasks/<ключ>/transitions/<переход>/gates/<гейт>/decision; human_approval решает "+
+			"только человек. Задачу не двигает — переход отдельно, sdlc_request_transition. Токену "+
+			"задачи тул закрыт.",
+		s.decideGate)
 	add(s, "sdlc_request_transition",
 		"Запросить переход вперёд или откат назад. Движок прогоняет гейты; "+
 			"непройденные возвращаются с объяснением, задача остаётся на месте. Выключенные у "+
@@ -858,6 +869,47 @@ func (s *Server) checkGates(ctx context.Context, in checkGatesInput) (*sdk.CallT
 		return fail(err)
 	}
 	return ok(map[string]any{"transitions": previews, "stage_limit": limit})
+}
+
+type decideGateInput struct {
+	TaskKey    string `json:"task_key"`
+	Transition string `json:"transition" jsonschema:"ключ перехода, на котором стоит гейт"`
+	Gate       string `json:"gate" jsonschema:"ключ гейта"`
+	Status     string `json:"status" jsonschema:"passed, failed или waived"`
+	// any — по той же причине, что external_ref у sdlc_create_task.
+	Details any `json:"details,omitempty" jsonschema:"объект решения; у чек-листа {\"checked\": [\"id пункта\"]}"`
+	// Указатель: "" — «на этапе артефактов не было», отсутствие — без сверки.
+	SeenArtifactID *string `json:"seen_artifact_id,omitempty" jsonschema:"id последнего артефакта этапа, который видел решающий; пустая строка — артефактов не было"`
+}
+
+// decideGate — паритет POST …/gates/:g/decision (CLAB-410, R-12): тот же
+// DecideGateAs с актором Auth.Actor, право считает движок.
+func (s *Server) decideGate(ctx context.Context, in decideGateInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
+	if err := s.inProject(ctx, in.TaskKey); err != nil {
+		return fail(err)
+	}
+	if err := workflow.ValidateDecision(in.Status); err != nil {
+		return fail(err)
+	}
+	details, err := rawArgument(in.Details)
+	if err != nil {
+		return fail(err)
+	}
+	if len(details) == 0 {
+		details = json.RawMessage(`{}`)
+	}
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	out, err := s.engine.DecideGateAs(ctx, in.TaskKey, in.Transition, in.Gate, who, in.Status, details, in.SeenArtifactID)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(out)
 }
 
 type transitionInput struct {

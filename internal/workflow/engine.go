@@ -380,9 +380,12 @@ func (e *Engine) ExecuteAs(ctx context.Context, taskKey, transitionKey string, w
 			"to":         toStatus.Key,
 			// Основание права и роль этапа, из которого ушла задача
 			// (CLAB-380): self_approval на переходе не пишется — признак
-			// стоит на решении по гейту.
+			// стоит на решении по гейту. Уровень и вид токена — тот же
+			// набор, что у gate.decided (CLAB-410, K-2).
 			"via":        verdict.Via,
 			"stage_role": verdict.StageRole,
+			"level":      string(who.Level),
+			"token_kind": tokenKindOf(who),
 		}
 		if len(land.Skipped) > 0 {
 			payload["skips"] = res.Skips

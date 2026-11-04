@@ -16,7 +16,9 @@ func TestSelfApprovalInTimeline(t *testing.T) {
 	f := newAuditFixture(t)
 	ana := f.memberToken("user:ana", domain.MemberAgent, []string{"analyst"})
 	ana2 := f.memberToken("user:ana2", domain.MemberAgent, []string{"analyst"})
-	dev := f.memberToken("user:dev", domain.MemberAgent, []string{"developer"})
+	// Бот чужой роли: отказ по праву этапа (0072). Сотрудник той же роли
+	// решил бы гейт по уровню (CLAB-410).
+	dev := f.memberToken("agent:dev", domain.MemberAgent, []string{"developer"})
 	maint := f.memberToken("user:maint", domain.MemberMaintainer, nil)
 	const key = "SDLC-1"
 
@@ -52,7 +54,7 @@ func TestSelfApprovalInTimeline(t *testing.T) {
 		return out
 	}
 
-	// AC-C1: отказ чужой роли — 403, события нет.
+	// AC-C1: отказ бота чужой роли — 403, события нет.
 	if code, _ := decide(dev, "human_approval", "passed"); code != http.StatusForbidden {
 		t.Fatalf("апрув разработчиком: %d", code)
 	}

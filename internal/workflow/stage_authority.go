@@ -1,17 +1,22 @@
-// Право этапа (решение 0072, п. 1–2, 8–9; CLAB-379).
+// Право этапа (решение 0072, п. 1–2, 8–9; CLAB-379; эпик CLAB-404, CLAB-410).
 //
-// Участник уровня agent — человек-специалист: на этапе своей роли он
-// утверждает работу (human_approval, чек-лист) и двигает задачу вперёд или
-// возвратом; чужие этапы, статусы без исполнителя, снятие задачи, пределы и
-// waived остаются сопровождающему. Правило одно на переход, решение по
-// гейту, предпросмотр (actor_may*) и «Ждут меня»: транспорты его не
-// повторяют, а передают актора движку.
+// Уровни — для людей, роли — для агентов. Сотрудник (человек уровня agent)
+// ведёт задачу как в трекере: выполняет любой объявленный переход и решает
+// гейты любого этапа по таблице сотрудника — апрув и чек-лист
+// passed/failed, снятие пределов waived. Бот (агент-принципал
+// уровня agent) — по роли этапа: на этапе своей роли он утверждает работу
+// (human_approval, чек-лист) и двигает задачу вперёд или возвратом; чужие
+// этапы, статусы без исполнителя, снятие задачи, пределы и waived остаются
+// людям. Правило одно на переход, решение по гейту, предпросмотр
+// (actor_may*) и «Ждут меня»: транспорты его не повторяют, а передают актора
+// движку.
 //
-// StageAuthority — чистая функция над уровнем, набором ролей, ролью статуса
-// и действием: таблица проверяется без базы, а предсказание и исход
-// запроса не расходятся, потому что их считает она одна. Факты (статус
-// задачи, основная роль, откуда переход) движок читает под блокировкой
-// задачи. Токена задачи правило не касается: его рамка — executor.go.
+// StageAuthority — чистая функция над классом актора (Actor.Class), набором
+// ролей, ролью статуса и действием: таблица проверяется без базы, а
+// предсказание и исход запроса не расходятся, потому что их считает она
+// одна. Факты (статус задачи, основная роль, откуда переход) движок читает
+// под блокировкой задачи. Токена задачи правило не касается: его рамка —
+// executor.go.
 package workflow
 
 import (
@@ -26,8 +31,9 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
-// Основание права: по уровню (maintainer и выше), по роли этапа (agent) или
-// рамкой токена задачи. Его же пишет в события лента (CLAB-380).
+// Основание права: по уровню (maintainer и выше; сотрудник вне роли этапа),
+// по роли этапа (бот; сотрудник с ролью основного статуса) или рамкой токена
+// задачи. Его же пишет в события лента (CLAB-380, CLAB-410).
 const (
 	ViaLevel     = "level"
 	ViaStageRole = "stage_role"
@@ -93,6 +99,9 @@ type StageAction struct {
 	Gate     string
 	GateType string
 	Verdict  string
+	// Гейт — предел, который человек только снимает (humanOnly с waiveOnly):
+	// attempts_limit, stage_time_limit, agent_review с пределом перепроверок.
+	Limit bool
 }
 
 // StageVerdict — ответ права: можно ли, на каком основании, а если нельзя —
@@ -117,25 +126,70 @@ func (v StageVerdict) Err() error {
 	})
 }
 
-// StageAuthority решает, вправе ли актор уровня level с ролями roles
-// выполнить act на задаче с фактами facts. Уровни сравниваются через Covers:
-// новый уровень ниже agent (CLAB-302) получит «ничего», а не права agent.
-func StageAuthority(level domain.MemberRole, roles []string, facts StageFacts, act StageAction) StageVerdict {
+// StageAuthority решает, вправе ли actor выполнить act на задаче с фактами
+// facts. Решает класс актора (Actor.Class), а не сравнение уровней: новый
+// уровень ниже agent (CLAB-302) получит «ничего», а не права agent. Токен
+// задачи сюда не приходит — его рамку держат mayTransition и mayDecide.
+func StageAuthority(actor Actor, facts StageFacts, act StageAction) StageVerdict {
 	v := StageVerdict{StageRole: facts.StageRole}
-	switch {
-	case level.Covers(domain.MemberMaintainer):
+	switch actor.Class() {
+	case ClassMaintainer:
 		v.Allowed, v.Via = true, ViaLevel
 		return v
-	case !level.Covers(domain.MemberAgent):
-		v.Reason = DenyLevel
-		have := string(level)
-		if have == "" {
-			have = "нет участия"
-		}
-		v.Message = fmt.Sprintf("%s — нужен уровень %s, а есть %s", act.what(), domain.MemberAgent, have)
+	case ClassEmployee:
+		return employeeAuthority(actor.Roles, facts, act)
+	case ClassBot:
+		return botAuthority(actor.Roles, facts, act)
+	}
+	v.Reason = DenyLevel
+	have := string(actor.Level)
+	if have == "" {
+		have = "нет участия"
+	}
+	v.Message = fmt.Sprintf("%s — нужен уровень %s, а есть %s", act.what(), domain.MemberAgent, have)
+	return v
+}
+
+// employeeAuthority — право сотрудника (CLAB-410, R-6, R-7): любой
+// объявленный переход и решения по таблице сотрудника. Откуда идёт переход,
+// не важно, как у сопровождающего: предел этапа (stage_time_limit) снимают
+// на переходе входа, а он из текущего статуса не идёт; переход не из
+// текущего статуса до права не доходит (availableFrom). Основание — роль
+// этапа, если у сотрудника есть роль основного статуса, иначе уровень: вид
+// действия в нём не участвует.
+func employeeAuthority(roles []string, facts StageFacts, act StageAction) StageVerdict {
+	v := StageVerdict{StageRole: facts.StageRole, Via: ViaLevel}
+	if facts.StageRole != "" && hasRole(roles, facts.StageRole) {
+		v.Via = ViaStageRole
+	}
+	if act.Gate != "" && !act.employeeDecides() {
+		v.Via, v.Reason = "", DenyMaintainerAction
+		v.Message = fmt.Sprintf("%s — решение сопровождающего", act.what())
 		return v
 	}
+	v.Allowed = true
+	return v
+}
 
+// employeeDecides — таблица сотрудника (В-1 эпика CLAB-404): human_approval
+// и чек-лист — passed и failed, пределы (attempts_limit, stage_time_limit,
+// agent_review с пределом) — только waived. Прочие гейты и вердикты —
+// сопровождающему; agent_review без предела решает ревьюер.
+func (a StageAction) employeeDecides() bool {
+	if a.Limit {
+		return a.Verdict == domain.GateResultWaived
+	}
+	switch a.GateType {
+	case domain.GateHumanApproval, domain.GateChecklist:
+		return a.Verdict == domain.GateResultPassed || a.Verdict == domain.GateResultFailed
+	}
+	return false
+}
+
+// botAuthority — право бота (решение 0072 без изменений): только этап своей
+// роли и только работа этапа (stageWork).
+func botAuthority(roles []string, facts StageFacts, act StageAction) StageVerdict {
+	v := StageVerdict{StageRole: facts.StageRole}
 	switch {
 	case act.Global:
 		v.Reason = DenyNoStageRole
@@ -164,7 +218,7 @@ func StageAuthority(level domain.MemberRole, roles []string, facts StageFacts, a
 	return v
 }
 
-// stageWork — действие из перечня п. 2 решения 0072: утверждение работы
+// stageWork — действие бота из перечня п. 2 решения 0072: утверждение работы
 // этапа (human_approval passed/failed, чек-лист passed) и переход вперёд
 // или возвратом. Пределы, waived, провал чек-листа, прочие гейты, снятие и
 // переназначение задачи — нет.
@@ -244,17 +298,17 @@ func mayTransition(actor Actor, task domain.Task, t domain.Transition, stageRole
 		}
 		return StageVerdict{Allowed: true, Via: ViaTask, StageRole: stageRole}, nil
 	}
-	v := StageAuthority(actor.Level, actor.Roles, StageFacts{StatusKey: task.StatusKey, StageRole: stageRole},
-		transitionAction(task, t))
+	v := StageAuthority(actor, StageFacts{StatusKey: task.StatusKey, StageRole: stageRole}, transitionAction(task, t))
 	return v, v.Err()
 }
 
 // mayDecide — может ли актор вынести вердикт status по гейту gate перехода t
 // на прогоне run. who — принципал решающего (вид важен для гейтов, которые
-// решает только человек). Порядок проверок прежний для токена задачи и
-// сопровождающего; право этапа встаёт между рамкой токена задачи и
-// проверкой вида принципала. Одна функция для DecideGateAs, actor_may_decide
-// предпросмотра и can_decide «Ждут меня».
+// решает только человек). Порядок проверок прежний для токена задачи,
+// сопровождающего и бота; право этапа встаёт между рамкой токена задачи и
+// проверкой вида принципала. Сотруднику passed по пределу — 400 «вердикт
+// выносит движок» раньше 403 таблицы (K-5 CLAB-410). Одна функция для
+// DecideGateAs, actor_may_decide предпросмотра и can_decide «Ждут меня».
 func mayDecide(actor Actor, who domain.Principal, task domain.Task, run domain.StageRun, t domain.Transition,
 	gate domain.Gate, stageRole, status string) (StageVerdict, error) {
 	rule, onlyHuman := humanOnly(gate)
@@ -271,9 +325,13 @@ func mayDecide(actor Actor, who domain.Principal, task domain.Task, run domain.S
 		}
 		v.Allowed, v.Via = true, ViaTask
 	} else {
+		if actor.Class() == ClassEmployee && onlyHuman && rule.waiveOnly && status == domain.GateResultPassed {
+			return v, waiveOnlyRefusal(gate, status)
+		}
 		act := transitionAction(task, t)
 		act.Gate, act.GateType, act.Verdict = gate.Key, gate.Type, status
-		v = StageAuthority(actor.Level, actor.Roles, StageFacts{StatusKey: task.StatusKey, StageRole: stageRole}, act)
+		act.Limit = onlyHuman && rule.waiveOnly
+		v = StageAuthority(actor, StageFacts{StatusKey: task.StatusKey, StageRole: stageRole}, act)
 		if err := v.Err(); err != nil {
 			return v, err
 		}
@@ -290,9 +348,7 @@ func mayDecide(actor Actor, who domain.Principal, task domain.Task, run domain.S
 		}
 		if rule.waiveOnly && status != domain.GateResultWaived {
 			v.Allowed = false
-			return v, apperr.InvalidInput(
-				"по гейту %q вердикт выносит движок; человек может только снять его: "+
-					"status waived, а не %q", gate.Key, status)
+			return v, waiveOnlyRefusal(gate, status)
 		}
 	}
 	if err := enteredVia(task, run, t, gate); err != nil {
@@ -300,4 +356,12 @@ func mayDecide(actor Actor, who domain.Principal, task domain.Task, run domain.S
 		return v, err
 	}
 	return v, nil
+}
+
+// waiveOnlyRefusal — вердикт по пределу выносит движок, человек его только
+// снимает.
+func waiveOnlyRefusal(gate domain.Gate, status string) error {
+	return apperr.InvalidInput(
+		"по гейту %q вердикт выносит движок; человек может только снять его: "+
+			"status waived, а не %q", gate.Key, status)
 }

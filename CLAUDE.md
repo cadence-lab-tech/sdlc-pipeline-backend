@@ -602,27 +602,36 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   (`DecideGateAs` с привязкой), переход — `advance` и `reject`
   (`ExecuteAs`). Транспорты передают актора `Auth.Actor` (в нём и
   `Auth.Bound`), а не зовут `Execute`.
-- **Право этапа — одна функция движка** (решение 0072, CLAB-379,
-  `workflow/stage_authority.go`). Участник уровня `agent` на этапе своей
-  роли (основная роль текущего статуса ∈ `Auth.AllowedRoles`) решает
-  `human_approval` passed/failed и чек-лист passed и двигает задачу
-  `advance`/`reject`; остальное — `maintainer` и выше. `StageAuthority`
-  чистая; `mayTransition` и `mayDecide` (рамка токена задачи, право этапа,
+- **Право этапа — одна функция движка** (решение 0072, CLAB-379, CLAB-410,
+  `workflow/stage_authority.go`). Решает класс актора (`Actor.Class`):
+  уровни — для людей, роли — для агентов. Сотрудник (`user` уровня `agent`)
+  выполняет любой объявленный переход и решает гейты любого этапа по своей
+  таблице: `human_approval` и чек-лист — passed/failed, пределы
+  (`attempts_limit`, `stage_time_limit`, `agent_review` с пределом) — только
+  waived, `passed` по пределу — 400 раньше 403 таблицы; прочее — 403
+  `maintainer_action`. Бот (агент-принципал уровня `agent`) — только на
+  этапе своей роли (основная роль текущего статуса ∈ `Auth.AllowedRoles`):
+  чек-лист passed и `advance`/`reject`, апрув — никогда (вид принципала);
+  остальное — людям. `maintainer` и выше — без ограничений. `via` —
+  `stage_role`, если у актора роль основного статуса, иначе `level`.
+  `StageAuthority` чистая; `mayTransition` и `mayDecide` (рамка токена задачи, право этапа,
   вид принципала у гейтов «только человек») зовут `ExecuteAs`,
   `DecideGateAs` под блокировкой задачи, предпросмотр (`PreviewFor`:
   `actor_may`, `actor_may_decide`, `actor_decisions`, `actor_deny`),
   предпроверка MCP (`MayTransition`, до сдачи артефактов) и «Ждут меня»
   (`can_decide` элемента): предсказание и исход не расходятся. Порог
   маршрутов перехода и решения — `agent`, ручки и тулы уровни и роли не
-  сравнивают. `Execute`, `ExecuteBound`, `DecideGate`, `DecideGateSeen` —
+  сравнивают; решение по гейту через MCP — `sdlc_decide_gate` поверх того же
+  `DecideGateAs`, вне белого списка токена задачи. `Execute`, `ExecuteBound`, `DecideGate`, `DecideGateSeen` —
   обёртки без права этапа (`UncheckedActor`) для тестов и внутренних путей;
   вне тестов их не зовут — держит `TestTransportsUseStageAuthority`.
 - **Лента показывает, кто решил и «свой» ли он** (CLAB-380, решение 0072
   п. 4, `workflow/selfapproval.go`). `gate.decided` несёт `level`, `via`
   (`stage_role` | `level` | `task`), `token_kind` (`api` | `session` | `task`,
   без токена `none`), `stage_role`, `self_approval` и `self_basis` ⊆
-  {`lease`, `artifact`}; `task.advanced` и `task.rejected` — `via` и
-  `stage_role`. Значения берутся из `StageVerdict` и `Actor` (вид токена
+  {`lease`, `artifact`}; `task.advanced`, `task.rejected` и
+  `task.cancelled` — `via`, `stage_role`, `level` и `token_kind` (CLAB-410).
+  Значения берутся из `StageVerdict` и `Actor` (вид токена
   кладёт `Auth.Actor` значением) под блокировкой задачи в `DecideGateAs` и
   `ExecuteAs`; транспорты ключей не пишут. «Свой» — решающий брал аренду
   прогона или сдавал в нём артефакты по **событиям** `stage.claimed` и

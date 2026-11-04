@@ -344,7 +344,7 @@ func TestToolSetHasNoFileContentTools(t *testing.T) {
 	want := []string{
 		"sdlc_add_repository", "sdlc_apply_instruction", "sdlc_approve_role_proposal", "sdlc_assign_task",
 		"sdlc_check_gates", "sdlc_claim_task",
-		"sdlc_create_task", "sdlc_export_bundle", "sdlc_get_artifact", "sdlc_get_document",
+		"sdlc_create_task", "sdlc_decide_gate", "sdlc_export_bundle", "sdlc_get_artifact", "sdlc_get_document",
 		"sdlc_get_drift", "sdlc_get_instruction", "sdlc_get_role", "sdlc_get_task", "sdlc_heartbeat",
 		"sdlc_import_bundle", "sdlc_import_guide", "sdlc_link_repo_ref", "sdlc_link_tasks",
 		"sdlc_list_documents", "sdlc_list_instructions", "sdlc_list_role_proposals", "sdlc_list_tasks",

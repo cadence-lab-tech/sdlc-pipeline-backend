@@ -147,6 +147,10 @@ func TestGateDecidedSelfApprovalFields(t *testing.T) {
 			ViaLevel, "api", "maintainer", true, []string{"lease"}},
 		{"maintainer без оснований", func(tk domain.Task) { claim(tk, false) }, maintColleague,
 			domain.GateResultPassed, ViaLevel, "api", "maintainer", false, []string{}},
+		// Сотрудник вне роли этапа (CLAB-410): via=level.
+		{"сотрудник вне роли этапа", func(domain.Task) {},
+			Actor{Principal: colleague, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenAPI},
+			domain.GateResultPassed, ViaLevel, "api", "agent", false, []string{}},
 		{"актор без токена (заголовок)", func(domain.Task) {},
 			Actor{Principal: colleague, Level: domain.MemberAdmin}, domain.GateResultPassed,
 			ViaLevel, "none", "admin", false, []string{}},
@@ -227,24 +231,43 @@ func TestGateDecidedSelfApprovalFields(t *testing.T) {
 	})
 }
 
-// AC-18, AC-C1, AC-C6: task.advanced и task.rejected несут via и stage_role,
+// AC-18, AC-C1, AC-C6 (CLAB-380), AC-6 и K-2 (CLAB-410): task.advanced,
+// task.rejected и task.cancelled несут via, stage_role, level и token_kind,
 // прежние ключи на месте, self_approval нет; отказ 403 событий не пишет.
 func TestTransitionEventsCarryVia(t *testing.T) {
 	w := newRightsWorld(t)
+	bot, err := w.store.ResolveActor(w.ctx, w.store.DB(), "bot", domain.PrincipalAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	analyst := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}, TokenKind: domain.TokenAPI}
-	other := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenAPI}
+	employee := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenSession}
+	botOther := Actor{Principal: bot, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenAPI}
 	maintainer := Actor{Principal: w.lead, Level: domain.MemberMaintainer, TokenKind: domain.TokenAPI}
-
-	task := w.task("analysis")
-	for _, g := range []string{"artifacts", "peer_review", "human_approval", "drift", "repo_scope"} {
-		if _, err := w.engine.DecideGate(w.ctx, task.Key, "analysis_done", g, w.lead.ID, nil,
-			domain.GateResultWaived, json.RawMessage(`{}`)); err != nil {
-			t.Fatal(err)
+	waive := func(task domain.Task, tr string, gates ...string) {
+		t.Helper()
+		for _, g := range gates {
+			if _, err := w.engine.DecideGate(w.ctx, task.Key, tr, g, w.lead.ID, nil,
+				domain.GateResultWaived, json.RawMessage(`{}`)); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
+	fields := func(name string, ev map[string]any, via, role, level, token string) {
+		t.Helper()
+		if ev["via"] != via || ev["stage_role"] != role || ev["level"] != level || ev["token_kind"] != token {
+			t.Fatalf("%s: %v, ждали via=%s stage_role=%s level=%s token_kind=%s", name, ev, via, role, level, token)
+		}
+		if _, ok := ev["self_approval"]; ok {
+			t.Fatalf("%s: self_approval на переходе: %v", name, ev)
+		}
+	}
+
+	task := w.task("analysis")
+	waive(task, "analysis_done", "artifacts", "peer_review", "human_approval", "drift", "repo_scope")
 	before := w.eventCount(task, domain.EventTaskAdvanced)
-	if _, err := w.engine.ExecuteAs(w.ctx, task.Key, "analysis_done", other, ""); !forbidden(err) {
-		t.Fatalf("чужая роль: %v", err)
+	if _, err := w.engine.ExecuteAs(w.ctx, task.Key, "analysis_done", botOther, ""); !forbidden(err) {
+		t.Fatalf("бот чужой роли: %v", err)
 	}
 	if w.eventCount(task, domain.EventTaskAdvanced) != before {
 		t.Fatal("отказ записал task.advanced")
@@ -253,30 +276,50 @@ func TestTransitionEventsCarryVia(t *testing.T) {
 		t.Fatal(err)
 	}
 	adv := w.lastEvent(task, domain.EventTaskAdvanced)
-	if adv["via"] != ViaStageRole || adv["stage_role"] != "analyst" || adv["transition"] != "analysis_done" ||
-		adv["from"] != "analysis" || adv["to"] != "architecture" || adv["comment"] != "готово" {
+	if adv["transition"] != "analysis_done" || adv["from"] != "analysis" || adv["to"] != "architecture" || adv["comment"] != "готово" {
 		t.Fatalf("task.advanced: %v", adv)
 	}
-	if _, ok := adv["self_approval"]; ok {
-		t.Fatalf("self_approval на переходе: %v", adv)
-	}
+	fields("advance по роли", adv, ViaStageRole, "analyst", "agent", "api")
 
 	// Возврат сопровождающим: via=level, роль статуса, откуда ушла задача.
-	if _, err := w.engine.DecideGate(w.ctx, task.Key, "reject_to_analysis", "problem_report", w.lead.ID, nil,
-		domain.GateResultWaived, json.RawMessage(`{}`)); err != nil {
-		t.Fatal(err)
-	}
+	waive(task, "reject_to_analysis", "problem_report")
 	if _, err := w.engine.ExecuteAs(w.ctx, task.Key, "reject_to_analysis", maintainer, ""); err != nil {
 		t.Fatal(err)
 	}
 	rej := w.lastEvent(task, domain.EventTaskRejected)
-	if rej["via"] != ViaLevel || rej["stage_role"] != "architect" || rej["from"] != "architecture" ||
-		rej["to"] != "analysis" || rej["transition"] != "reject_to_analysis" {
+	if rej["from"] != "architecture" || rej["to"] != "analysis" || rej["transition"] != "reject_to_analysis" {
 		t.Fatalf("task.rejected: %v", rej)
 	}
-	if _, ok := rej["self_approval"]; ok {
-		t.Fatalf("self_approval на возврате: %v", rej)
+	fields("reject сопровождающим", rej, ViaLevel, "architect", "maintainer", "api")
+
+	// Сотрудник вне роли этапа: advance чужого этапа, start из статуса без
+	// исполнителя и cancel — via=level (CLAB-410, AC-6).
+	other := w.task("analysis")
+	waive(other, "analysis_done", "artifacts", "peer_review", "human_approval", "drift", "repo_scope")
+	if _, err := w.engine.ExecuteAs(w.ctx, other.Key, "analysis_done", employee, ""); err != nil {
+		t.Fatalf("сотрудник: analysis_done чужого этапа: %v", err)
 	}
+	fields("advance сотрудником", w.lastEvent(other, domain.EventTaskAdvanced), ViaLevel, "analyst", "agent", "session")
+	fresh := w.task("new")
+	if _, err := w.engine.ExecuteAs(w.ctx, fresh.Key, "start", employee, ""); err != nil {
+		t.Fatalf("сотрудник: start: %v", err)
+	}
+	fields("start сотрудником", w.lastEvent(fresh, domain.EventTaskAdvanced), ViaLevel, "", "agent", "session")
+	if _, err := w.engine.ExecuteAs(w.ctx, fresh.Key, "cancel", employee, ""); err != nil {
+		t.Fatalf("сотрудник: cancel: %v", err)
+	}
+	fields("cancel сотрудником", w.lastEvent(fresh, domain.EventTaskCancelled), ViaLevel, "analyst", "agent", "session")
+
+	// Токен задачи: via=task, token_kind=task (K-2).
+	tt := w.task("analysis")
+	waive(tt, "analysis_done", "artifacts", "peer_review", "human_approval", "drift", "repo_scope")
+	run := w.run(tt)
+	bound := Actor{Principal: w.lead, Level: domain.MemberAdmin, TokenKind: domain.TokenTask,
+		Bound: &TaskBinding{StageRunID: run.ID, TaskID: tt.ID, TaskKey: tt.Key}}
+	if _, err := w.engine.ExecuteAs(w.ctx, tt.Key, "analysis_done", bound, ""); err != nil {
+		t.Fatalf("токен задачи: %v", err)
+	}
+	fields("advance токеном задачи", w.lastEvent(tt, domain.EventTaskAdvanced), ViaTask, "analyst", "admin", "task")
 }
 
 // R4, R8: вид токена в Actor ставит Auth.Actor из Identity.Token; без
