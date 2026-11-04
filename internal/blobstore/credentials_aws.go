@@ -72,7 +72,8 @@ func localAgent(host string) bool {
 
 func (p *podIdentity) fetch(ctx context.Context) (Credentials, error) {
 	fail := func(format string, a ...any) (Credentials, error) {
-		return Credentials{}, fmt.Errorf("blobstore: учётные данные S3 ("+SourcePodIdentity+"): "+p.uri+": "+format, a...)
+		// Адрес — аргумент, а не часть формата: %41 в нём не глагол.
+		return Credentials{}, fmt.Errorf("blobstore: учётные данные S3 (%s): %s: %s", SourcePodIdentity, p.uri, fmt.Sprintf(format, a...))
 	}
 	token := p.token
 	if p.tokenFile != "" {
@@ -140,7 +141,7 @@ func stsEndpoint(region string) string {
 
 func (w *webIdentity) fetch(ctx context.Context) (Credentials, error) {
 	fail := func(format string, a ...any) (Credentials, error) {
-		return Credentials{}, fmt.Errorf("blobstore: учётные данные S3 ("+SourceIRSA+"): STS "+w.endpoint+": "+format, a...)
+		return Credentials{}, fmt.Errorf("blobstore: учётные данные S3 (%s): STS %s: %s", SourceIRSA, w.endpoint, fmt.Sprintf(format, a...))
 	}
 	token, err := readToken(w.tokenFile)
 	if err != nil {

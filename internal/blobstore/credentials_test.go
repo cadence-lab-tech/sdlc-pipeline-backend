@@ -586,6 +586,25 @@ func TestPodIdentityErrors(t *testing.T) {
 	}
 }
 
+// Адрес с процентной записью (%41, %2F) попадает в сообщение как есть, а не
+// как глагол формата: иначе администратор прочтёт «%!A(MISSING)» вместо адреса.
+func TestSourceErrorKeepsPercentInAddress(t *testing.T) {
+	const uri = "http://127.0.0.1:1/v1/credentials?role=a%41%2Fb"
+	p, err := newPodIdentity(uri, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.fetch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), uri) || strings.Contains(err.Error(), "%!") {
+		t.Fatalf("pod identity: адрес искажён: %v", err)
+	}
+	w := newWebIdentity("http://127.0.0.1:1/sts?x=%41", "arn:aws:iam::1:role/x", "s", tokenFile(t, "jwt"))
+	_, err = w.fetch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "http://127.0.0.1:1/sts?x=%41") || strings.Contains(err.Error(), "%!") {
+		t.Fatalf("irsa: адрес искажён: %v", err)
+	}
+}
+
 // AC-10: адрес агента — https или http только до узла; запрос к агенту идёт
 // мимо прокси из окружения, к STS — как обычный исходящий.
 func TestPodIdentityAddressAndProxy(t *testing.T) {
