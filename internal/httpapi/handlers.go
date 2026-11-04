@@ -709,6 +709,33 @@ func (s *Server) executeTransition(c *gin.Context) {
 	})
 }
 
+type moveTaskRequest struct {
+	To     string `json:"to"`
+	Reason string `json:"reason"`
+}
+
+// moveTask переводит задачу в статус её цикла мимо переходов и гейтов
+// (CLAB-408). Право, причина, статус и выключенный этап — в движке: те же
+// коды и тексты, что у sdlc_move_task.
+func (s *Server) moveTask(c *gin.Context) {
+	var req moveTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, s.log, apperr.InvalidInput("тело запроса: {\"to\": \"<статус>\", \"reason\": \"<причина>\"}"))
+		return
+	}
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	res, err := s.engine.MoveTask(c.Request.Context(), c.Param("taskKey"), req.To, req.Reason, who)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 type decideGateRequest struct {
 	Status  string          `json:"status" binding:"required"`
 	Details json.RawMessage `json:"details"`

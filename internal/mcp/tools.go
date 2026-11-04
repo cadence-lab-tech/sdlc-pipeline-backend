@@ -114,6 +114,15 @@ func (s *Server) registerTools() {
 			"только человек. Задачу не двигает — переход отдельно, sdlc_request_transition. Токену "+
 			"задачи тул закрыт.",
 		s.decideGate)
+	add(s, "sdlc_move_task",
+		"Перевести задачу в любой статус её цикла вне переходов (как в трекере): to — ключ статуса, "+
+			"reason — причина, обязательна. Гейты не вычисляются; текущий прогон и его перепроверки "+
+			"закрываются (outcome moved, аренда снята, токен исполнителя гаснет), открывается новая "+
+			"попытка статуса назначения. Перевод в текущий статус — повторный проход этапа. Право — "+
+			"actor_rights.move в sdlc_get_task: сотрудник уровня agent и сопровождающий; агенту и "+
+			"токену задачи тул закрыт. Те же коды, что у clab move и POST /v1/tasks/<ключ>/move: "+
+			"неизвестный статус — invalid_input со списком statuses, выключенный этап — stage_disabled.",
+		s.moveTask)
 	add(s, "sdlc_request_transition",
 		"Запросить переход вперёд или откат назад. Движок прогоняет гейты; "+
 			"непройденные возвращаются с объяснением, задача остаётся на месте. Выключенные у "+
@@ -906,6 +915,32 @@ func (s *Server) decideGate(ctx context.Context, in decideGateInput) (*sdk.CallT
 		return fail(err)
 	}
 	out, err := s.engine.DecideGateAs(ctx, in.TaskKey, in.Transition, in.Gate, who, in.Status, details, in.SeenArtifactID)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(out)
+}
+
+type moveTaskInput struct {
+	TaskKey string `json:"task_key"`
+	To      string `json:"to" jsonschema:"ключ статуса цикла задачи"`
+	Reason  string `json:"reason" jsonschema:"почему задачу переводят; обязательна"`
+}
+
+// moveTask — паритет POST /v1/tasks/:key/move (CLAB-408): тот же MoveTask
+// с актором Auth.Actor, право считает движок.
+func (s *Server) moveTask(ctx context.Context, in moveTaskInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
+	if err := s.inProject(ctx, in.TaskKey); err != nil {
+		return fail(err)
+	}
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	out, err := s.engine.MoveTask(ctx, in.TaskKey, in.To, in.Reason, who)
 	if err != nil {
 		return fail(err)
 	}

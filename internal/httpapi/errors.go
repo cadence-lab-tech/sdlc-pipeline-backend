@@ -46,7 +46,8 @@ func statusFor(code apperr.Code) int {
 		apperr.CodeTaskNotClaimable, apperr.CodeLeaseHeldByOther,
 		apperr.CodeLeaseExpired, apperr.CodeDriftUnresolved,
 		apperr.CodeScopeExpansionForbidden, apperr.CodeStageTimeExceeded,
-		apperr.CodeUsageReportRequired, apperr.CodeStaleRoleBase:
+		apperr.CodeUsageReportRequired, apperr.CodeStaleRoleBase,
+		apperr.CodeStageDisabled:
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
