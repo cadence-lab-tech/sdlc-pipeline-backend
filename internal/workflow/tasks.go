@@ -342,19 +342,25 @@ func checkArtifactSchema(kind string, schema json.RawMessage, content []byte) er
 type UpdateScopeInput struct {
 	// Ссылки на репозитории проекта: owner/name, name или role_hint.
 	// Расширение области — решение человека (решение 0015, 0072 п. 6):
-	// движок требует уровень не ниже сопровождающего.
+	// сопровождающего или сотрудника (CLAB-411), не агента.
 	AddRepositories []string
 	// Репозитории, которые уходят из области; ссылки — те же, что у
 	// AddRepositories. Сужение — тоже решение человека: тул MCP его не
-	// передаёт, а движок требует уровень не ниже сопровождающего.
+	// передаёт, а движок его агенту не открывает.
 	RemoveRepositories []string
 	// Свойства, которые нужно поменять: JSON-объект, сливаемый с текущими.
 	// Не названные ключи не меняются, null снимает ключ; nil и JSON null —
 	// не трогать.
 	Properties json.RawMessage
 	Note       string
-	// Уровень актора в проекте. Пусто — права выключены (режим header).
+	// Уровень актора в проекте. Пусто — права выключены (внутренние пути).
 	Level domain.MemberRole
+	// Вид принципала актора: сотрудник (user) от бота (agent) отличается
+	// только им (CLAB-411). Пусто — бот.
+	Kind domain.PrincipalKind
+	// Привязка токена задачи: область и свойства ему закрыты и в движке, не
+	// только белым списком.
+	Bound *TaskBinding
 }
 
 // UpdateScope меняет область задачи по репозиториям и её свойства.
@@ -369,22 +375,24 @@ type UpdateScopeInput struct {
 // единственный репозиторий однорепозиторной задачи, и пустой область
 // оказывается только посередине, а не на коммите.
 //
-// Область меняет в обе стороны только сопровождающий: расширение — граница,
-// которую не закрывает и самоапрув этапа (решение 0072 п. 6), иначе агент
-// расширил бы область, сдал работу и утвердил её сам. Свойства без
-// репозиториев — уровень agent, как и прежде. Отказ — до транзакции: свойства
-// из того же запроса не применяются.
+// Область меняет в обе стороны человек — сопровождающий или сотрудник
+// (CLAB-411, TaskRight): расширение — граница, которую не закрывает и
+// самоапрув этапа (решение 0072 п. 6), иначе агент расширил бы область,
+// сдал работу и утвердил её сам. Свойства без репозиториев — и боту, как
+// прежде. Отказ — до транзакции: свойства из того же запроса не
+// применяются.
 func (e *Engine) UpdateScope(ctx context.Context, taskKey string, actor uuid.UUID, in UpdateScopeInput) (domain.Task, error) {
-	if len(in.AddRepositories) > 0 && in.Level != "" && !in.Level.Covers(domain.MemberMaintainer) {
-		return domain.Task{}, apperr.Forbidden(
-			"расширить область задачи может сопровождающий проекта: " +
-				"добавить репозиторий в область — решение человека, не агента; " +
-				"опишите нужный репозиторий и причину в артефакте этапа и в отчёте")
+	who := Actor{Principal: domain.Principal{ID: actor, Kind: in.Kind}, Level: in.Level, Bound: in.Bound}
+	act, narrow := ActProperties, false
+	switch {
+	case len(in.AddRepositories) > 0:
+		act = ActScope
+	case len(in.RemoveRepositories) > 0:
+		act, narrow = ActScope, true
 	}
-	if len(in.RemoveRepositories) > 0 && in.Level != "" && !in.Level.Covers(domain.MemberMaintainer) {
-		return domain.Task{}, apperr.Forbidden(
-			"сузить область задачи может сопровождающий проекта: " +
-				"убрать репозиторий из области — решение человека, не агента")
+	// Право по классу от задачи не зависит: факты аренды ему не нужны.
+	if err := TaskRight(who, act, TaskFacts{Narrow: narrow}); err != nil {
+		return domain.Task{}, err
 	}
 
 	// JSON null в теле запроса приходит как RawMessage("null"): это то же
@@ -593,11 +601,12 @@ type UpdateTaskInput struct {
 	// Привязка токена задачи (Auth.Bound): выбор этапов своей задачи токену
 	// задачи закрыт (п. 11). nil — человек или личный токен.
 	Bound *TaskBinding
-	// Уровень актора в проекте. Ниже сопровождающего действует правило
-	// агента: править можно задачу с его живой арендой и её дочерние —
-	// ровно та рамка, в которой он их заводит. Пусто — правило выключено:
-	// в режиме header прав нет вовсе.
+	// Уровень и вид принципала актора — класс права (TaskRight): бот правит
+	// задачу с его живой арендой и её дочерние — ровно та рамка, в которой
+	// он их заводит; сотрудник и сопровождающий — любую. Пустой уровень —
+	// правило выключено (внутренние пути).
 	Level domain.MemberRole
+	Kind  domain.PrincipalKind
 }
 
 // UpdateTask меняет постановку задачи: заголовок, описание, приоритет, метки
@@ -669,7 +678,8 @@ func (e *Engine) UpdateTask(ctx context.Context, taskKey string, actor uuid.UUID
 				return err
 			}
 		}
-		if err := e.agentMayEdit(ctx, tx, actor, task, in.Level); err != nil {
+		who := Actor{Principal: domain.Principal{ID: actor, Kind: in.Kind}, Level: in.Level, Bound: in.Bound}
+		if err := e.mayTask(ctx, tx, who, ActEdit, task); err != nil {
 			return err
 		}
 		// Слияние — под блокировкой задачи: прочитать, слить и записать
@@ -793,8 +803,7 @@ func (e *Engine) mergeOptionalStages(ctx context.Context, tx pgx.Tx, task domain
 		return from, from, nil
 	}
 	if task.ClosedAt != nil {
-		return nil, nil, apperr.Conflict(
-			"задача %s закрыта: выбор этапов у неё не меняется", task.Key)
+		return nil, nil, closedStageChoice(task)
 	}
 	to = resolveChoice(optional, from, patch)
 	// Задача не стоит в выключенном этапе: выключить текущий статус нельзя,
@@ -815,40 +824,6 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
-}
-
-// agentMayEdit — рамка, в которой агент вправе править постановку.
-//
-// Она повторяет рамку заведения задач (agentMayCreate): аналитик уточняет
-// нарезку эпика, который держит, и не трогает чужие задачи. Сопровождающий и
-// выше не ограничены ничем — в том числе на закрытых задачах.
-func (e *Engine) agentMayEdit(ctx context.Context, q postgres.Querier, actor uuid.UUID, task domain.Task, level domain.MemberRole) error {
-	if level == "" || level.Covers(domain.MemberMaintainer) {
-		return nil
-	}
-	held, err := e.holdsLease(ctx, q, task, actor)
-	if err != nil {
-		return err
-	}
-	if held {
-		return nil
-	}
-	if task.ParentKey != nil {
-		parent, err := e.store.GetTaskByKey(ctx, q, *task.ParentKey)
-		if err != nil {
-			return err
-		}
-		held, err := e.holdsLease(ctx, q, parent, actor)
-		if err != nil {
-			return err
-		}
-		if held {
-			return nil
-		}
-	}
-	return apperr.Forbidden(
-		"задачу %s держите не вы: править постановку может тот, кто забрал её этап "+
-			"или этап её родительской задачи", task.Key)
 }
 
 // holdsLease отвечает, держит ли актор живую аренду текущего этапа задачи.
@@ -875,11 +850,15 @@ type CreateTaskInput struct {
 	// Выбор необязательных этапов (решение 0066, п. 9): не названные берут
 	// умолчание цикла, который задача получит по типу.
 	OptionalStages json.RawMessage
-	// Уровень актора в проекте. Ниже сопровождающего действует правило агента:
-	// заводить можно только детей задачи, которую он держит по аренде, и только
-	// внутри её области (решение 0024). Пусто — правило выключено: в режиме
-	// header прав нет вовсе.
+	// Уровень, вид принципала и привязка токена задачи — класс права
+	// (TaskRight): бот заводит только детей задачи, которую держит по аренде,
+	// и только внутри её области (решение 0024); токен задачи — детей своей
+	// задачи в её области при любом уровне держателя (R-4 CLAB-411);
+	// сотрудник и сопровождающий — где угодно. Пустой уровень — правило
+	// выключено (внутренние пути).
 	Level domain.MemberRole
+	Kind  domain.PrincipalKind
+	Bound *TaskBinding
 }
 
 // CreateTask заводит задачу и ставит её на начальный статус цикла её типа.
@@ -912,7 +891,7 @@ func (e *Engine) CreateTask(ctx context.Context, projectKey string, actor uuid.U
 			}
 			in.AssigneeID = &assignee.ID
 		}
-		if err := e.agentMayCreate(ctx, tx, actor, in); err != nil {
+		if err := e.mayCreate(ctx, tx, actor, in); err != nil {
 			return err
 		}
 
@@ -1036,53 +1015,22 @@ func prepareTaskModelLevels(in *CreateTaskInput) (stagePatch, error) {
 	return patch, nil
 }
 
-// agentMayCreate — рамка, в которой агент вправе заводить задачи.
-//
-// Оркестратор нарезает эпик, который держит: он не может завести задачу в
-// чужом эпике и не может расширить область — расширение области решает
-// человек (решение 0015). Сопровождающий и выше не ограничены ничем.
-func (e *Engine) agentMayCreate(ctx context.Context, q postgres.Querier, actor uuid.UUID, in CreateTaskInput) error {
-	if in.Level == "" || in.Level.Covers(domain.MemberMaintainer) {
-		return nil
-	}
+// mayCreate — право актора завести задачу: без parent — ActCreate, с ним —
+// ActCreateChild над родителем и репозитории ребёнка в области родителя для
+// бота и токена задачи (childInScope).
+func (e *Engine) mayCreate(ctx context.Context, q postgres.Querier, actor uuid.UUID, in CreateTaskInput) error {
+	who := Actor{Principal: domain.Principal{ID: actor, Kind: in.Kind}, Level: in.Level, Bound: in.Bound}
 	if in.ParentKey == "" {
-		return apperr.Forbidden(
-			"агент заводит только дочерние задачи той, которую держит: укажите parent")
+		return TaskRight(who, ActCreate, TaskFacts{})
 	}
-
 	parent, err := e.store.GetTaskByKey(ctx, q, in.ParentKey)
 	if err != nil {
 		return err
 	}
-	held, err := e.holdsLease(ctx, q, parent, actor)
-	if err != nil {
+	if err := e.mayTask(ctx, q, who, ActCreateChild, parent); err != nil {
 		return err
 	}
-	if !held {
-		return apperr.Forbidden(
-			"задачу %s держите не вы: нарезать её на дочерние может только тот, кто её забрал",
-			parent.Key)
-	}
-
-	if len(in.Repositories) == 0 {
-		return nil
-	}
-	allowed := map[string]bool{}
-	for _, r := range parent.Repositories {
-		allowed[r.Owner+"/"+r.Name] = true
-		allowed[r.Name] = true
-		if r.RoleHint != nil {
-			allowed[*r.RoleHint] = true
-		}
-	}
-	for _, ref := range in.Repositories {
-		if !allowed[ref] {
-			return apperr.New(apperr.CodeScopeExpansionForbidden,
-				"репозиторий %q вне области задачи %s: расширить область — решение человека",
-				ref, parent.Key)
-		}
-	}
-	return nil
+	return childInScope(who, parent, in.Repositories)
 }
 
 // resolveAssignee находит исполнителя по хэндлу.
@@ -1099,7 +1047,12 @@ func (e *Engine) resolveAssignee(ctx context.Context, q postgres.Querier, raw st
 // LinkTasks связывает две задачи. Отношение blocks задаёт порядок работ, и
 // его читает гейт dependencies_closed; остальные отношения — контекст для
 // агента и человека.
-func (e *Engine) LinkTasks(ctx context.Context, fromKey, toKey, rel, note string, actor uuid.UUID, remove bool) ([]postgres.TaskLink, error) {
+//
+// Право — TaskRight по задаче from (CLAB-411): сотрудник и сопровождающий —
+// любые задачи проекта, бот — как прежде, токен задачи — по паре задач, как
+// RequireLink.
+func (e *Engine) LinkTasks(ctx context.Context, fromKey, toKey, rel, note string, who Actor, remove bool) ([]postgres.TaskLink, error) {
+	actor := who.Principal.ID
 	if !domain.ValidTaskLinkRel(rel) {
 		return nil, apperr.InvalidInput("отношение %q не поддерживается: %v", rel, domain.TaskLinkRels)
 	}
@@ -1119,6 +1072,10 @@ func (e *Engine) LinkTasks(ctx context.Context, fromKey, toKey, rel, note string
 		}
 		if from.ProjectID != to.ProjectID {
 			return apperr.InvalidInput("задачи из разных проектов")
+		}
+		// Аренды связи не нужны ни одному классу: фактов из базы нет.
+		if err := TaskRight(who, ActLink, TaskFacts{Task: from, Other: &to, Rel: rel}); err != nil {
+			return err
 		}
 
 		if remove {
@@ -1146,12 +1103,18 @@ func (e *Engine) LinkTasks(ctx context.Context, fromKey, toKey, rel, note string
 
 // Assign меняет исполнителя задачи. Назначенную задачу заберёт только он:
 // так оркестратор адресует нарезку конкретному раннеру (решение 0025).
-func (e *Engine) Assign(ctx context.Context, taskKey, handle string, actor uuid.UUID) (domain.Task, error) {
+// Право — TaskRight (CLAB-411): токен задачи — круг записи своей задачи, бот
+// — как прежде.
+func (e *Engine) Assign(ctx context.Context, taskKey, handle string, who Actor) (domain.Task, error) {
 	var out domain.Task
+	actor := who.Principal.ID
 
 	err := e.store.InTx(ctx, func(tx pgx.Tx) error {
 		task, err := e.store.LockTaskByKey(ctx, tx, taskKey)
 		if err != nil {
+			return err
+		}
+		if err := TaskRight(who, ActAssign, TaskFacts{Task: task}); err != nil {
 			return err
 		}
 

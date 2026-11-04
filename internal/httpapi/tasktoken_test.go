@@ -215,8 +215,12 @@ func TestTaskTokenOverREST(t *testing.T) {
 			}
 			if p == "/state" {
 				// Состояние несёт поля зрителя (кто держит аренду), и
-				// принципал у обоих токенов один — тело совпадает целиком.
-				if _, same := call("GET", "/v1/tasks/"+key+p, pool, nil); mustJSON(t, same) != mustJSON(t, body) {
+				// принципал у обоих токенов один — тело совпадает целиком,
+				// кроме права на задачу: у токена задачи оно своё (CLAB-411).
+				_, same := call("GET", "/v1/tasks/"+key+p, pool, nil)
+				delete(same, "actor_rights")
+				delete(body, "actor_rights")
+				if mustJSON(t, same) != mustJSON(t, body) {
 					t.Errorf("GET %s%s: токену задачи не то, что личному", key, p)
 				}
 			}

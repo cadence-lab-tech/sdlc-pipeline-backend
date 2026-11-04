@@ -451,24 +451,36 @@ func TestUpdateScopeDisablesMultiRepo(t *testing.T) {
 	}
 }
 
-// CLAB-391, AC-8: расширение области — с уровня maintainer. Отказ agent — до
-// транзакции, свойства из того же вызова не применяются, событий нет; без
-// add_repositories agent свойства по-прежнему правит; пустой уровень
-// (режим header и внутренние вызовы) правила не включает.
+// CLAB-391, AC-8, пересмотрено CLAB-411 (K-2): расширение области — человек,
+// сопровождающий или сотрудник (вид user, уровень agent). Отказ боту (agent
+// без вида — внутренний вызов — тоже бот) — до транзакции, свойства из того
+// же вызова не применяются, событий нет; без add_repositories бот свойства
+// по-прежнему правит; viewer — отказ по уровню; пустой уровень (внутренние
+// вызовы) правила не включает.
 func TestUpdateScopeExpansionNeedsMaintainer(t *testing.T) {
 	ctx := context.Background()
 	store, engine, _, _, system := setupPhase4(t, AuthHeader)
 	task := singleRepoTask(t, ctx, engine, system, "")
 
-	for _, level := range []domain.MemberRole{domain.MemberAgent, domain.MemberViewer} {
+	for _, c := range []struct {
+		level domain.MemberRole
+		kind  domain.PrincipalKind
+		text  []string
+	}{
+		{domain.MemberAgent, "", []string{"решение человека", "сопровождающ", "сотрудник"}},
+		{domain.MemberAgent, domain.PrincipalAgent, []string{"решение человека", "сопровождающ", "сотрудник"}},
+		{domain.MemberViewer, domain.PrincipalUser, []string{"нужен уровень agent"}},
+	} {
 		_, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
 			AddRepositories: []string{"acme/web"}, Properties: json.RawMessage(`{"multi_repo":true}`),
-			Level: level,
+			Level: c.level, Kind: c.kind,
 		})
-		wantCode(t, err, apperr.CodeForbidden, "расширение уровнем "+string(level))
-		if msg := apperr.As(err).Message; !strings.Contains(msg, "решение человека") ||
-			!strings.Contains(msg, "сопровождающ") || strings.HasPrefix(msg, ExecutorRefusal) {
-			t.Fatalf("текст отказа: %q", msg)
+		wantCode(t, err, apperr.CodeForbidden, "расширение уровнем "+string(c.level)+" вида "+string(c.kind))
+		msg := apperr.As(err).Message
+		for _, want := range c.text {
+			if !strings.Contains(msg, want) || strings.HasPrefix(msg, ExecutorRefusal) {
+				t.Fatalf("текст отказа %s/%s: %q", c.level, c.kind, msg)
+			}
 		}
 	}
 	again, err := store.GetTaskByKey(ctx, store.DB(), task.Key)
@@ -490,16 +502,20 @@ func TestUpdateScopeExpansionNeedsMaintainer(t *testing.T) {
 		t.Fatalf("свойства agent: %v", err)
 	}
 
-	// maintainer, admin и пустой уровень расширяют.
-	for _, repo := range []string{"acme/docs", "acme/infra"} {
+	// maintainer, admin, сотрудник и пустой уровень расширяют.
+	for _, repo := range []string{"acme/docs", "acme/infra", "acme/ops"} {
 		if _, _, err := engine.AddRepository(ctx, "SDLC", AddRepositoryInput{Repository: repo}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i, level := range []domain.MemberRole{domain.MemberMaintainer, domain.MemberAdmin, ""} {
-		repo := []string{"acme/web", "acme/docs", "acme/infra"}[i]
+	for i, c := range []struct {
+		level domain.MemberRole
+		kind  domain.PrincipalKind
+	}{{domain.MemberMaintainer, ""}, {domain.MemberAdmin, ""}, {domain.MemberAgent, domain.PrincipalUser}, {"", ""}} {
+		level := c.level
+		repo := []string{"acme/web", "acme/docs", "acme/ops", "acme/infra"}[i]
 		out, err := engine.UpdateScope(ctx, task.Key, system.ID, UpdateScopeInput{
-			AddRepositories: []string{repo}, Level: level,
+			AddRepositories: []string{repo}, Level: level, Kind: c.kind,
 		})
 		if err != nil {
 			t.Fatalf("расширение уровнем %q: %v", level, err)

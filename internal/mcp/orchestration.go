@@ -103,7 +103,9 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 	if err != nil {
 		return fail(err)
 	}
-	level, err := s.level(ctx)
+	// Класс актора (уровень, вид, привязка токена задачи) решает, где он
+	// вправе заводить задачу: правило исполняет движок (CLAB-411).
+	who, err := s.stageActor(ctx)
 	if err != nil {
 		return fail(err)
 	}
@@ -138,7 +140,7 @@ func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallT
 		AssigneeHandle: in.Assignee,
 		Blocks:         in.Blocks,
 		OptionalStages: optionalStages,
-		Level:          level,
+		Level:          who.Level, Kind: who.Principal.Kind, Bound: who.Bound,
 	})
 	if err != nil {
 		return fail(err)
@@ -192,16 +194,16 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 	if err := s.auth.RequireWriteCircle(ctx, identity(ctx), in.TaskKey, "правка постановки"); err != nil {
 		return fail(err)
 	}
-	level, err := s.level(ctx)
+	who, err := s.stageActor(ctx)
 	if err != nil {
 		return fail(err)
 	}
 
 	edit := workflow.UpdateTaskInput{
 		Title: in.Title, Description: in.Description, Priority: in.Priority,
-		Labels: in.Labels, ModelLevel: in.ModelLevel, Level: level,
+		Labels: in.Labels, ModelLevel: in.ModelLevel, Level: who.Level, Kind: who.Principal.Kind,
 		// Выбор этапов своей задачи токену задачи закрыт — правило движка.
-		Bound: s.auth.Bound(identity(ctx)),
+		Bound: who.Bound,
 	}
 	if in.OptionalStages != nil {
 		stages, err := rawArgument(in.OptionalStages)
@@ -262,7 +264,11 @@ func (s *Server) linkTasks(ctx context.Context, in linkTasksInput) (*sdk.CallToo
 	if err := s.auth.RequireLink(ctx, identity(ctx), in.From, in.To, rel); err != nil {
 		return fail(err)
 	}
-	links, err := s.engine.LinkTasks(ctx, in.From, in.To, rel, in.Note, actor(ctx).ID, in.Remove)
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	links, err := s.engine.LinkTasks(ctx, in.From, in.To, rel, in.Note, who, in.Remove)
 	if err != nil {
 		return fail(err)
 	}
@@ -337,25 +343,15 @@ func (s *Server) assignTask(ctx context.Context, in assignTaskInput) (*sdk.CallT
 	if err := s.auth.RequireWriteCircle(ctx, identity(ctx), in.TaskKey, "назначение"); err != nil {
 		return fail(err)
 	}
-	task, err := s.engine.Assign(ctx, in.TaskKey, in.Assignee, actor(ctx).ID)
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	task, err := s.engine.Assign(ctx, in.TaskKey, in.Assignee, who)
 	if err != nil {
 		return fail(err)
 	}
 	return ok(map[string]any{"key": task.Key, "assignee": task.AssigneeHandle})
-}
-
-// level — уровень актора в проекте: по нему движок решает, вправе ли агент
-// заводить задачу где угодно или только внутри той, которую держит.
-func (s *Server) level(ctx context.Context) (domain.MemberRole, error) {
-	key, err := projectKey(ctx)
-	if err != nil {
-		return "", err
-	}
-	project, err := s.store.GetProjectByKey(ctx, s.store.DB(), key)
-	if err != nil {
-		return "", err
-	}
-	return s.auth.Level(ctx, identity(ctx), project.ID)
 }
 
 // registerWorkPrompt объявляет единую точку старта работы над задачей.

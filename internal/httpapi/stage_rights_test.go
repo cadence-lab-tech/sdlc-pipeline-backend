@@ -183,10 +183,11 @@ func TestStageRightsREST(t *testing.T) {
 		WHERE t.key = 'SDLC-1' AND e.type = 'gate.decided' ORDER BY e.created_at DESC, e.id DESC LIMIT 1`).Scan(&by); err != nil || by != "ana" {
 		t.Fatalf("gate.decided: %q %v", by, err)
 	}
-	// AC-15: правило области не тронуто — сузить её agent не может и на
-	// своём этапе (403, как раньше).
+	// AC-15 пересмотрен CLAB-411 (В-3 эпика CLAB-404): сотрудник уровня
+	// agent меняет область без права этапа; последний репозиторий области
+	// по-прежнему не убирается — 409 движка, а не 403 права.
 	if code, _ := f.json(http.MethodPatch, "/v1/tasks/SDLC-1/scope", ana,
-		map[string]any{"remove_repositories": []string{"cadence-lab-tech/sdlc-pipeline-backend"}}); code != http.StatusForbidden {
+		map[string]any{"remove_repositories": []string{"cadence-lab-tech/sdlc-pipeline-backend"}}); code != http.StatusConflict {
 		t.Fatalf("область аналитиком: %d", code)
 	}
 

@@ -15,11 +15,14 @@ import (
 // п. 6). Заменяет характеризацию прежнего поведения (первый коммит ветки),
 // где agent добавлял репозиторий и по REST, и тулом MCP. Номера — критерии
 // приёмки анализа CLAB-391; токен задачи (AC-6) держат executor_test.go
-// обоих транспортов.
+// обоих транспортов. CLAB-411 (В-3 эпика CLAB-404, AC-18): человек уровня
+// agent — сотрудник — область меняет; отказ держится для бота (agent:bot
+// фикстуры с api-токеном).
 func TestScopeExpansionRights(t *testing.T) {
 	f := newAuditFixture(t)
 	ctx := context.Background()
-	dev := f.memberToken("user:dev", domain.MemberAgent, nil)
+	dev := f.bot
+	employee := f.memberToken("user:dev", domain.MemberAgent, nil)
 	lead := f.memberToken("user:lead", domain.MemberMaintainer, nil)
 	boss := f.memberToken("user:boss", domain.MemberAdmin, nil)
 	watcher := f.memberToken("user:watcher", domain.MemberViewer, nil)
@@ -76,13 +79,13 @@ func TestScopeExpansionRights(t *testing.T) {
 	}
 	addDocs := map[string]any{"add_repositories": []string{docs}, "note": "нужны решения"}
 
-	// AC-1: agent — 403 с понятным текстом; область и лента прежние.
+	// AC-1: бот — 403 с понятным текстом; область и лента прежние.
 	code, body := patch(dev, "SDLC-3", addDocs)
 	refusal, _ := errOf(body)
 	if e, _ := body["error"].(map[string]any); code != http.StatusForbidden || e["code"] != "forbidden" ||
 		!strings.Contains(refusal, "решение человека") || !strings.Contains(refusal, "сопровождающ") ||
-		strings.HasPrefix(refusal, workflow.ExecutorRefusal) {
-		t.Fatalf("REST agent: %d %v", code, body)
+		!strings.Contains(refusal, "сотрудник") || strings.HasPrefix(refusal, workflow.ExecutorRefusal) {
+		t.Fatalf("REST бот: %d %v", code, body)
 	}
 	if got := repos("SDLC-3"); len(got) != 2 || slices.Contains(got, docs) {
 		t.Fatalf("отказ изменил область: %v", got)
@@ -92,7 +95,7 @@ func TestScopeExpansionRights(t *testing.T) {
 	}
 
 	// AC-10: отказ — в журнале действий.
-	rows := f.rows("p.handle = 'dev' AND a.outcome = 'forbidden'")
+	rows := f.rows("p.handle = 'bot' AND a.outcome = 'forbidden'")
 	if len(rows) != 1 || rows[0].Channel != "rest" || rows[0].Action != "PATCH /v1/tasks/:taskKey/scope" ||
 		s(rows[0].Task) != "SDLC-3" || rows[0].Status == nil || *rows[0].Status != http.StatusForbidden {
 		t.Fatalf("журнал отказа: %+v", rows)
@@ -117,7 +120,7 @@ func TestScopeExpansionRights(t *testing.T) {
 		t.Fatalf("MCP agent изменил область: %v", got)
 	}
 
-	// AC-7: остальное как прежде — сужение agent не открыто, свойства без
+	// AC-7: остальное как прежде — сужение боту не открыто, свойства без
 	// репозиториев открыты, viewer отбит маршрутом.
 	code, body = patch(dev, "SDLC-3", map[string]any{"remove_repositories": []string{"cadence-lab-tech/sdlc-pipeline-frontend"}})
 	if msg, _ := errOf(body); code != http.StatusForbidden || !strings.Contains(msg, "сузить область") {
@@ -160,18 +163,56 @@ func TestScopeExpansionRights(t *testing.T) {
 		t.Fatalf("MCP maintainer: область %v", got)
 	}
 
-	// AC-7, AC-9: сопровождающий сужает; agent по двум путям не расширяет,
-	// agent с maintainer по команде — расширяет.
+	// AC-7, AC-9: сопровождающий сужает; человек agent по двум путям —
+	// сотрудник, расширяет (CLAB-411); agent с maintainer по команде —
+	// расширяет.
 	if code, body := patch(lead, "SDLC-3", map[string]any{"remove_repositories": []string{docs}}); code != http.StatusOK {
 		t.Fatalf("сужение maintainer: %d %v", code, body)
 	}
-	if code, body := patch(twice, "SDLC-3", addDocs); code != http.StatusForbidden {
+	if code, body := patch(twice, "SDLC-3", addDocs); code != http.StatusOK {
 		t.Fatalf("agent по двум путям: %d %v", code, body)
+	}
+	if code, body := patch(lead, "SDLC-3", map[string]any{"remove_repositories": []string{docs}}); code != http.StatusOK {
+		t.Fatalf("сужение maintainer: %d %v", code, body)
 	}
 	if code, body := patch(mixed, "SDLC-3", addDocs); code != http.StatusOK {
 		t.Fatalf("maintainer через команду: %d %v", code, body)
 	}
 	if got := repos("SDLC-3"); !slices.Contains(got, docs) {
 		t.Fatalf("maintainer через команду: область %v", got)
+	}
+
+	// CLAB-411, AC-18: сотрудник без аренды сужает и расширяет область по
+	// REST и тулом MCP; в ленте — актор и причина; последний репозиторий не
+	// убирается (409).
+	before := len(scopeEvents("SDLC-3"))
+	if code, body := patch(employee, "SDLC-3", map[string]any{
+		"remove_repositories": []string{docs}, "note": "решения не нужны"}); code != http.StatusOK {
+		t.Fatalf("сужение сотрудником: %d %v", code, body)
+	}
+	if out, isErr := f.mcp(employee, "sdlc_update_task_scope", map[string]any{
+		"task_key": "SDLC-3", "add": []string{docs}, "reason": "нужны решения"}); isErr {
+		t.Fatalf("MCP сотрудник: %v", out)
+	}
+	events = scopeEvents("SDLC-3")
+	if got := repos("SDLC-3"); len(events) != before+2 || !slices.Contains(got, docs) {
+		t.Fatalf("сотрудник: область %v, событий %d (было %d)", got, len(events), before)
+	}
+	byEmployee := 0
+	for _, e := range events {
+		if e["actor_handle"] != "dev" {
+			continue
+		}
+		byEmployee++
+		if p := e["payload"].(map[string]any); p["note"] == "" {
+			t.Fatalf("событие сотрудника без причины: %v", e)
+		}
+	}
+	if byEmployee != 2 {
+		t.Fatalf("событий сотрудника %d, ждали 2: %v", byEmployee, events)
+	}
+	if code, body := patch(employee, "SDLC-2", map[string]any{
+		"remove_repositories": repos("SDLC-2")}); code != http.StatusConflict {
+		t.Fatalf("сужение до пустой области: %d %v", code, body)
 	}
 }

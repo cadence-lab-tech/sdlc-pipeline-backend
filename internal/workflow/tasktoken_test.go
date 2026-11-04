@@ -397,7 +397,7 @@ func TestTaskTokenBindingAndProjectRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.engine.LinkTasks(ctx, y.Key, "SDLC-1", domain.TaskLinkRelatesTo, "", w.admin.Principal.ID, false); err != nil {
+	if _, err := w.engine.LinkTasks(ctx, y.Key, "SDLC-1", domain.TaskLinkRelatesTo, "", Actor{Principal: w.admin.Principal}, false); err != nil {
 		t.Fatal(err)
 	}
 	z, err := w.engine.CreateTask(ctx, "SDLC", w.admin.Principal.ID, CreateTaskInput{
