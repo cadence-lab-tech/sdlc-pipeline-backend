@@ -72,6 +72,18 @@ func TestMoveREST(t *testing.T) {
 	if msg, _ := errOf(body); code != http.StatusUnauthorized || !strings.Contains(msg, "токен задачи погас") {
 		t.Fatalf("токен задачи после перевода: %d %v", code, body)
 	}
+	// AC-19: перевод не даёт права на захват — этап qa адресован роли qa, а
+	// у сотрудника только developer: захват — 403 по роли, прогон не взят.
+	code, body = f.json(http.MethodPost, "/v1/tasks/"+key+"/claim", emp, map[string]any{})
+	if msg, _ := errOf(body); code != http.StatusForbidden || !strings.Contains(msg, "роли qa") {
+		t.Fatalf("захват чужой роли после перевода: %d %v", code, body)
+	}
+	_, qaCard := f.json(http.MethodGet, "/v1/tasks/"+key, emp, nil)
+	for _, it := range qaCard["stage_runs"].([]any) {
+		if r := it.(map[string]any); r["status_key"] == "qa" && (r["state"] != "pending" || r["claimed_by"] != nil) {
+			t.Fatalf("прогон qa после отказа захвата: %v", r)
+		}
+	}
 
 	// Лента: task.moved от сотрудника, вид токена api.
 	var via, tokenKind, level, handle string
