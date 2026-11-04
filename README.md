@@ -159,7 +159,8 @@ MCP, и проходит этап так:
 
 Стоимость прогона агент сообщает `sdlc_report_usage`. Остальные тулы — для
 заведения и настройки: `sdlc_create_task`, `sdlc_update_task`,
-`sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_update_task_scope`,
+`sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_rank_task` (место в бэклоге),
+`sdlc_update_task_scope`,
 `sdlc_put_role`, `sdlc_put_document`, `sdlc_add_repository`, перенос правил
 `sdlc_export_bundle` и `sdlc_import_bundle`.
 

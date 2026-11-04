@@ -51,6 +51,8 @@ func init() {
 		"sdlc_list_instructions", "sdlc_get_instruction",
 		// Запись в круг своей задачи (RequireWriteCircle, RequireLink).
 		"sdlc_update_task", "sdlc_link_tasks", "sdlc_assign_task",
+		// Порядок детей своей задачи (решение 0075, RequireRankCircle).
+		"sdlc_rank_task",
 		// Им стартует раннер.
 		PromptAction("work_on_task"),
 
