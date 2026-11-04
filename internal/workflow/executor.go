@@ -8,7 +8,7 @@
 //
 // Правила действуют только на токен задачи и только в режиме токенов (Bound):
 // личные токены и сессии людей, их уровни участия и правила движка для
-// агентов (agentMayCreate, agentMayEdit, UpdateScope) не меняются.
+// агентов (TaskRight, task_rights.go) не меняются.
 package workflow
 
 import (
@@ -156,11 +156,7 @@ func (a *Auth) RequireWriteCircle(ctx context.Context, id Identity, taskKey, act
 	if err != nil {
 		return err
 	}
-	if inWriteCircle(b, task) {
-		return nil
-	}
-	return executorRefused(b, fmt.Sprintf(
-		"%s задачи %s: токен задачи %s пишет только в свою задачу и её детей", action, task.Key, b.TaskKey))
+	return writeCircle(b, task, action)
 }
 
 // RankRefusal — что отвечает токену задачи перемещение вне своей нарезки
@@ -207,25 +203,18 @@ func (a *Auth) RequireLink(ctx context.Context, id Identity, fromKey, toKey, rel
 	if err != nil {
 		return err
 	}
-	fromIn, toIn := inWriteCircle(b, from), inWriteCircle(b, to)
-	link := fmt.Sprintf("связь %s %s %s", from.Key, rel, to.Key)
-	switch {
-	case fromIn && toIn:
-		return nil
-	case !fromIn && !toIn:
-		return executorRefused(b, link+": обе задачи вне круга своей задачи "+b.TaskKey+" и её детей")
-	case rel == domain.TaskLinkBlocks && !fromIn:
-		return executorRefused(b, link+": чужая задача блокирует свою — порядок работ решает человек")
-	case rel == domain.TaskLinkBlocks, rel == domain.TaskLinkRelatesTo,
-		rel == domain.TaskLinkSharesSurface, rel == domain.TaskLinkDuplicates:
-		other := to
-		if !fromIn {
-			other = from
-		}
-		return a.RequireReadable(ctx, id, other.ID)
-	default:
-		return executorRefused(b, link+": с задачей вне круга своей задачи и её детей так связывать нельзя")
+	if err := linkCircle(b, from, to, rel); err != nil {
+		return err
 	}
+	// Связь с задачей вне круга записи — только с читаемой задачей своего
+	// проекта (решение 0065).
+	switch {
+	case inWriteCircle(b, from) && inWriteCircle(b, to):
+		return nil
+	case inWriteCircle(b, from):
+		return a.RequireReadable(ctx, id, to.ID)
+	}
+	return a.RequireReadable(ctx, id, from.ID)
 }
 
 // executorTransition — переход токеном задачи: вперёд и возврат. Снять

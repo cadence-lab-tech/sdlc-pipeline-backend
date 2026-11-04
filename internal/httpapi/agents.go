@@ -107,13 +107,34 @@ func (s *Server) releaseTask(c *gin.Context) {
 
 // getTaskState отдаёт задачу так, как её видит агент: инструкция роли, вход
 // от предыдущих этапов, дрейф и требования гейтов впереди.
+//
+// actor_rights (CLAB-411) — право того, кто смотрит, той же TaskRight, что у
+// карточки: show --json в CLI отдаёт его без второго запроса.
 func (s *Server) getTaskState(c *gin.Context) {
-	state, err := s.engine.State(c.Request.Context(), c.Param("taskKey"))
+	ctx := c.Request.Context()
+	state, err := s.engine.State(ctx, c.Param("taskKey"))
 	if err != nil {
 		fail(c, s.log, err)
 		return
 	}
-	c.JSON(http.StatusOK, state)
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	rights, err := s.engine.TaskRights(ctx, c.Param("taskKey"), who)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, stateWithRights{ClaimResult: state, ActorRights: &rights})
+}
+
+// stateWithRights — ответ /state: состояние этапа и право на задачу. Поле
+// добавочное и не в ClaimResult: ответ захвата его не несёт.
+type stateWithRights struct {
+	workflow.ClaimResult
+	ActorRights *workflow.TaskRights `json:"actor_rights"`
 }
 
 // listQueue — очередь работы проекта: незакрытые прогоны с указанием роли,

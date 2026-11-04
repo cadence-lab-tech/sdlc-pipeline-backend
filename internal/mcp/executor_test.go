@@ -48,7 +48,7 @@ func TestExecutorOverMCP(t *testing.T) {
 	}
 	// SDLC-2 связана с SDLC-1: читается (как и любая задача проекта), но не
 	// в круге записи.
-	if _, err := engine.LinkTasks(ctx, "SDLC-1", "SDLC-2", "relates_to", "", root.Principal.ID, false); err != nil {
+	if _, err := engine.LinkTasks(ctx, "SDLC-1", "SDLC-2", "relates_to", "", workflow.Actor{Principal: root.Principal}, false); err != nil {
 		t.Fatal(err)
 	}
 	taskTok, err := auth.IssueTaskToken(ctx, pool, "SDLC-1")

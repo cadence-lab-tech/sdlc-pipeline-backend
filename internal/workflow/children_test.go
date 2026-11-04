@@ -109,12 +109,12 @@ func TestChildCards(t *testing.T) {
 	// Порядок: «Не начат» после «Ждёт апрува» и «В работе»; заведены в
 	// обратном порядке — ответ по порядку заведения задач.
 	for _, from := range []domain.Task{working, waiting} {
-		if _, err := engine.LinkTasks(ctx, from.Key, backlog.Key, domain.TaskLinkBlocks, "", system.ID, false); err != nil {
+		if _, err := engine.LinkTasks(ctx, from.Key, backlog.Key, domain.TaskLinkBlocks, "", Actor{Principal: system}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Связь другого вида в blocked_by не попадает.
-	if _, err := engine.LinkTasks(ctx, cancelled.Key, working.Key, domain.TaskLinkRelatesTo, "", system.ID, false); err != nil {
+	if _, err := engine.LinkTasks(ctx, cancelled.Key, working.Key, domain.TaskLinkRelatesTo, "", Actor{Principal: system}, false); err != nil {
 		t.Fatal(err)
 	}
 

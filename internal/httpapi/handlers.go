@@ -133,13 +133,21 @@ func (s *Server) getProject(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	// Что актор может с задачами проекта (CLAB-411): класс и строка той же
+	// функции класса, что у права на задачу; whoami её только печатает.
+	who, err := s.auth.Actor(ctx, id, project.ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	work := workflow.TaskWorkOf(who)
 
 	c.JSON(http.StatusOK, gin.H{
 		"project":            project,
 		"repositories":       repos,
 		"task_property_defs": props,
 		"active_workflows":   workflows,
-		"access":             gin.H{"level": level, "allowed_roles": allowed},
+		"access":             gin.H{"level": level, "allowed_roles": allowed, "task_work": work},
 	})
 }
 
@@ -322,9 +330,10 @@ func (s *Server) createTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	// Уровень актора решает, вправе ли он завести задачу где угодно или
-	// только дочернюю к той, которую держит: правило исполняет движок.
-	level, err := s.level(c)
+	// Класс актора (уровень, вид, привязка токена задачи) решает, вправе ли
+	// он завести задачу где угодно или только дочернюю к той, которую
+	// держит: правило исполняет движок (CLAB-411).
+	who, err := s.stageActor(c)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -348,7 +357,9 @@ func (s *Server) createTask(c *gin.Context) {
 			AssigneeHandle: req.Assignee,
 			Blocks:         req.Blocks,
 			OptionalStages: req.OptionalStages,
-			Level:          level,
+			Level:          who.Level,
+			Kind:           who.Principal.Kind,
+			Bound:          who.Bound,
 		})
 	if err != nil {
 		fail(c, s.log, err)
@@ -445,18 +456,25 @@ func (s *Server) taskCard(ctx context.Context, q postgres.Querier, taskKey strin
 	if err != nil {
 		return nil, err
 	}
+	// Право на задачу (CLAB-411) — соседним полем: та же TaskRight, что у
+	// ручек записи; прежние поля карточки не меняются.
+	rights, err := s.engine.TaskRightsQ(ctx, q, task, who)
+	if err != nil {
+		return nil, err
+	}
 
 	return gin.H{
-		"task":        task,
-		"stage_runs":  runs,
-		"artifacts":   artifacts,
-		"attachments": attachments,
-		"transitions": transitions,
-		"stage_limit": limit,
-		"children":    children,
-		"links":       links,
-		"usage":       usage,
-		"repo_refs":   refs,
+		"task":         task,
+		"stage_runs":   runs,
+		"artifacts":    artifacts,
+		"attachments":  attachments,
+		"transitions":  transitions,
+		"stage_limit":  limit,
+		"children":     children,
+		"links":        links,
+		"usage":        usage,
+		"repo_refs":    refs,
+		"actor_rights": rights,
 	}, nil
 }
 
@@ -482,8 +500,13 @@ func (s *Server) linkTasks(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
 	links, err := s.engine.LinkTasks(c.Request.Context(), c.Param("taskKey"), req.Task,
-		req.Rel, req.Note, actor(c).ID, req.Remove)
+		req.Rel, req.Note, who, req.Remove)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -540,7 +563,12 @@ func (s *Server) assignTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	task, err := s.engine.Assign(c.Request.Context(), c.Param("taskKey"), req.Assignee, actor(c).ID)
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	task, err := s.engine.Assign(c.Request.Context(), c.Param("taskKey"), req.Assignee, who)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -747,7 +775,7 @@ func (s *Server) updateTask(c *gin.Context) {
 		fail(c, s.log, err)
 		return
 	}
-	level, err := s.level(c)
+	who, err := s.stageActor(c)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -765,8 +793,9 @@ func (s *Server) updateTask(c *gin.Context) {
 			OptionalStages: req.OptionalStages,
 			// Выбор этапов своей задачи токену задачи закрыт — правило
 			// движка, транспорт передаёт привязку.
-			Bound: s.auth.Bound(identity(c)),
-			Level: level,
+			Bound: who.Bound,
+			Level: who.Level,
+			Kind:  who.Principal.Kind,
 		})
 	if err != nil {
 		fail(c, s.log, err)
@@ -784,15 +813,16 @@ type updateScopeRequest struct {
 
 // updateScope расширяет или сужает область задачи и правит её свойства.
 // Уровень ручки — agent: свойства без репозиториев ему доступны, а
-// расширить и сузить область может только сопровождающий — это правило
-// движка (CLAB-391), транспорт лишь передаёт уровень.
+// расширить и сузить область может человек — сотрудник или сопровождающий,
+// не бот; это правило движка (CLAB-391, CLAB-411), транспорт лишь передаёт
+// актора.
 func (s *Server) updateScope(c *gin.Context) {
 	var req updateScopeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, s.log, err)
 		return
 	}
-	level, err := s.level(c)
+	who, err := s.stageActor(c)
 	if err != nil {
 		fail(c, s.log, err)
 		return
@@ -803,7 +833,9 @@ func (s *Server) updateScope(c *gin.Context) {
 			RemoveRepositories: req.RemoveRepositories,
 			Properties:         req.Properties,
 			Note:               req.Note,
-			Level:              level,
+			Level:              who.Level,
+			Kind:               who.Principal.Kind,
+			Bound:              who.Bound,
 		})
 	if err != nil {
 		fail(c, s.log, err)

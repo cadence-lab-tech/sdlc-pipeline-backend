@@ -242,6 +242,13 @@ func (s *Server) whoami(ctx context.Context, _ whoamiInput) (*sdk.CallToolResult
 	if allowed != nil {
 		view["allowed_roles"] = allowed
 	}
+	// Что актор может с задачами проекта (CLAB-411) — та же сводка, что в
+	// access.task_work проекта по REST.
+	who, err := s.auth.Actor(ctx, id, project.ID)
+	if err != nil {
+		return fail(err)
+	}
+	view["task_work"] = workflow.TaskWorkOf(who)
 	// Исполнитель этапа видит, к какой задаче и прогону привязан его токен.
 	if b := id.TaskToken(); b != nil {
 		view["token"] = map[string]any{
@@ -436,6 +443,11 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 	if err != nil {
 		return fail(err)
 	}
+	// Право на задачу (CLAB-411) — та же TaskRight, что у тулов записи.
+	rights, err := s.engine.TaskRightsQ(ctx, q, task, who)
+	if err != nil {
+		return fail(err)
+	}
 
 	return ok(map[string]any{
 		"stage_run_id": state.StageRunID,
@@ -449,6 +461,7 @@ func (s *Server) getTask(ctx context.Context, in taskKeyInput) (*sdk.CallToolRes
 		"stage_limit":  state.StageLimit,
 		"stage_runs":   runs,
 		"transitions":  previews,
+		"actor_rights": rights,
 		"timeline":     events,
 	})
 }
@@ -650,14 +663,15 @@ func (s *Server) updateScope(ctx context.Context, in scopeInput) (*sdk.CallToolR
 	if err := s.inProject(ctx, in.TaskKey); err != nil {
 		return fail(err)
 	}
-	// Уровень обязателен: пустой движок читает как «права выключены», и
-	// расширение области прошло бы мимо правила сопровождающего (CLAB-391).
-	level, err := s.level(ctx)
+	// Актор обязателен: пустой уровень движок читает как «права выключены»,
+	// и расширение области прошло бы мимо правила (CLAB-391, CLAB-411).
+	who, err := s.stageActor(ctx)
 	if err != nil {
 		return fail(err)
 	}
 	task, err := s.engine.UpdateScope(ctx, in.TaskKey, actor(ctx).ID, workflow.UpdateScopeInput{
-		AddRepositories: in.Add, Note: in.Reason, Level: level,
+		AddRepositories: in.Add, Note: in.Reason,
+		Level: who.Level, Kind: who.Principal.Kind, Bound: who.Bound,
 	})
 	if err != nil {
 		return fail(err)

@@ -248,7 +248,7 @@ func TestAssignedTaskIsClaimedOnlyByAssignee(t *testing.T) {
 	}
 
 	// Снятое назначение возвращает задачу в общий доступ.
-	if _, err := engine.Assign(ctx, task.Key, "", system.ID); err != nil {
+	if _, err := engine.Assign(ctx, task.Key, "", Actor{Principal: system}); err != nil {
 		t.Fatal(err)
 	}
 	fresh, err := store.GetTaskByKey(ctx, store.DB(), task.Key)

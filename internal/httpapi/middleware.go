@@ -217,23 +217,6 @@ func actor(c *gin.Context) domain.Principal {
 	return identity(c).Principal
 }
 
-// level — действующий уровень актора в проекте из пути. Нужен ручкам, за
-// которыми стоит правило движка, зависящее от уровня (например, «агент
-// заводит только детей своей задачи»).
-func (s *Server) level(c *gin.Context) (domain.MemberRole, error) {
-	// Проект берётся из пути так же, как у guard: правку постановки просят по
-	// ключу задачи, и ключа проекта в таком пути нет вовсе. В режиме header
-	// прав нет, и лишнего запроса к базе тоже.
-	if !s.auth.Enforced() {
-		return s.auth.Level(c.Request.Context(), identity(c), uuid.Nil)
-	}
-	projectID, err := s.projectOf(c)
-	if err != nil {
-		return "", err
-	}
-	return s.auth.Level(c.Request.Context(), identity(c), projectID)
-}
-
 // stageActor — актор для права этапа (решение 0072) в проекте из пути: уровень,
 // роли специалистов, привязка токена задачи. Ручка передаёт его движку и
 // сама уровни и роли не сравнивает.
