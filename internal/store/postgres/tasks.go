@@ -1064,15 +1064,7 @@ func (s *Store) ChildTasks(ctx context.Context, q Querier, parentID uuid.UUID) (
 	if err != nil {
 		return nil, translate(err)
 	}
-	defer rows.Close()
-
-	out := []domain.Task{}
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, translate(err)
-		}
-		out = append(out, t)
-	}
-	return out, translate(rows.Err())
+	// Область нужна гейту repo_scope, по которому считается awaiting_approval
+	// ребёнка (CLAB-396); грузится пакетом, одним запросом на всех детей.
+	return s.collectTasks(ctx, q, rows)
 }

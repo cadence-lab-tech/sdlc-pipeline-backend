@@ -27,8 +27,11 @@ type ApprovalFilter struct {
 //
 // Порядок — номер задачи, предела нет: задач с человеческим гейтом на
 // переходе вперёд в проекте десятки, а предел ответа держит движок по
-// элементам, а не по задачам. Области задачи (repositories) здесь нет:
-// строке выборки она не нужна, а лишний запрос на задачу — нужен.
+// элементам, а не по задачам. Область задачи (repositories) грузится
+// пакетом, одним запросом на всю выборку (collectTasks): строке выборки она
+// не нужна, но гейт repo_scope вычисляется на этих задачах, и без области он
+// всегда failed («область не объявлена») — задача пропадала из «Ждут меня»
+// при awaits_human в списке (CLAB-396).
 func (s *Store) ApprovalCandidates(ctx context.Context, q Querier, projectID uuid.UUID, gateTypes []string, filter ApprovalFilter) ([]domain.Task, error) {
 	rows, err := q.Query(ctx, taskSelect+`
 		WHERE t.project_id = $1
@@ -54,15 +57,5 @@ func (s *Store) ApprovalCandidates(ctx context.Context, q Querier, projectID uui
 	if err != nil {
 		return nil, translate(err)
 	}
-	defer rows.Close()
-
-	out := []domain.Task{}
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, translate(err)
-		}
-		out = append(out, t)
-	}
-	return out, translate(rows.Err())
+	return s.collectTasks(ctx, q, rows)
 }
