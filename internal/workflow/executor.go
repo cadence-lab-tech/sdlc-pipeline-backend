@@ -102,6 +102,8 @@ func init() {
 		RESTAction("PATCH", "/v1/tasks/:taskKey"),
 		RESTAction("POST", "/v1/tasks/:taskKey/links"),
 		RESTAction("PUT", "/v1/tasks/:taskKey/assignee"),
+		// Порядок детей своей задачи (решение 0075, RequireRankCircle).
+		RESTAction("POST", "/v1/tasks/:taskKey/rank"),
 	} {
 		executorActions[a] = true
 	}
@@ -159,6 +161,30 @@ func (a *Auth) RequireWriteCircle(ctx context.Context, id Identity, taskKey, act
 	}
 	return executorRefused(b, fmt.Sprintf(
 		"%s задачи %s: токен задачи %s пишет только в свою задачу и её детей", action, task.Key, b.TaskKey))
+}
+
+// RankRefusal — что отвечает токену задачи перемещение вне своей нарезки
+// (решение 0075): после общей части ExecutorRefusal.
+const RankRefusal = "порядок бэклога проекта — решение человека: токен задачи двигает только задачи своей нарезки"
+
+// RequireRankCircle — перемещение в бэклоге токеном задачи: только прямые
+// дети своей задачи, друг относительно друга. Сосед из другой группы
+// отбивает движок (400), так что сосед при совпадении группы — тоже ребёнок
+// своей задачи. Своя задача, её братья и верхний уровень — порядок, который
+// ставит человек.
+func (a *Auth) RequireRankCircle(ctx context.Context, id Identity, taskKey string) error {
+	b := a.Bound(id)
+	if b == nil {
+		return nil
+	}
+	task, err := a.store.GetTaskByKey(ctx, a.store.DB(), taskKey)
+	if err != nil {
+		return err
+	}
+	if task.ParentID != nil && *task.ParentID == b.TaskID {
+		return nil
+	}
+	return executorRefused(b, RankRefusal)
 }
 
 // RequireLink — связь токеном задачи (заведение и снятие), решение человека

@@ -607,6 +607,10 @@ type Task struct {
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
 	ClosedAt       *time.Time       `json:"closed_at,omitempty"`
+	// Ранг бэклога (решение 0075): место задачи в своей группе — верхнем
+	// уровне проекта или детях одного родителя. Порядок order=backlog —
+	// rank, затем seq; меняет его только перемещение (POST /tasks/:key/rank).
+	Rank string `json:"rank"`
 }
 
 // ChildTask — ребёнок в карточке родителя (CLAB-324): та же задача и три
@@ -638,6 +642,10 @@ type TaskListItem struct {
 	StatusCategory string `json:"status_category"`
 	// Дети по категории их статуса; у задачи без детей поля нет.
 	ChildCounts map[string]int `json:"child_counts,omitempty"`
+	// «В работе» по правилу движка — тому же, что у фильтра in_work
+	// (решение 0075): клиент не повторяет правило по current_run и
+	// child_counts.
+	InWork bool `json:"in_work"`
 }
 
 // DefaultTaskType — тип задачи, если она его не называет. Набор типов
@@ -1153,6 +1161,10 @@ const (
 	// Переход прошёл мимо выключенного у задачи этапа (решение 0066, п. 14):
 	// одно событие на пропущенный статус, без прогона.
 	EventStageSkipped = "stage.skipped"
+	// Задачу переставили в бэклоге (решение 0075): нагрузка — родитель и
+	// ближайшие незакрытые соседи после перемещения, above — выше, below —
+	// ниже. По циклу задача не движется, updated_at не меняется.
+	EventTaskRanked = "task.ranked"
 )
 
 // MovementEvents — события ленты, которые двигают задачу по циклу: вход в

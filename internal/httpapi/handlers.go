@@ -175,7 +175,9 @@ func (s *Server) getWorkflow(c *gin.Context) {
 // total выборки, у элементов — status_category и child_counts. Для «Обзора»
 // (CLAB-363, решение 0070) — поля строки (blocked_by, last_moved_at,
 // current_run, attention, cost), фильтры по причинам attention* и
-// order=backlog. Всё добавочное: прежние поля и их значения те же.
+// order=backlog. Для «Бэклога» (решение 0075) — выборка backlog=true, поле
+// in_work у элемента и rank у задачи; order=backlog — ручной порядок по
+// рангу. Всё добавочное: прежние поля и их значения те же.
 func (s *Server) listTasks(c *gin.Context) {
 	ctx, q := c.Request.Context(), s.store.DB()
 
@@ -210,6 +212,10 @@ func (s *Server) listTasks(c *gin.Context) {
 		return
 	}
 	if f.Unassigned, err = queryBool(c, "unassigned"); err != nil {
+		badRequest(c, s.log, err)
+		return
+	}
+	if f.Backlog, err = queryBool(c, "backlog"); err != nil {
 		badRequest(c, s.log, err)
 		return
 	}
@@ -483,6 +489,40 @@ func (s *Server) linkTasks(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"links": links})
+}
+
+type rankTaskRequest struct {
+	Before   string `json:"before"`
+	After    string `json:"after"`
+	Position string `json:"position"`
+}
+
+// rankTask ставит задачу на место в её группе бэклога (решение 0075): тело
+// — ровно одно из before, after, position. Порядок проверок: тело, рамка
+// токена задачи, правила места в движке.
+func (s *Server) rankTask(c *gin.Context) {
+	var req rankTaskRequest
+	// Пустое тело — то же, что тело без места: отказ с текстом правила.
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		badRequest(c, s.log, err)
+		return
+	}
+	place, err := workflow.ParseRankPlace(req.Before, req.After, req.Position)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	ctx := c.Request.Context()
+	if err := s.auth.RequireRankCircle(ctx, identity(c), c.Param("taskKey")); err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	res, err := s.engine.RankTask(ctx, c.Param("taskKey"), place, actor(c).ID)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }
 
 type assignRequest struct {

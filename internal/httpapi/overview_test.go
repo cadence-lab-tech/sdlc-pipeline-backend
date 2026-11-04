@@ -794,32 +794,43 @@ func TestOverviewZonesAndFilters(t *testing.T) {
 	}
 }
 
-// AC-A20: порядок бэклога.
+// AC-A20 (CLAB-363) после ранга (CLAB-399, решение 0075, К-18, К-19):
+// order=backlog — ручной порядок; приоритет и блокировка задачу сами не
+// двигают, листание и фильтры бэклога — прежние.
 func TestOverviewBacklogOrder(t *testing.T) {
 	f := newOvFixture(t)
 	mk := func(title, priority string) string {
 		return f.create("Бэклог "+title, map[string]any{"priority": priority})
 	}
 	low, normal, high, urgent := mk("низкий", "low"), mk("обычный", "normal"), mk("высокий", "high"), mk("срочный", "urgent")
-	urgent2 := mk("срочный второй", "urgent")
-	blockedUrgent := mk("срочный заблокирован", "urgent")
-	blockedLow := mk("низкий заблокирован", "low")
-	freedHigh := mk("высокий, блокирующий закрыт", "high")
-	stillHigh := mk("высокий, блокирующий отменён", "high")
+	blocked := mk("срочный заблокирован", "urgent")
 	active := f.create("Активный блокирующий", nil)
-	done := f.create("Готовый блокирующий", nil)
-	cancelled := f.create("Отменённый блокирующий", nil)
-	for _, l := range [][2]string{{active, blockedUrgent}, {active, blockedLow}, {done, freedHigh}, {cancelled, stillHigh}} {
-		f.ok("POST", "/v1/tasks/"+l[0]+"/links", f.root, map[string]any{"task": l[1], "rel": "blocks"})
-	}
-	f.setStatus(done, "done")
-	f.move(cancelled, "cancel", f.root)
+	f.ok("POST", "/v1/tasks/"+active+"/links", f.root, map[string]any{"task": blocked, "rel": "blocks"})
 
-	want := []string{urgent, urgent2, high, freedHigh, normal, low, blockedUrgent, stillHigh, blockedLow}
+	// Заведение ставит в конец: порядок — порядок заведения, а не приоритет.
+	want := []string{low, normal, high, urgent, blocked}
 	q := "q=" + url.QueryEscape("Бэклог") + "&order=backlog"
 	items, total := f.list(f.root, q+"&limit=100")
 	if got := taskKeysOf(items); !slices.Equal(got, want) || total != len(want) {
 		t.Fatalf("порядок бэклога %v, ждали %v", got, want)
+	}
+	// Приоритет не двигает.
+	f.ok("PATCH", "/v1/tasks/"+high, f.root, map[string]any{"priority": "low"})
+	f.ok("PATCH", "/v1/tasks/"+low, f.root, map[string]any{"priority": "urgent"})
+	if items, _ := f.list(f.root, q+"&limit=100"); !slices.Equal(taskKeysOf(items), want) {
+		t.Fatalf("приоритет сдвинул задачу: %v", taskKeysOf(items))
+	}
+	// Заблокированную поставили наверх — она там и остаётся, blocked_by есть.
+	if code, out := f.rank(blocked, f.root, map[string]any{"before": low}); code != http.StatusOK {
+		t.Fatalf("перемещение: %d %v", code, out)
+	}
+	want = []string{blocked, low, normal, high, urgent}
+	items, _ = f.list(f.root, q+"&limit=100")
+	if got := taskKeysOf(items); !slices.Equal(got, want) {
+		t.Fatalf("заблокированная наверху: %v", got)
+	}
+	if bb := items[0]["blocked_by"].([]any); len(bb) != 1 || bb[0] != active {
+		t.Fatalf("blocked_by: %v", items[0])
 	}
 	var paged []string
 	for off := 0; off < len(want); off += 2 {
@@ -829,13 +840,16 @@ func TestOverviewBacklogOrder(t *testing.T) {
 	if !slices.Equal(paged, want) {
 		t.Fatalf("листание %v, ждали %v", paged, want)
 	}
-	// Совместим с фильтрами бэклога.
+	// К-19: запрос блока «Приоритетные из бэклога» отдаёт новый порядок.
 	if items, _ := f.list(f.root, q+"&terminal=false&in_work=false&top_level=true&limit=3"); !slices.Equal(taskKeysOf(items), want[:3]) {
 		t.Fatalf("бэклог с фильтрами: %v", taskKeysOf(items))
 	}
 	// order=updated и пустой порядок — прежние; неизвестный — 400 с обоими.
 	if items, _ := f.list(f.root, "q="+url.QueryEscape("Бэклог")+"&limit=100"); slices.Equal(taskKeysOf(items), want) {
 		t.Fatal("порядок по умолчанию стал порядком бэклога")
+	}
+	if items, _ := f.list(f.root, "q="+url.QueryEscape("Бэклог")+"&order=updated&limit=1"); taskKeysOf(items)[0] != low {
+		t.Fatalf("order=updated: %v", taskKeysOf(items))
 	}
 	rec := f.do("GET", "/v1/projects/SDLC/tasks?order=random", f.root, nil)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "updated") || !strings.Contains(rec.Body.String(), "backlog") {

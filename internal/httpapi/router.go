@@ -270,6 +270,9 @@ func (s *Server) Handler() http.Handler {
 		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
 		v1.POST("/tasks/:taskKey/links", agent, s.linkTasks)
 		v1.PUT("/tasks/:taskKey/assignee", agent, s.assignTask)
+		// Место в бэклоге (решение 0075): уровень agent, как у постановки;
+		// рамку токена задачи и правила места держат Auth и движок.
+		v1.POST("/tasks/:taskKey/rank", agent, s.rankTask)
 		// Стоимость прогона: самоотчёт агента или раннера (решение 0026).
 		v1.GET("/tasks/:taskKey/usage", viewer, s.taskUsage)
 		v1.POST("/tasks/:taskKey/usage", agent, s.reportUsage)

@@ -360,33 +360,35 @@ BEGIN
            '{"kinds":["problem.report"]}', true, 1
     FROM workflow_transitions WHERE workflow_id = wf_epic AND kind = 'reject';
 
+    -- Ранги (решение 0075) — набор RankSpread: дети эпика по порядку номеров,
+    -- эпик один на верхнем уровне.
     -- Демонстрационные задачи. Первые две однорепозиторные, третья охватывает
     -- бэкенд и фронтенд сразу — ровно тот случай, ради которого заведён multi_repo.
     UPDATE projects SET task_counter = task_counter + 4 WHERE id = proj;
 
-    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by, rank)
     VALUES (proj, 'SDLC-1', 1, 'REST API проектов и задач',
             'Поднять Gin, миграции и CRUD.', wf, st_new,
-            '{"type": "task", "multi_repo": false}', sys)
+            '{"type": "task", "multi_repo": false}', sys, 'FV')
     RETURNING id INTO t_be;
 
-    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by, rank)
     VALUES (proj, 'SDLC-2', 2, 'Доска задач и карточка',
             'Vite + React 19 + Astryx поверх REST.', wf, st_new,
-            '{"type": "task", "multi_repo": false}', sys)
+            '{"type": "task", "multi_repo": false}', sys, 'V1')
     RETURNING id INTO t_fe;
 
-    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by, rank)
     VALUES (proj, 'SDLC-3', 3, 'Признак мультирепозиторности в карточке задачи',
             'Добавить поле в ручку задачи на бэкенде и отобразить его в карточке на фронте.',
-            wf, st_new, '{"type": "task", "multi_repo": true, "needs_migration": true}', sys)
+            wf, st_new, '{"type": "task", "multi_repo": true, "needs_migration": true}', sys, 'kV')
     RETURNING id INTO t_multi;
 
     -- Эпик — такая же задача, только своего типа и на своём цикле.
-    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by)
+    INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, properties, created_by, rank)
     VALUES (proj, 'SDLC-4', 4, 'Скелет системы',
             'Первый сквозной проход цикла: бэкенд, фронтенд и мультирепозиторная задача.',
-            wf_epic, ep_plan, '{"type": "epic"}', sys)
+            wf_epic, ep_plan, '{"type": "epic"}', sys, 'V')
     RETURNING id INTO ep;
 
     UPDATE tasks SET parent_id = ep WHERE id IN (t_be, t_fe, t_multi);

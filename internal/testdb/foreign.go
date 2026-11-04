@@ -31,8 +31,8 @@ func ForeignTask(t *testing.T, store *postgres.Store) (domain.Task, domain.Artif
 		t.Fatal(err)
 	}
 	if _, err := store.DB().Exec(ctx, `
-		INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id)
-		SELECT p.id, 'OTHER-1', 1, 'Чужая', 'описание OTHER-1', t.workflow_id, t.status_id
+		INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, rank)
+		SELECT p.id, 'OTHER-1', 1, 'Чужая', 'описание OTHER-1', t.workflow_id, t.status_id, 'V'
 		FROM projects p, tasks t WHERE p.key = 'OTHER' AND t.key = 'SDLC-1'`); err != nil {
 		t.Fatal(err)
 	}
