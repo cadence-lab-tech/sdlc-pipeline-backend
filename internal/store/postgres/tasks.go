@@ -17,7 +17,7 @@ const taskSelect = `
 	SELECT t.id, t.project_id, p.key, t.parent_id, parent.key, t.key, t.seq, t.title, t.description,
 	       t.workflow_id, t.status_id, ws.key, ws.name, t.priority, t.assignee_id, assignee.handle,
 	       t.external_ref, t.labels, t.properties, t.created_at, t.updated_at, t.closed_at,
-	       t.model_level, t.stage_settings, t.optional_stages
+	       t.model_level, t.stage_settings, t.optional_stages, t.rank
 	FROM tasks t
 	JOIN projects p ON p.id = t.project_id
 	JOIN workflow_statuses ws ON ws.id = t.status_id
@@ -29,7 +29,7 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.ParentID, &t.ParentKey, &t.Key, &t.Seq,
 		&t.Title, &t.Description, &t.WorkflowID, &t.StatusID, &t.StatusKey, &t.StatusName,
 		&t.Priority, &t.AssigneeID, &t.AssigneeHandle, &t.ExternalRef, &t.Labels, &t.Properties,
-		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt, &t.ModelLevel, &t.StageSettings, &t.OptionalStages)
+		&t.CreatedAt, &t.UpdatedAt, &t.ClosedAt, &t.ModelLevel, &t.StageSettings, &t.OptionalStages, &t.Rank)
 	return t, err
 }
 
@@ -59,8 +59,13 @@ type ListTasksFilter struct {
 	// done). Так эпик, чей статус ролей не имеет, но дети уже идут, попадает в
 	// «В работе», а в «Бэклоге» остаются неначатые. false — все остальные,
 	// включая конечные: «Бэклог» — это terminal=false вместе с in_work=false.
-	// nil — фильтра нет.
+	// nil — фильтра нет. Правило одно — inWorkSQL: его же берут поле
+	// in_work строки и выборка Backlog.
 	InWork *bool
+	// Выборка страницы «Бэклог» (решение 0075): не конечные задачи не в
+	// работе, а также задачи без родителя, у которых хотя бы один ребёнок
+	// такой — эпик в работе с неначатыми детьми. false — фильтра нет.
+	Backlog bool
 	// Категории статуса (backlog, active, waiting, done, cancelled); пусто —
 	// любые.
 	Categories []string
@@ -68,9 +73,9 @@ type ListTasksFilter struct {
 	// исполнителя. Оба пусто — фильтра нет.
 	Assignee   string
 	Unassigned bool
-	// "updated" — недавно обновлённые первыми; "backlog" — порядок бэклога
-	// (CLAB-363): без незакрытых блокирующих выше, затем приоритет, затем
-	// номер; пусто — порядок цикла: позиция статуса, затем номер.
+	// "updated" — недавно обновлённые первыми; "backlog" — ручной порядок
+	// бэклога (решение 0075): ранг, затем номер; пусто — порядок цикла:
+	// позиция статуса, затем номер.
 	Order  string
 	Limit  int
 	Offset int
@@ -82,20 +87,25 @@ const (
 	TaskListOrderBacklog = "backlog"
 )
 
-// backlogOrderSQL — порядок бэклога: задачи без незакрытых блокирующих
-// (источник связи blocks в категории статуса, отличной от done, — то же
-// правило, что у blocked_by списка и гейта dependencies_closed) выше
-// заблокированных, внутри — приоритет urgent → high → normal → low, затем
-// номер. Номер уникален в проекте, поэтому порядок детерминирован и листание
-// не теряет и не повторяет строк. Ручной ранг бэклога (эпик CLAB-368) встанет
-// первым ключом этого же выражения.
-const backlogOrderSQL = `
-	EXISTS (SELECT 1 FROM task_links bl
-	        JOIN tasks blk ON blk.id = bl.from_task_id
-	        JOIN workflow_statuses bws ON bws.id = blk.status_id
-	        WHERE bl.to_task_id = t.id AND bl.rel = 'blocks' AND bws.category <> 'done'),
-	CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-	t.seq`
+// backlogOrderSQL — порядок бэклога (решение 0075): ранг задачи в её
+// группе, затем номер. До ранга (CLAB-363) ключами были «заблокирована» и
+// приоритет; теперь порядок ставит человек, и ни приоритет, ни блокировка
+// задачу сами не двигают. Номер уникален в проекте, поэтому порядок
+// детерминирован и при равных рангах, и листание не теряет и не повторяет
+// строк.
+const backlogOrderSQL = `t.rank, t.seq`
+
+// inWorkSQL — «в работе» по данным для задачи task со статусом status
+// (алиасы запроса): статус не конечный и либо у него есть роль, либо у
+// задачи есть дети в работе или готовые (категории active, waiting, done).
+// Одно выражение на фильтр in_work, поле in_work строки и выборку backlog:
+// разойдись они, строка с in_work=false не попала бы в бэклог.
+func inWorkSQL(task, status string) string {
+	return `(NOT ` + status + `.is_terminal AND (
+		EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ` + status + `.id)
+		OR EXISTS (SELECT 1 FROM tasks kid JOIN workflow_statuses kws ON kws.id = kid.status_id
+		           WHERE kid.parent_id = ` + task + `.id AND kws.category IN ('active', 'waiting', 'done'))))`
+}
 
 // listTasksOrder — выражение ORDER BY по порядку фильтра.
 func listTasksOrder(order string) string {
@@ -109,8 +119,8 @@ func listTasksOrder(order string) string {
 }
 
 // listTasksWhere — условие выборки списка, общее для страницы и счёта:
-// `total` обязан считать ровно то, что листается. Параметры $1…$15.
-const listTasksWhere = `
+// `total` обязан считать ровно то, что листается. Параметры $1…$16.
+var listTasksWhere = `
 		WHERE t.project_id = $1
 		  AND ($2 = '' OR ws.key = $2)
 		  AND ($3 = '' OR parent.key = ANY(string_to_array($3, ',')))
@@ -130,10 +140,12 @@ const listTasksWhere = `
 		  AND (cardinality($12::text[]) = 0 OR ws.category = ANY($12))
 		  AND ($13 = '' OR assignee.handle = $13)
 		  AND (NOT $14 OR t.assignee_id IS NULL)
-		  AND ($15::boolean IS NULL OR $15 = (NOT ws.is_terminal AND (
-		        EXISTS (SELECT 1 FROM status_roles sr WHERE sr.status_id = ws.id)
-		        OR EXISTS (SELECT 1 FROM tasks kid JOIN workflow_statuses kws ON kws.id = kid.status_id
-		                   WHERE kid.parent_id = t.id AND kws.category IN ('active', 'waiting', 'done')))))`
+		  AND ($15::boolean IS NULL OR $15 = ` + inWorkSQL("t", "ws") + `)
+		  AND (NOT $16 OR (NOT ws.is_terminal AND (NOT ` + inWorkSQL("t", "ws") + `
+		        OR (t.parent_id IS NULL AND EXISTS (
+		              SELECT 1 FROM tasks bk JOIN workflow_statuses bkws ON bkws.id = bk.status_id
+		              WHERE bk.parent_id = t.id AND NOT bkws.is_terminal
+		                AND NOT ` + inWorkSQL("bk", "bkws") + `)))))`
 
 func listTasksArgs(projectID uuid.UUID, f ListTasksFilter) []any {
 	// Поиск по ссылке идёт без индекса: он всегда внутри проекта, где задач
@@ -147,7 +159,7 @@ func listTasksArgs(projectID uuid.UUID, f ListTasksFilter) []any {
 		cats = []string{}
 	}
 	return []any{projectID, f.StatusKey, f.ParentKey, f.Type, domain.DefaultTaskType,
-		extKey, extSystem, f.Query, f.TopLevel, f.Terminal, f.HasRole, cats, f.Assignee, f.Unassigned, f.InWork}
+		extKey, extSystem, f.Query, f.TopLevel, f.Terminal, f.HasRole, cats, f.Assignee, f.Unassigned, f.InWork, f.Backlog}
 }
 
 func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f ListTasksFilter) ([]domain.Task, error) {
@@ -159,7 +171,7 @@ func (s *Store) ListTasks(ctx context.Context, q Querier, projectID uuid.UUID, f
 	args := append(listTasksArgs(projectID, f), limit, offset)
 	rows, err := q.Query(ctx, taskSelect+listTasksWhere+`
 		ORDER BY `+listTasksOrder(f.Order)+`
-		LIMIT $16 OFFSET $17`, args...)
+		LIMIT $17 OFFSET $18`, args...)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -289,14 +301,14 @@ func (s *Store) ListTaskItems(ctx context.Context, q Querier, projectID uuid.UUI
 	return items, total, nil
 }
 
-// taskItems дополняет задачи категорией статуса и счётом детей: два запроса
-// на всю пачку.
+// taskItems дополняет задачи категорией статуса, признаком «в работе» и
+// счётом детей: два запроса на всю пачку.
 func (s *Store) taskItems(ctx context.Context, q Querier, tasks []domain.Task) ([]domain.TaskListItem, error) {
 	ids := make([]uuid.UUID, len(tasks))
 	for i, t := range tasks {
 		ids[i] = t.ID
 	}
-	categories, err := s.statusCategories(ctx, q, ids)
+	facts, err := s.statusFacts(ctx, q, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -306,18 +318,26 @@ func (s *Store) taskItems(ctx context.Context, q Querier, tasks []domain.Task) (
 	}
 	items := make([]domain.TaskListItem, len(tasks))
 	for i, t := range tasks {
-		items[i] = domain.TaskListItem{Task: t, StatusCategory: categories[t.ID], ChildCounts: counts[t.ID]}
+		f := facts[t.ID]
+		items[i] = domain.TaskListItem{Task: t, StatusCategory: f.category, ChildCounts: counts[t.ID], InWork: f.inWork}
 	}
 	return items, nil
 }
 
-func (s *Store) statusCategories(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]string, error) {
-	out := map[uuid.UUID]string{}
+type statusFact struct {
+	category string
+	inWork   bool
+}
+
+// statusFacts — категория статуса и «в работе» (inWorkSQL) каждой задачи
+// пачки одним запросом.
+func (s *Store) statusFacts(ctx context.Context, q Querier, ids []uuid.UUID) (map[uuid.UUID]statusFact, error) {
+	out := map[uuid.UUID]statusFact{}
 	if len(ids) == 0 {
 		return out, nil
 	}
 	rows, err := q.Query(ctx, `
-		SELECT t.id, ws.category
+		SELECT t.id, ws.category, `+inWorkSQL("t", "ws")+`
 		FROM tasks t JOIN workflow_statuses ws ON ws.id = t.status_id
 		WHERE t.id = ANY($1)`, ids)
 	if err != nil {
@@ -326,11 +346,11 @@ func (s *Store) statusCategories(ctx context.Context, q Querier, ids []uuid.UUID
 	defer rows.Close()
 	for rows.Next() {
 		var id uuid.UUID
-		var category string
-		if err := rows.Scan(&id, &category); err != nil {
+		var f statusFact
+		if err := rows.Scan(&id, &f.category, &f.inWork); err != nil {
 			return nil, translate(err)
 		}
-		out[id] = category
+		out[id] = f
 	}
 	return out, translate(rows.Err())
 }
@@ -552,6 +572,14 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 		parentID = &parent.ID
 	}
 
+	// Новая задача — в конец своей группы бэклога (решение 0075). Заведения
+	// в проекте уже идут по очереди строкой проекта выше; блокировка группы
+	// разводит заведение с перемещением, которое тоже ставит ключ у края.
+	rank, err := s.appendRank(ctx, tx, in.ProjectID, parentID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+
 	priority := in.Priority
 	if priority == "" {
 		priority = "normal"
@@ -574,12 +602,12 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO tasks (project_id, parent_id, key, seq, title, description,
 		                   workflow_id, status_id, priority, assignee_id, labels,
-		                   properties, created_by, external_ref, model_level, stage_settings)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16)
+		                   properties, created_by, external_ref, model_level, stage_settings, rank)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17)
 		RETURNING id`,
 		in.ProjectID, parentID, key, seq, in.Title, in.Description,
 		wf.ID, initial.ID, priority, in.AssigneeID, labels, props, in.CreatedBy, externalRef,
-		in.ModelLevel, stageSettings,
+		in.ModelLevel, stageSettings, rank,
 	).Scan(&taskID); err != nil {
 		return domain.Task{}, translate(err)
 	}

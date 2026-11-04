@@ -521,8 +521,8 @@ func TestFeedProjectQueryUsesIndex(t *testing.T) {
 	testdb.ForeignTask(t, w.store)
 	ctx := context.Background()
 	if _, err := w.pool.Exec(ctx, `
-		INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id)
-		SELECT p.id, p.key || '-' || (100 + g), 100 + g, 'нагрузка', '', t.workflow_id, t.status_id
+		INSERT INTO tasks (project_id, key, seq, title, description, workflow_id, status_id, rank)
+		SELECT p.id, p.key || '-' || (100 + g), 100 + g, 'нагрузка', '', t.workflow_id, t.status_id, 'V'
 		FROM projects p, tasks t, generate_series(1, 50) g
 		WHERE p.key IN ('SDLC', 'OTHER') AND t.key = 'SDLC-1'`); err != nil {
 		t.Fatal(err)

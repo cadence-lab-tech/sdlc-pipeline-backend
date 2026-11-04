@@ -202,6 +202,20 @@ MCP-тулы и REST-хендлеры вызывают одни и те же с�
   растёт с её размером; гейты — один вердикт на задачу (`humanVerdicts`), из
   него и `awaiting_approval`, и `awaits_human`, и `/approvals`. Срок предела
   у строки — тот же `limitOnClock`, что у `limitFor`.
+- **Ранг бэклога — серверный дробный ключ в группе** (CLAB-399, решение
+  0075, `domain/rank.go`, `workflow/rank.go`, `store/postgres/rank.go`).
+  `tasks.rank` (`COLLATE "C"`) — место в группе `(project_id, parent_id)`;
+  `order=backlog` — `rank, seq`. Ключ считает только сервер
+  (`domain.RankBetween`, перераздача группы `RankSpread` при длине больше
+  `RankMaxLen`), перемещение и заведение — под `LockRankGroup`
+  (advisory-блокировка группы, строки задач не блокируются), состояние
+  задачи и соседа читается после неё. Перемещение пишет только `rank` и
+  `task.ranked` — не `updated_at` и не движение (`MovementEvents`).
+  «В работе» — одно выражение `inWorkSQL` на фильтр `in_work`, поле
+  `in_work` строки и выборку `backlog=true`. Прямой `INSERT INTO tasks` в
+  обход `CreateTask` (сид, фикстуры) называет ранг сам — `CHECK` и `NOT
+  NULL` колонки. Токен задачи — только дети своей задачи
+  (`RequireRankCircle`).
 - **`clab server` — порт скриптов пакета, а не новое поведение**
   (решение 0045). Флаги, переменные, имена файлов, отказы и напечатанный
   откат те же, что у `upgrade.sh`, `backup.sh`, `restore.sh` и `lib.sh`

@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS tasks_rank_group;
+ALTER TABLE tasks DROP COLUMN IF EXISTS rank;
