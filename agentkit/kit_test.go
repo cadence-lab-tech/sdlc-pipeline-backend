@@ -398,3 +398,60 @@ func TestKitStageRightWording(t *testing.T) {
 		t.Error("clab-rules: пропало правило уровня maintainer")
 	}
 }
+
+// CLAB-401 (эпик CLAB-368, AC-21): скилы знают порядок бэклога — ранг и
+// clab rank, clab backlog и --next, приоритет, страницу, отказы и версию
+// сервера. Связь blocks больше не «единственный порядок». Удалённый абзац
+// роняет тест.
+func TestKitBacklogOrder(t *testing.T) {
+	k, err := Load("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := map[string]string{}
+	for _, f := range k.Files {
+		flat[f.Path] = strings.Join(strings.Fields(f.Content), " ")
+	}
+	want := map[string][]string{
+		"skills/clab-backlog/SKILL.md": {
+			"## Put it in place", "end of its group", "clab rank ABC-12 --before ABC-15",
+			"clab rank ABC-12 --after ABC-15", "clab rank ABC-12 --top", "clab rank ABC-12 --bottom",
+			"clab backlog --parent ABC-2", `"raise ABC-12 above ABC-15"`, "`sdlc_rank_task`",
+			"in different backlog groups", "update the server to v0.25.0 or newer",
+			"server v0.25.0 or newer", "what waits for what", "`clab backlog --next` skips",
+			"level `agent` and above", "does not change the place in the backlog",
+			"/p/<KEY>/backlog",
+		},
+		"skills/clab-status/SKILL.md": {
+			"## The backlog and what is next", "clab backlog --next --json", "`first_blocked`",
+			"`skipped`", "`blocked_by`", "`in_work: true`", "`parent=<epic>`", "`sdlc_list_tasks`",
+			"`backlog: true`", "clab edit ABC-12 --priority low|normal|high|urgent",
+			"does not change the place in the backlog", "/p/<KEY>/backlog", "server v0.25.0 or newer",
+			"Empty backlog", "No free task",
+		},
+		"skills/clab-guide/SKILL.md": {
+			"clab rank ABC-12 --before ABC-15 | --after ABC-15 | --top | --bottom",
+			"clab backlog [--parent ABC-2] [--limit 50] [--next] [--json]",
+			"`sdlc_rank_task`", "`backlog: true`", "`top_level: true`",
+			"`--next` exists only in the CLI", "level `agent` and above",
+			"the order of the project is the human's decision", "server v0.25.0 or newer",
+		},
+	}
+	for path, needles := range want {
+		body, ok := flat[path]
+		if !ok {
+			t.Fatalf("в наборе нет %s", path)
+		}
+		for _, s := range needles {
+			if !strings.Contains(body, s) {
+				t.Errorf("%s: нет %q", path, s)
+			}
+		}
+	}
+	// Прежнее утверждение неверно после ранга: порядок задают не одни связи.
+	for path, body := range flat {
+		if strings.Contains(body, "only by links") {
+			t.Errorf("%s: устаревшая фраза «only by links»", path)
+		}
+	}
+}
