@@ -309,6 +309,18 @@ func TestTransitionEventsCarryVia(t *testing.T) {
 		t.Fatalf("сотрудник: cancel: %v", err)
 	}
 	fields("cancel сотрудником", w.lastEvent(fresh, domain.EventTaskCancelled), ViaLevel, "analyst", "agent", "session")
+	// Возврат сотрудником с ролью основного статуса — via=stage_role
+	// (уточнение 2 аналитика CLAB-410, AC-6).
+	architect := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"architect"}, TokenKind: domain.TokenSession}
+	waive(task, "analysis_done", "artifacts", "peer_review", "human_approval", "drift", "repo_scope")
+	if _, err := w.engine.ExecuteAs(w.ctx, task.Key, "analysis_done", maintainer, ""); err != nil {
+		t.Fatal(err)
+	}
+	waive(task, "reject_to_analysis", "problem_report")
+	if _, err := w.engine.ExecuteAs(w.ctx, task.Key, "reject_to_analysis", architect, ""); err != nil {
+		t.Fatalf("сотрудник: reject своего этапа: %v", err)
+	}
+	fields("reject сотрудником своего этапа", w.lastEvent(task, domain.EventTaskRejected), ViaStageRole, "architect", "agent", "session")
 
 	// Токен задачи: via=task, token_kind=task (K-2).
 	tt := w.task("analysis")
