@@ -39,6 +39,23 @@ type Fake struct {
 	MaxBody int
 	// Fail — ответить ошибкой на запросы, для которых она вернула код.
 	Fail func(r *http.Request) int
+	// keys — временные ключи, выданные фейком агента или STS (Allow): ключ
+	// доступа → секрет и токен сессии, который обязан прийти заголовком.
+	keys map[string]Key
+}
+
+// Allow принимает подпись временными ключами вдобавок к Secret: так бакет
+// проверяет, что запрос ушёл с ключами, выданными источником, и с их
+// X-Amz-Security-Token.
+func (f *Fake) Allow(keys ...Key) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.keys == nil {
+		f.keys = map[string]Key{}
+	}
+	for _, k := range keys {
+		f.keys[k.AccessKeyID] = k
+	}
 }
 
 // New — пустой бакет.
@@ -260,9 +277,16 @@ func (f *Fake) verify(r *http.Request, body []byte) error {
 			signature = value
 		}
 	}
-	_, scope, ok := strings.Cut(credential, "/")
+	accessKey, scope, ok := strings.Cut(credential, "/")
 	if !ok {
 		return errors.New("broken Credential")
+	}
+	secret := f.Secret
+	if k, ok := f.keys[accessKey]; ok {
+		if r.Header.Get("X-Amz-Security-Token") != k.SessionToken {
+			return errors.New("x-amz-security-token does not match the access key")
+		}
+		secret = k.SecretAccessKey
 	}
 	var headers strings.Builder
 	for _, name := range strings.Split(signedHeaders, ";") {
@@ -281,7 +305,7 @@ func (f *Fake) verify(r *http.Request, body []byte) error {
 	hash := sha256.Sum256([]byte(canonical))
 	stamp := r.Header.Get("X-Amz-Date")
 	toSign := strings.Join([]string{"AWS4-HMAC-SHA256", stamp, scope, hex.EncodeToString(hash[:])}, "\n")
-	key := mac([]byte("AWS4"+f.Secret), stamp[:8])
+	key := mac([]byte("AWS4"+secret), stamp[:8])
 	key = mac(key, f.Region)
 	key = mac(key, "s3")
 	key = mac(key, "aws4_request")

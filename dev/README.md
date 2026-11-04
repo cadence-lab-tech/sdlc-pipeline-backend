@@ -568,7 +568,18 @@ EOF
 docker compose -f dev/docker-compose.yml --profile s3 up -d --build
 ```
 
-В логе api появится `внешнее хранилище содержимого store=s3://sdlc-blobs/`.
+В логе api появится `внешнее хранилище содержимого store=s3://sdlc-blobs/`,
+а перед ней — `объектное хранилище S3 … credentials=static`: источник ключей.
+
+Ключи берутся по порядку (CLAB-394): явные статические
+(`SDLC_BLOB_S3_ACCESS_KEY_ID` и `..._SECRET_ACCESS_KEY`, запасные `AWS_*`) →
+EKS Pod Identity (`AWS_CONTAINER_CREDENTIALS_FULL_URI`) → IRSA
+(`AWS_WEB_IDENTITY_TOKEN_FILE` и `AWS_ROLE_ARN`). Временные ключи
+запрашиваются на каждый запрос через кэш и обновляются за пять минут до
+срока; на старте их ждут до 30 секунд, не дождались — api и воркер не
+стартуют. Половина статической пары — отказ, а не переход к Pod Identity.
+Локально Pod Identity и IRSA не проверить: их поведение держат фейки
+`internal/blobstore/s3test` (`Container`, `STS`).
 Дальше документ больше 256 КБ ляжет в бакет, а в базе останется адрес:
 
 ```bash
@@ -630,6 +641,8 @@ docker exec sdlc-postgres psql -U sdlc -d sdlc -tAc \
 | `SDLC_BLOB_S3_PREFIX` | пусто | префикс ключей внутри бакета |
 | `SDLC_BLOB_S3_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` | ключ доступа |
 | `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` | секрет доступа |
+| `SDLC_BLOB_S3_SESSION_TOKEN` | `AWS_SESSION_TOKEN` | токен сессии к статическим ключам; без пары — отказ на старте |
+| `SDLC_BLOB_S3_STS_ENDPOINT` | `https://sts.<регион>.amazonaws.com` | адрес STS для IRSA (GovCloud, VPC endpoint); статическим ключам и Pod Identity не нужен |
 | `SDLC_BLOB_S3_PATH_STYLE` | `true` | адресация `endpoint/bucket/key`; `false` — `bucket.endpoint` |
 | `SDLC_GITHUB_WEBHOOK_SECRET` | пусто | секрет подписи вебхуков; без него ручка выключена |
 | `SDLC_INDEX_POLL_INTERVAL` | `15s` | как часто воркер смотрит в очередь прогонов между опросами; только положительное |
