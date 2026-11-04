@@ -150,6 +150,7 @@ func (c *Client) checkServerVersion(resp *http.Response) {
 	if server == "" {
 		return
 	}
+	c.serverVersion.Store(server)
 	c.versionOnce.Do(func() {
 		if k := versionSkew(version, server); k != skewNone {
 			fmt.Fprint(os.Stderr, skewWarning(k, version, server, c.origin, k == skewCLIOlder && installedByBrew()))

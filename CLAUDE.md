@@ -215,7 +215,12 @@ MCP-тулы и REST-хендлеры вызывают одни и те же с�
   `in_work` строки и выборку `backlog=true`. Прямой `INSERT INTO tasks` в
   обход `CreateTask` (сид, фикстуры) называет ранг сам — `CHECK` и `NOT
   NULL` колонки. Токен задачи — только дети своей задачи
-  (`RequireRankCircle`).
+  (`RequireRankCircle`). Команды CLI (`rank`, `backlog`,
+  `cmd/clab/backlog.go`) и MCP (`sdlc_rank_task`, `backlog` и `top_level`
+  у `sdlc_list_tasks`, `mcp/rank.go`) — тонкие виды над тем же ядром
+  (CLAB-400): место и порядок считает сервер, CLI называет соседа и не
+  пересортировывает строки; `--next` выбирает строку из отданного порядка
+  по `blocked_by` и `in_work`.
 - **`clab server` — порт скриптов пакета, а не новое поведение**
   (решение 0045). Флаги, переменные, имена файлов, отказы и напечатанный
   откат те же, что у `upgrade.sh`, `backup.sh`, `restore.sh` и `lib.sh`

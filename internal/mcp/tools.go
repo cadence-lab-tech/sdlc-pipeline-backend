@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,7 +29,12 @@ func (s *Server) registerTools() {
 			"с указанием роли, которой эта работа адресована; parent — нарезка эпика, "+
 			"type — только задачи этого типа, external — задачи со ссылкой на тикет основного "+
 			"трекера (PROJ-12 или jira:PROJ-12, регистр не важен). Задача, назначенная другому, "+
-			"показана, но не claimable.",
+			"показана, но не claimable. top_level=true — только задачи без родителя. "+
+			"backlog=true — бэклог в ручном порядке (решение 0075): верхний уровень (вместе с "+
+			"top_level) или нарезка эпика (вместе с parent); элементы несут rank, in_work, "+
+			"blocked_by (ключи блокирующих незакрытых задач), child_counts и status_category, "+
+			"total — размер выборки; двигает порядок sdlc_rank_task. backlog несовместим с "+
+			"claimable и role.",
 		s.listTasks)
 	add(s, "sdlc_claim_task",
 		"Забрать задачу: выдаётся аренда, в ответ приезжают документы роли, результаты "+
@@ -269,6 +275,9 @@ type listTasksInput struct {
 	Type      string `json:"type,omitempty" jsonschema:"тип задачи, например epic"`
 	External  string `json:"external,omitempty" jsonschema:"ключ тикета основного трекера (PROJ-12) или система:ключ (jira:PROJ-12)"`
 	Limit     int    `json:"limit,omitempty"`
+	// Бэклог (решение 0075, CLAB-400): выборка и порядок страницы «Бэклог».
+	TopLevel bool `json:"top_level,omitempty" jsonschema:"только задачи без родителя; дети эпика отдельными строками не повторяются"`
+	Backlog  bool `json:"backlog,omitempty" jsonschema:"бэклог в ручном порядке (rank): не начатые задачи и эпики в работе с неначатыми детьми; с parent — бэклог этого эпика; несовместим с claimable и role"`
 }
 
 func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToolResult, any, error) {
@@ -284,6 +293,13 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 	project, err := s.store.GetProjectByKey(ctx, q, key)
 	if err != nil {
 		return fail(err)
+	}
+
+	if in.Backlog {
+		if in.Claimable || in.Role != "" {
+			return fail(apperr.InvalidInput("backlog несовместим с claimable и role: бэклог — порядок задач, а не очередь прогонов"))
+		}
+		return s.listBacklog(ctx, project.ID, in)
 	}
 
 	if in.Claimable || in.Role != "" {
@@ -306,6 +322,9 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 			if in.Type != "" && r.Task.Type() != in.Type {
 				continue
 			}
+			if in.TopLevel && r.Task.ParentKey != nil {
+				continue
+			}
 			if !domain.ExternalRefMatches(r.Task.ExternalRef, extSystem, extKey) {
 				continue
 			}
@@ -324,7 +343,7 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 
 	tasks, err := s.store.ListTasks(ctx, q, project.ID, postgres.ListTasksFilter{
 		StatusKey: in.Status, ParentKey: in.Parent, Type: in.Type, External: in.External,
-		Limit: in.Limit,
+		TopLevel: in.TopLevel, Limit: in.Limit,
 	})
 	if err != nil {
 		return fail(err)
@@ -340,6 +359,36 @@ func (s *Server) listTasks(ctx context.Context, in listTasksInput) (*sdk.CallToo
 		})
 	}
 	return ok(map[string]any{"tasks": items})
+}
+
+// listBacklog — sdlc_list_tasks с backlog=true: та же выборка, что у REST
+// (GET /projects/:key/tasks?backlog=true&order=backlog), через тот же
+// сервис ListTaskOverviews — блокировки и «в работе» считает он, не тул.
+// Элементы в именах тула (status, parent), как у прежнего ответа.
+func (s *Server) listBacklog(ctx context.Context, projectID uuid.UUID, in listTasksInput) (*sdk.CallToolResult, any, error) {
+	page, err := s.engine.ListTaskOverviews(ctx, s.store.DB(), projectID, postgres.ListTasksFilter{
+		StatusKey: in.Status, ParentKey: in.Parent, Type: in.Type, External: in.External,
+		TopLevel: in.TopLevel, Backlog: true, Order: postgres.TaskListOrderBacklog, Limit: in.Limit,
+	}, workflow.AttentionFilter{}, identity(ctx).Principal.ID, time.Now())
+	if err != nil {
+		return fail(err)
+	}
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, t := range page.Items {
+		blocked := page.Overviews[t.ID].BlockedBy
+		if blocked == nil {
+			blocked = []string{}
+		}
+		items = append(items, map[string]any{
+			"key": t.Key, "title": t.Title, "status": t.StatusKey,
+			"status_category": t.StatusCategory, "type": t.Type(), "parent": t.ParentKey,
+			"assignee": t.AssigneeHandle, "priority": t.Priority, "rank": t.Rank,
+			"in_work": t.InWork, "blocked_by": blocked, "child_counts": t.ChildCounts,
+			"multi_repo": t.MultiRepo(), "repositories": repoNames(t.Task),
+			"external_ref": t.ExternalRef, "optional_stages": t.OptionalStages,
+		})
+	}
+	return ok(map[string]any{"tasks": items, "total": page.Total})
 }
 
 // workflowTypes — какой цикл ведёт какие типы задач и какие этапы в нём
