@@ -26,6 +26,11 @@ type StatusMetric struct {
 	Rejections    int     `json:"rejections"`
 	RepeatedRuns  int     `json:"repeated_runs"`
 	ExpiredLeases int     `json:"expired_leases"`
+	// Попытки статуса, закрытые переводом задачи в статус (outcome moved,
+	// CLAB-408): переводы из этого статуса, зеркально rejections. Такая
+	// попытка — не законченный этап, и в finished_runs, часы, rejections и
+	// repeated_runs она не входит.
+	Moves int `json:"moves"`
 }
 
 type GateMetric struct {
@@ -271,6 +276,15 @@ func (s *Store) StatusMetrics(ctx context.Context, q Querier, projectID uuid.UUI
 		    JOIN workflow_statuses ws ON ws.id = sr.status_id
 		    WHERE t.project_id = $1 AND sr.kind = 'stage'
 		      AND sr.finished_at IS NOT NULL AND sr.finished_at >= $2
+		      AND sr.outcome IS DISTINCT FROM 'moved'
+		), moves AS (
+		    SELECT ws.key, min(ws.name) AS name, count(*) AS n
+		    FROM stage_runs sr
+		    JOIN tasks t ON t.id = sr.task_id
+		    JOIN workflow_statuses ws ON ws.id = sr.status_id
+		    WHERE t.project_id = $1 AND sr.kind = 'stage' AND sr.outcome = 'moved'
+		      AND sr.finished_at >= $2
+		    GROUP BY ws.key
 		), open_tasks AS (
 		    SELECT ws.key, count(*) AS n
 		    FROM tasks t JOIN workflow_statuses ws ON ws.id = t.status_id
@@ -291,6 +305,8 @@ func (s *Store) StatusMetrics(ctx context.Context, q Querier, projectID uuid.UUI
 		    UNION
 		    SELECT key, name, 1000 FROM runs
 		    UNION
+		    SELECT key, name, 1000 FROM moves
+		    UNION
 		    SELECT key, key, 1000 FROM open_tasks
 		)
 		SELECT k.key, k.name,
@@ -301,7 +317,8 @@ func (s *Store) StatusMetrics(ctx context.Context, q Querier, projectID uuid.UUI
 		       coalesce((SELECT max(hours) FROM runs r WHERE r.key = k.key), 0),
 		       (SELECT count(*) FROM runs r WHERE r.key = k.key AND r.outcome = 'rejected'),
 		       (SELECT count(*) FROM runs r WHERE r.key = k.key AND r.attempt > 1),
-		       coalesce((SELECT n FROM expired e WHERE e.key = k.key), 0)
+		       coalesce((SELECT n FROM expired e WHERE e.key = k.key), 0),
+		       coalesce((SELECT n FROM moves m WHERE m.key = k.key), 0)
 		FROM (SELECT key, min(name) AS name, min(position) AS position FROM keys GROUP BY key) k
 		ORDER BY k.position, k.key`, projectID, since)
 	if err != nil {
@@ -314,7 +331,7 @@ func (s *Store) StatusMetrics(ctx context.Context, q Querier, projectID uuid.UUI
 		var m StatusMetric
 		if err := rows.Scan(&m.StatusKey, &m.StatusName, &m.OpenTasks, &m.FinishedRuns,
 			&m.AvgHours, &m.MedianHours, &m.MaxHours, &m.Rejections, &m.RepeatedRuns,
-			&m.ExpiredLeases); err != nil {
+			&m.ExpiredLeases, &m.Moves); err != nil {
 			return nil, translate(err)
 		}
 		out = append(out, m)

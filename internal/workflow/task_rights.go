@@ -81,6 +81,9 @@ const (
 	ActScope TaskAct = "scope"
 	// Свойства без репозиториев (UpdateScope только с properties).
 	ActProperties TaskAct = "properties"
+	// Перевод в любой статус версии цикла вне переходов (CLAB-408, MoveTask):
+	// действие человека — сотрудника или сопровождающего.
+	ActMove TaskAct = "move"
 )
 
 // Коды причины отказа права на задачу в details.reason, рядом с кодами права
@@ -165,6 +168,8 @@ func taskTokenRight(b *TaskBinding, act TaskAct, f TaskFacts) error {
 		return linkCircle(b, f.Task, *f.Other, f.Rel)
 	case ActScope, ActProperties:
 		return executorRefused(b, "область задачи и её свойства — решение человека")
+	case ActMove:
+		return executorRefused(b, "перевод задачи в статус — решение человека")
 	}
 	return executorRefused(b, string(act))
 }
@@ -204,6 +209,13 @@ func botRight(act TaskAct, f TaskFacts) error {
 			"расширить область задачи может человек — сопровождающий или сотрудник проекта уровня agent: " +
 				"добавить репозиторий в область — решение человека, не агента; " +
 				"опишите нужный репозиторий и причину в артефакте этапа и в отчёте").
+			WithDetails(map[string]any{"reason": DenyHumanAction})
+	case ActMove:
+		// Аренда не в счёт: перевод обходит гейты, а у бота нет решений
+		// человека (В-5 эпика CLAB-404).
+		return apperr.Forbidden(
+			"переводить задачу в статус может человек — сопровождающий или сотрудник проекта уровня agent: " +
+				"перевод обходит гейты цикла, это решение человека, не агента").
 			WithDetails(map[string]any{"reason": DenyHumanAction})
 	}
 	return nil
@@ -307,8 +319,8 @@ func (e *Engine) mayTask(ctx context.Context, q postgres.Querier, a Actor, act T
 }
 
 // TaskRights — право актора на задачу для карточки (actor_rights): булевы
-// поля и у каждого false — отказ тем же видом, что у переходов. Поле move
-// добавит перевод в статус (CLAB-408).
+// поля и у каждого false — отказ тем же видом, что у переходов. Move —
+// перевод в статус (CLAB-408).
 type TaskRights struct {
 	Edit        bool                    `json:"edit"`
 	StageChoice bool                    `json:"stage_choice"`
@@ -316,6 +328,7 @@ type TaskRights struct {
 	Assign      bool                    `json:"assign"`
 	Link        bool                    `json:"link"`
 	Scope       bool                    `json:"scope"`
+	Move        bool                    `json:"move"`
 	ActorDeny   map[string]*ActorDenial `json:"actor_deny,omitempty"`
 }
 
@@ -334,6 +347,7 @@ func (e *Engine) TaskRightsQ(ctx context.Context, q postgres.Querier, task domai
 	}{
 		{ActEdit, &out.Edit}, {ActStageChoice, &out.StageChoice}, {ActCreateChild, &out.CreateChild},
 		{ActAssign, &out.Assign}, {ActLink, &out.Link}, {ActScope, &out.Scope},
+		{ActMove, &out.Move},
 	} {
 		err := TaskRight(a, r.act, f)
 		*r.dst = err == nil
@@ -370,10 +384,11 @@ func TaskWorkOf(a Actor) TaskWork {
 	w := TaskWork{Class: c}
 	switch c {
 	case ClassUnchecked, ClassMaintainer:
-		w.Summary = "любая задача проекта: постановка и выбор этапов, заведение, назначение, связи, область"
+		w.Summary = "любая задача проекта: постановка и выбор этапов, заведение, назначение, связи, область, " +
+			"перевод в статус"
 	case ClassEmployee:
 		w.Summary = "любая задача проекта без аренды: постановка и выбор этапов, заведение (и без родителя), " +
-			"назначение, связи, область"
+			"назначение, связи, область, перевод в статус"
 	case ClassBot:
 		w.Summary = "постановка и дочерние задачи — там, где держите этап по аренде, в области родителя; " +
 			"назначение и связи; область — решение человека"
