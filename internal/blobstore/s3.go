@@ -25,6 +25,7 @@ import (
 // ради двух запросов, PUT и GET, в зависимостях не заводим.
 type S3 struct {
 	cfg    S3Config
+	creds  CredentialsProvider
 	client *http.Client
 	// stream — тот же клиент без общего срока на обмен: им идут запись и
 	// чтение содержимого, у которых срок зависит от размера и не угадывается.
@@ -39,8 +40,9 @@ type S3 struct {
 // маршрута (SDLC_DOWNLOAD_TIMEOUT).
 const streamIdle = 2 * time.Minute
 
-// S3Config — адрес бакета и ключи доступа. Ключи приходят из окружения и в
-// базе не оседают: в проекте хранятся только имена и ссылки.
+// S3Config — адрес бакета и ключи доступа. Ключи приходят из окружения или
+// от источника временных ключей и в базе не оседают: в проекте хранятся
+// только имена и ссылки.
 type S3Config struct {
 	// Endpoint — базовый адрес сервиса, например https://s3.eu-central-1.amazonaws.com
 	// или http://minio:9000 для локальной установки.
@@ -51,6 +53,11 @@ type S3Config struct {
 	AccessKey    string
 	SecretKey    string
 	SessionToken string
+	// STSEndpoint — адрес STS для IRSA; пусто — STS региона.
+	STSEndpoint string
+	// Credentials — источник ключей на каждый запрос (Pod Identity, IRSA).
+	// Пусто — статические AccessKey, SecretKey и SessionToken.
+	Credentials CredentialsProvider
 	// PathStyle — адресация вида endpoint/bucket/key. У MinIO иначе никак,
 	// у AWS работает и виртуальный хост bucket.endpoint.
 	PathStyle bool
@@ -72,8 +79,12 @@ func NewS3(cfg S3Config) (*S3, error) {
 		return nil, errors.New("blobstore: адрес хранилища не задан")
 	case cfg.Region == "":
 		return nil, errors.New("blobstore: регион не задан")
-	case cfg.AccessKey == "" || cfg.SecretKey == "":
+	case cfg.Credentials == nil && (cfg.AccessKey == "" || cfg.SecretKey == ""):
 		return nil, errors.New("blobstore: ключи доступа не заданы")
+	}
+	creds := cfg.Credentials
+	if creds == nil {
+		creds = StaticCredentials{AccessKeyID: cfg.AccessKey, SecretAccessKey: cfg.SecretKey, SessionToken: cfg.SessionToken}
 	}
 	if _, err := url.Parse(cfg.Endpoint); err != nil {
 		return nil, fmt.Errorf("blobstore: адрес %s: %w", cfg.Endpoint, err)
@@ -88,7 +99,7 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}
 	stream := *client
 	stream.Timeout = 0
-	return &S3{cfg: cfg, client: client, stream: &stream, idle: streamIdle}, nil
+	return &S3{cfg: cfg, creds: creds, client: client, stream: &stream, idle: streamIdle}, nil
 }
 
 // key раскладывает по первым двум символам sha — так же, как файловое
@@ -156,7 +167,9 @@ func (s *S3) put(ctx context.Context, sha string, body io.ReaderAt, size int64, 
 	req.ContentLength = size
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(open()), nil }
 	req.Header.Set("Content-Type", mediaType)
-	s.sign(req, payload, time.Now().UTC())
+	if err := s.sign(req, payload, time.Now().UTC()); err != nil {
+		return "", err
+	}
 	resp, err := s.doWith(s.stream, req)
 	if err != nil {
 		return "", err
@@ -301,7 +314,9 @@ func (s *S3) requestQuery(ctx context.Context, method, key string, query url.Val
 	}
 	req.ContentLength = int64(len(body))
 	sum := sha256.Sum256(body)
-	s.sign(req, hex.EncodeToString(sum[:]), time.Now().UTC())
+	if err := s.sign(req, hex.EncodeToString(sum[:]), time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	return req, nil
 }
 
@@ -325,16 +340,21 @@ func (s *S3) newRequest(ctx context.Context, method, key string, query url.Value
 
 // sign — SigV4 с известным хэшем полезной нагрузки (payload — hex sha256
 // тела). Потоковая подпись по кускам не нужна: тело либо в памяти, либо в
-// спуле, и хэш его посчитан до запроса.
-func (s *S3) sign(req *http.Request, payload string, now time.Time) {
+// спуле, и хэш его посчитан до запроса. Ключи берутся у источника на
+// каждый запрос: временные истекают, пока сервис работает.
+func (s *S3) sign(req *http.Request, payload string, now time.Time) error {
+	creds, err := s.creds.Retrieve(req.Context())
+	if err != nil {
+		return err
+	}
 	stamp := now.Format("20060102T150405Z")
 	day := stamp[:8]
 
 	req.Header.Set("Host", req.URL.Host)
 	req.Header.Set("X-Amz-Date", stamp)
 	req.Header.Set("X-Amz-Content-Sha256", payload)
-	if s.cfg.SessionToken != "" {
-		req.Header.Set("X-Amz-Security-Token", s.cfg.SessionToken)
+	if creds.SessionToken != "" {
+		req.Header.Set("X-Amz-Security-Token", creds.SessionToken)
 	}
 
 	signed, canonicalHeaders := headersToSign(req)
@@ -351,14 +371,15 @@ func (s *S3) sign(req *http.Request, payload string, now time.Time) {
 	hash := sha256.Sum256([]byte(canonical))
 	toSign := strings.Join([]string{s3Algorithm, stamp, scope, hex.EncodeToString(hash[:])}, "\n")
 
-	key := hmacSHA256([]byte("AWS4"+s.cfg.SecretKey), day)
+	key := hmacSHA256([]byte("AWS4"+creds.SecretAccessKey), day)
 	key = hmacSHA256(key, s.cfg.Region)
 	key = hmacSHA256(key, s3Service)
 	key = hmacSHA256(key, "aws4_request")
 	signature := hex.EncodeToString(hmacSHA256(key, toSign))
 
 	req.Header.Set("Authorization", fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		s3Algorithm, s.cfg.AccessKey, scope, signed, signature))
+		s3Algorithm, creds.AccessKeyID, scope, signed, signature))
+	return nil
 }
 
 // headersToSign подписывает host и все x-amz-*: остальные заголовки по пути

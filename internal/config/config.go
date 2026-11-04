@@ -288,6 +288,7 @@ func Load() (Config, error) {
 			AccessKey:    sec.valueOr("SDLC_BLOB_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
 			SecretKey:    sec.valueOr("SDLC_BLOB_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
 			SessionToken: sec.valueOr("SDLC_BLOB_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+			STSEndpoint:  env("SDLC_BLOB_S3_STS_ENDPOINT", ""),
 		},
 		BlobInlineMaxBytes: 256 << 10,
 		BlobMaxBytes:       64 << 20,

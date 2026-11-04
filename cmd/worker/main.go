@@ -84,7 +84,7 @@ func run() error {
 	store := postgres.New(pool)
 	// То же хранилище, что у api: документы и артефакты, вынесенные сервисом,
 	// воркер читает при векторизации.
-	blobs, err := blobstore.Open(cfg.BlobS3, cfg.BlobDir)
+	blobs, err := blobstore.Open(ctx, cfg.BlobS3, cfg.BlobDir, log)
 	if err != nil {
 		return err
 	}

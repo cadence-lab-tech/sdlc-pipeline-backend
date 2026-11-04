@@ -1010,3 +1010,17 @@ func TestPollIntervalsEmptyMeansDefault(t *testing.T) {
 		}
 	})
 }
+
+// CLAB-394: адрес STS для IRSA необязателен; без него — пусто, и blobstore
+// берёт STS региона.
+func TestBlobS3STSEndpoint(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+	c, err := Load()
+	if err != nil || c.BlobS3.STSEndpoint != "" {
+		t.Fatalf("по умолчанию: %q %v", c.BlobS3.STSEndpoint, err)
+	}
+	t.Setenv("SDLC_BLOB_S3_STS_ENDPOINT", "https://sts.us-gov-west-1.amazonaws.com")
+	if c, err = Load(); err != nil || c.BlobS3.STSEndpoint != "https://sts.us-gov-west-1.amazonaws.com" {
+		t.Fatalf("из окружения: %q %v", c.BlobS3.STSEndpoint, err)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,10 +55,33 @@ type Store interface {
 // Open выбирает хранилище по настройкам: бакет важнее каталога, потому что
 // каталог задан в образе по умолчанию, а бакет — осознанное решение. Без того
 // и другого возвращается nil: содержимое лежит inline.
-func Open(s3 S3Config, dir string) (Store, error) {
+//
+// У бакета источник ключей выбирается по окружению (EnvCredentials) и
+// попадает в лог одной строкой рядом с адресом хранилища. Временные ключи
+// Pod Identity и IRSA запрашиваются сразу и ждутся до credentialsWait: не
+// пришли — Open отказывает, и процесс не стартует.
+func Open(ctx context.Context, s3 S3Config, dir string, log *slog.Logger) (Store, error) {
 	switch {
 	case s3.Bucket != "":
-		return NewS3(s3)
+		if log == nil {
+			log = slog.Default()
+		}
+		creds, source, err := EnvCredentials(s3, os.Getenv, log)
+		if err != nil {
+			return nil, err
+		}
+		s3.Credentials = creds
+		store, err := NewS3(s3)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("объектное хранилище S3", "store", store.String(), "credentials", source)
+		if source != SourceStatic {
+			if err := awaitCredentials(ctx, creds, source, credentialsWait, credentialsRetry, log); err != nil {
+				return nil, err
+			}
+		}
+		return store, nil
 	case dir != "":
 		return NewFS(dir)
 	default:

@@ -112,7 +112,7 @@ func run() error {
 	}
 
 	store := postgres.New(pool)
-	if err := useBlobStore(cfg, store, log); err != nil {
+	if err := useBlobStore(ctx, cfg, store, log); err != nil {
 		return err
 	}
 	// Учётные данные GitHub выбираются по проекту: установка приложения либо
@@ -247,8 +247,8 @@ func run() error {
 // useBlobStore передаёт хранилищу пределы содержимого и включает вынос
 // крупного, если задан каталог или бакет. Без них всё лежит inline, а
 // содержимое больше min(4 МиБ, SDLC_BLOB_MAX_BYTES) отбивается.
-func useBlobStore(cfg config.Config, store *postgres.Store, log *slog.Logger) error {
-	blobs, err := blobstore.Open(cfg.BlobS3, cfg.BlobDir)
+func useBlobStore(ctx context.Context, cfg config.Config, store *postgres.Store, log *slog.Logger) error {
+	blobs, err := blobstore.Open(ctx, cfg.BlobS3, cfg.BlobDir, log)
 	if err != nil {
 		return err
 	}
