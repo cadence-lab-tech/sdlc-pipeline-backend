@@ -714,7 +714,7 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   аренды, как прежде), viewer; пустой уровень — внутренние пути без правил.
   `TaskRight` — чистая функция над классом, действием (`edit`,
   `stage_choice`, `create`, `create_child`, `assign`, `link`, `scope`,
-  `properties`) и фактами; её зовут `UpdateTask`, `CreateTask`,
+  `properties`, `move`) и фактами; её зовут `UpdateTask`, `CreateTask`,
   `UpdateScope`, `Assign`, `LinkTasks` и прогноз `actor_rights` карточки,
   `/state` и `sdlc_get_task` (`TaskRightsQ`): прогноз и исход не
   расходятся. Сотрудник правит, заводит (и без родителя, и вне области
@@ -722,6 +722,27 @@ Postgres на `localhost:55432`, API на `localhost:8088`, база/польз�
   аренды; токен задачи заводит ребёнка своей задачи только в её области
   при любом уровне держателя. Новое действие с задачей — строка в
   `TaskAct` и ветки классов, а не проверка в ручке.
+- **Перевод в статус — операция движка, а не переход** (CLAB-408,
+  `workflow/move.go`, миграция 000046). `MoveTask` ставит задачу в любой
+  статус её версии цикла (текущий — рестарт этапа, терминальный, начальный)
+  с обязательной причиной одной транзакцией под `LockTaskByKey`: прогон
+  текущего статуса и его открытые перепроверки — `abandoned`/`moved`
+  (`FinishStageRun` снимает аренду и гасит токены задачи), `SetTaskStatus`
+  по `is_terminal`, `EnterStatus(…, nil, nil)` — попытка N+1 без
+  `rejected_from` и `entered_via`, события `task.moved` (`from`, `to`,
+  `reason`, `level`, `via` всегда `level`, `token_kind`, `stage_role`,
+  `attempt`) и `stage.entered` без `transition`. Гейты не вычисляются и не
+  пишутся, перепроверки не заводятся, `planLanding` не зовётся: выключенный
+  необязательный этап — `409 stage_disabled` с подсказкой `clab edit …
+  --stage X=on`, неизвестный статус — `400` со списком `details.statuses`.
+  Право — `TaskRight` с `ActMove`: сотрудник и сопровождающий; бот — 403
+  `human_action`; токену задачи маршрут `POST /v1/tasks/:key/move` и тул
+  `sdlc_move_task` закрыты белым списком (в `executorActions` их нет).
+  Предел попыток видит вход переводом (`nextAttemptSQL`), предела времени у
+  прогона перевода нет (`limitApplies` без `entered_via`). Метрики статуса:
+  `moves` отдельно, прогон `moved` не входит в `finished_runs`, часы,
+  `rejections` и `repeated_runs`; выход прогона в карточке — `exit.kind =
+  moved` с причиной в `comment`.
 - **Приглашение — отложенное добавление участника**
   ([решение 0035](../docs/decisions/0035-invites-by-link.md)). Права на выдачу
   те же, что у `SetTeamMember` (лид) и `SetMember` (администратор проекта),

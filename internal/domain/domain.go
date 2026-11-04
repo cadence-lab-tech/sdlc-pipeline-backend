@@ -802,6 +802,11 @@ const (
 	StageAbandoned  = "abandoned"
 )
 
+// RunOutcomeMoved — исход прогона, из которого задачу перевели в статус вне
+// переходов цикла (CLAB-408, миграция 000046): state abandoned. Это не
+// возврат и не законченный этап — метрики статуса считают его отдельно.
+const RunOutcomeMoved = "moved"
+
 type StageRun struct {
 	ID            uuid.UUID  `json:"id"`
 	TaskID        uuid.UUID  `json:"task_id"`
@@ -1027,7 +1032,8 @@ type RunGateVerdict struct {
 // task.advanced / task.rejected / task.cancelled этого прогона (payload.
 // transition, to, comment), поэтому миграция не нужна.
 type RunExit struct {
-	// advanced | rejected | cancelled — тип события перехода без префикса.
+	// advanced | rejected | cancelled — тип события перехода без префикса;
+	// moved — перевод в статус (CLAB-408): Transition пуст, Comment — причина.
 	Kind       string  `json:"kind"`
 	Transition string  `json:"transition"`
 	ToStatus   string  `json:"to_status"`
@@ -1165,12 +1171,15 @@ const (
 	// ближайшие незакрытые соседи после перемещения, above — выше, below —
 	// ниже. По циклу задача не движется, updated_at не меняется.
 	EventTaskRanked = "task.ranked"
+	// Задачу перевели в статус вне переходов цикла (CLAB-408): гейты не
+	// вычислялись, прежний прогон закрыт с исходом moved.
+	EventTaskMoved = "task.moved"
 )
 
 // MovementEvents — события ленты, которые двигают задачу по циклу: вход в
 // этап, захват, отпуск и протухание аренды, сдача, решение по гейту,
-// перепроверка, переход и отмена. По ним считается last_moved_at строки
-// списка задач (CLAB-363). Heartbeat (lease.extended), учёт, правка
+// перепроверка, переход, отмена и перевод в статус. По ним считается
+// last_moved_at строки списка задач (CLAB-363). Heartbeat (lease.extended), учёт, правка
 // постановки, вложения, привязка PR, дрейф и неудачная попытка перехода
 // (gate.failed) движением не считаются: они меняют updated_at или ленту, но
 // задача от них дальше не идёт.
@@ -1178,7 +1187,7 @@ var MovementEvents = []string{
 	EventTaskCreated, EventStageEntered, EventStageClaimed, EventStageReleased,
 	EventLeaseExpired, EventArtifactSubmitted, EventGateDecided,
 	EventReviewRequested, EventReviewCompleted, EventTaskAdvanced,
-	EventTaskRejected, EventTaskCancelled,
+	EventTaskRejected, EventTaskCancelled, EventTaskMoved,
 }
 
 // TaskCost — стоимость задачи в строке списка (CLAB-363): сумма учёта её

@@ -44,6 +44,11 @@ const (
 	// pending. В details — base_version и latest_version; автор подаёт
 	// заново от новой базы.
 	CodeStaleRoleBase Code = "stale_role_base"
+	// Перевод задачи в статус (CLAB-408) — в выключенный у задачи
+	// необязательный этап: ставить её туда нельзя, пока этап не включат
+	// (clab edit … --stage <статус>=on). Переходы в выключенный этап
+	// по-прежнему отвечают transition_not_allowed с details.unavailable.
+	CodeStageDisabled Code = "stage_disabled"
 
 	// Аутентификация и права (фаза 4): токен не предъявлен или недействителен,
 	// либо предъявлен, но прав на действие нет.

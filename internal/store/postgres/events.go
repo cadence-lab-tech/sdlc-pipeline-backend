@@ -85,7 +85,8 @@ func (s *Store) ListEventsByStatus(ctx context.Context, q Querier, taskID uuid.U
 // RunExitsByTask — выход каждого завершённого прогона задачи одним запросом
 // (CLAB-283): переход, целевой статус и комментарий берутся из события
 // task.advanced / task.rejected / task.cancelled, которое движок пишет на
-// прогон, закончившийся переходом. Если таких событий у прогона несколько,
+// прогон, закончившийся переходом, или task.moved — переводом в статус
+// (CLAB-408: kind moved, перехода нет, комментарий — причина). Если таких событий у прогона несколько,
 // берётся последнее. Прогона без выхода в ответе нет.
 func (s *Store) RunExitsByTask(ctx context.Context, q Querier, taskID uuid.UUID) (map[uuid.UUID]domain.RunExit, error) {
 	rows, err := q.Query(ctx, `
@@ -93,9 +94,10 @@ func (s *Store) RunExitsByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 		       e.stage_run_id, e.type, e.payload, p.handle, e.created_at
 		FROM task_events e
 		LEFT JOIN principals p ON p.id = e.actor_id
-		WHERE e.task_id = $1 AND e.stage_run_id IS NOT NULL AND e.type IN ($2, $3, $4)
+		WHERE e.task_id = $1 AND e.stage_run_id IS NOT NULL AND e.type IN ($2, $3, $4, $5)
 		ORDER BY e.stage_run_id, e.created_at DESC, e.id DESC`,
-		taskID, domain.EventTaskAdvanced, domain.EventTaskRejected, domain.EventTaskCancelled)
+		taskID, domain.EventTaskAdvanced, domain.EventTaskRejected, domain.EventTaskCancelled,
+		domain.EventTaskMoved)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -117,9 +119,14 @@ func (s *Store) RunExitsByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 			Transition string `json:"transition"`
 			To         string `json:"to"`
 			Comment    string `json:"comment"`
+			// У перевода (task.moved) перехода нет, а причина — reason.
+			Reason string `json:"reason"`
 		}
 		_ = json.Unmarshal(payload, &body)
 		x.Transition, x.ToStatus = body.Transition, body.To
+		if body.Comment == "" {
+			body.Comment = body.Reason
+		}
 		if body.Comment != "" {
 			c := body.Comment
 			x.Comment = &c

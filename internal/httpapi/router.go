@@ -327,6 +327,10 @@ func (s *Server) Handler() http.Handler {
 		// закрывать их можно в любом порядке и разными людьми.
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey", agent, s.executeTransition)
 		v1.POST("/tasks/:taskKey/transitions/:transitionKey/gates/:gateKey/decision", agent, s.decideGate)
+		// Перевод в статус вне переходов (CLAB-408): порог agent, право —
+		// TaskRight движка (сотрудник и сопровождающий; бот — 403
+		// human_action). Токену задачи маршрут закрыт белым списком.
+		v1.POST("/tasks/:taskKey/move", agent, s.moveTask)
 
 		v1.GET("/workflows/:workflowID", viewer, s.getWorkflowVersion)
 		// Типы задач правятся только у черновика: у активной версии по ним уже
