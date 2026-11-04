@@ -15,7 +15,9 @@ import (
 // «Ждут меня» по REST (CLAB-326, AC-13): ответ объектом. Зона решений —
 // maintainer и выше весь проект, agent — этапы своих ролей (решение 0072,
 // CLAB-379): участник agent с role_keys = NULL решает на любом этапе с
-// исполнителем, с [] — нигде; viewer — пустой список и can_decide=false.
+// исполнителем; с [] бот — нигде, а сотрудник решает гейты любого этапа и
+// получает can_decide=true при пустом списке (CLAB-410, K-3); viewer —
+// пустой список и can_decide=false.
 func TestListApprovalsByLevel(t *testing.T) {
 	f := newAuditFixture(t)
 	for _, c := range []struct {
@@ -24,7 +26,8 @@ func TestListApprovalsByLevel(t *testing.T) {
 		canDecide bool
 	}{
 		{"администратор", f.root, true}, {"агент", f.bot, true},
-		{"agent без ролей", f.memberToken("user:noroles", domain.MemberAgent, []string{}), false},
+		{"сотрудник без ролей", f.memberToken("user:noroles", domain.MemberAgent, []string{}), true},
+		{"бот без ролей", f.memberToken("agent:noroles-bot", domain.MemberAgent, []string{}), false},
 		{"viewer", f.memberToken("user:watcher", domain.MemberViewer, nil), false},
 	} {
 		code, body := f.json(http.MethodGet, "/v1/projects/SDLC/approvals", c.token, nil)
@@ -35,7 +38,7 @@ func TestListApprovalsByLevel(t *testing.T) {
 		if !ok || body["can_decide"] != c.canDecide || body["truncated"] != false {
 			t.Fatalf("%s: %v", c.who, body)
 		}
-		if !c.canDecide && len(list) != 0 {
+		if (!c.canDecide || c.who == "сотрудник без ролей") && len(list) != 0 {
 			t.Fatalf("%s без права видит %d элементов", c.who, len(list))
 		}
 	}

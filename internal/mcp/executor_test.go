@@ -92,6 +92,12 @@ func TestExecutorOverMCP(t *testing.T) {
 			t.Errorf("в перечне тул или промпт, которого нет: %s", a)
 		}
 	}
+	// CLAB-410, K-4: решение по гейту через MCP — действие человека; токену
+	// задачи тул закрыт, чек-лист он ставит REST-маршрутом.
+	if !registered["sdlc_decide_gate"] || allowed["sdlc_decide_gate"] {
+		t.Errorf("sdlc_decide_gate: зарегистрирован %v, в перечне токена задачи %v",
+			registered["sdlc_decide_gate"], allowed["sdlc_decide_gate"])
+	}
 	closed := 0
 	for _, id := range []workflow.Identity{tid, adminTask} {
 		call := connectAs(t, srv, id)

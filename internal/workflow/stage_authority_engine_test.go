@@ -12,8 +12,10 @@ import (
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/store/postgres"
 )
 
-// Право этапа в движке (CLAB-379) на демо-цикле: new — без исполнителя,
-// analysis — роль analyst, architecture — architect; cancel — глобальный.
+// Право этапа в движке (CLAB-379, CLAB-410) на демо-цикле: new — без
+// исполнителя, analysis — роль analyst, architecture — architect; cancel —
+// глобальный. lead — человек: на уровне agent он сотрудник (CLAB-410); bot —
+// агент-принципал того же уровня, право 0072 без изменений.
 
 type rightsWorld struct {
 	t      *testing.T
@@ -22,6 +24,7 @@ type rightsWorld struct {
 	engine *Engine
 	system domain.Principal
 	lead   domain.Principal
+	bot    domain.Principal
 }
 
 func newRightsWorld(t *testing.T) rightsWorld {
@@ -32,7 +35,11 @@ func newRightsWorld(t *testing.T) rightsWorld {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return rightsWorld{t: t, ctx: ctx, store: store, engine: engine, system: system, lead: lead}
+	bot, err := store.ResolveActor(ctx, store.DB(), "bot", domain.PrincipalAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rightsWorld{t: t, ctx: ctx, store: store, engine: engine, system: system, lead: lead, bot: bot}
 }
 
 // task заводит задачу и проводит её до статуса status без права этапа.
@@ -91,10 +98,11 @@ func reasonOf(err error) string {
 	return ""
 }
 
-// AC-13, AC-A3: предсказание actor_may / actor_may_decide совпадает с
-// исходом настоящего запроса для каждой комбинации «уровень × набор ролей ×
-// статус (с исполнителем своим и чужим, без исполнителя) × переход каждого
-// вида × гейт каждого типа и вердикт», и для токена задачи. Каждая
+// AC-13, AC-A3 (CLAB-379), AC-17 (CLAB-410): предсказание actor_may /
+// actor_may_decide совпадает с исходом настоящего запроса для каждой
+// комбинации «класс актора (сотрудник, бот, сопровождающий, viewer) × набор
+// ролей × статус (с исполнителем своим и чужим, без исполнителя) × переход
+// каждого вида × гейт каждого типа и вердикт», и для токена задачи. Каждая
 // комбинация — на свежей задаче: исполненный переход не меняет следующих.
 func TestStageAuthorityPredictionMatchesOutcome(t *testing.T) {
 	w := newRightsWorld(t)
@@ -103,13 +111,18 @@ func TestStageAuthorityPredictionMatchesOutcome(t *testing.T) {
 		actor func(domain.Task) Actor
 	}{
 		{"viewer", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberViewer} }},
-		{"agent NULL", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberAgent} }},
-		{"agent []", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{}} }},
-		{"agent [analyst]", func(domain.Task) Actor {
+		{"сотрудник NULL", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberAgent} }},
+		{"сотрудник []", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{}} }},
+		{"сотрудник [analyst]", func(domain.Task) Actor {
 			return Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}}
 		}},
-		{"agent [developer]", func(domain.Task) Actor {
+		{"сотрудник [developer]", func(domain.Task) Actor {
 			return Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}
+		}},
+		{"бот NULL", func(domain.Task) Actor { return Actor{Principal: w.bot, Level: domain.MemberAgent} }},
+		{"бот []", func(domain.Task) Actor { return Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{}} }},
+		{"бот [analyst]", func(domain.Task) Actor {
+			return Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"analyst"}}
 		}},
 		{"maintainer", func(domain.Task) Actor { return Actor{Principal: w.lead, Level: domain.MemberMaintainer} }},
 		{"токен задачи", func(task domain.Task) Actor {
@@ -188,14 +201,14 @@ func TestStageAuthorityPredictionMatchesOutcome(t *testing.T) {
 	t.Logf("сверено: %v", checked)
 }
 
-// R3 на живом цикле: что agent может на своём этапе и чего нет; токен
-// задачи — по 0049 (AC-1, AC-3, AC-4, AC-6, AC-7, AC-8).
+// R3 на живом цикле для бота (решение 0072 без изменений, AC-15 CLAB-410):
+// что агент-принципал может на своём этапе и чего нет; токен задачи — по
+// 0049 (AC-1, AC-3, AC-4, AC-6, AC-7, AC-8 CLAB-379).
 func TestStageAuthorityEngine(t *testing.T) {
 	w := newRightsWorld(t)
-	analyst := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}}
-	architect := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"architect"}}
-	developer := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}
-	both := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst", "developer"}}
+	analyst := Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"analyst"}}
+	architect := Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"architect"}}
+	developer := Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"developer"}}
 	maintainer := Actor{Principal: w.lead, Level: domain.MemberMaintainer}
 
 	decide := func(key, tr, gate string, who Actor, status string) error {
@@ -206,12 +219,13 @@ func TestStageAuthorityEngine(t *testing.T) {
 		return w.engine.ExecuteAs(w.ctx, key, tr, who, "")
 	}
 
-	// AC-1, AC-7: аналитик на analysis — апрув passed и failed, но не waived;
-	// перепроверку и артефакты не снимает.
+	// Бот на своём этапе: апрув закрывает человек (вид принципала); waived
+	// апрува, перепроверку и артефакты — сопровождающему.
 	ana := w.task("analysis")
 	for _, s := range []string{domain.GateResultFailed, domain.GateResultPassed} {
-		if err := decide(ana.Key, "analysis_done", "human_approval", analyst, s); err != nil {
-			t.Fatalf("апрув %s аналитиком: %v", s, err)
+		if err := decide(ana.Key, "analysis_done", "human_approval", analyst, s); !forbidden(err) ||
+			!strings.Contains(err.Error(), "закрывает человек") {
+			t.Fatalf("апрув %s ботом: %v", s, err)
 		}
 	}
 	for _, c := range []struct{ gate, status string }{
@@ -219,25 +233,14 @@ func TestStageAuthorityEngine(t *testing.T) {
 		{"peer_review", domain.GateResultPassed}, {"artifacts", domain.GateResultWaived},
 	} {
 		if err := decide(ana.Key, "analysis_done", c.gate, analyst, c.status); !forbidden(err) || reasonOf(err) != DenyMaintainerAction {
-			t.Fatalf("%s %s аналитиком: %v", c.gate, c.status, err)
+			t.Fatalf("%s %s ботом: %v", c.gate, c.status, err)
 		}
-	}
-	// Решение пишется от имени решающего, лентой gate.decided.
-	var decidedBy string
-	if err := w.store.DB().QueryRow(w.ctx, `
-		SELECT p.handle FROM gate_results gr JOIN gates g ON g.id = gr.gate_id
-		JOIN principals p ON p.id = gr.decided_by
-		WHERE gr.stage_run_id = $1 AND g.key = 'human_approval'`, w.run(ana).ID).Scan(&decidedBy); err != nil || decidedBy != "lead" {
-		t.Fatalf("decided_by: %q %v", decidedBy, err)
 	}
 	// AC-2, AC-5: на чужом этапе — 403 с ролью статуса и ролями актора.
 	err := decide(ana.Key, "analysis_done", "human_approval", developer, domain.GateResultPassed)
 	if !forbidden(err) || reasonOf(err) != DenyStageRole || !strings.Contains(err.Error(), "analyst") ||
 		!strings.Contains(err.Error(), "[developer]") {
 		t.Fatalf("апрув чужого этапа: %v", err)
-	}
-	if err := decide(ana.Key, "analysis_done", "human_approval", both, domain.GateResultPassed); err != nil {
-		t.Fatalf("две роли: %v", err)
 	}
 
 	// AC-3: переход своего этапа доходит до гейтов; гейты сняты — проходит.
@@ -247,13 +250,13 @@ func TestStageAuthorityEngine(t *testing.T) {
 	if _, err := exec(ana.Key, "analysis_done", developer); !forbidden(err) {
 		t.Fatalf("analysis_done разработчиком: %v", err)
 	}
-	for _, g := range []string{"artifacts", "peer_review", "drift", "repo_scope"} {
+	for _, g := range []string{"artifacts", "peer_review", "human_approval", "drift", "repo_scope"} {
 		if err := decide(ana.Key, "analysis_done", g, maintainer, domain.GateResultWaived); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if res, err := exec(ana.Key, "analysis_done", analyst); err != nil || res.Blocked || res.Task.StatusKey != "architecture" {
-		t.Fatalf("analysis_done аналитиком: %v %+v", err, res)
+		t.Fatalf("analysis_done ботом: %v %+v", err, res)
 	}
 	// Переход не из текущего статуса — transition_not_allowed раньше права.
 	if _, err := exec(ana.Key, "analysis_done", developer); apperr.As(err).Code != apperr.CodeTransitionNotAllowed {
@@ -296,32 +299,34 @@ func TestStageAuthorityEngine(t *testing.T) {
 		t.Fatalf("cancel сопровождающим: %v", err)
 	}
 
-	// AC-6: статус без исполнителя — start закрыт для agent с любыми ролями.
+	// AC-6: статус без исполнителя — start закрыт для бота с любыми ролями.
 	fresh := w.task("new")
-	for _, who := range []Actor{analyst, {Principal: w.lead, Level: domain.MemberAgent}} {
+	for _, who := range []Actor{analyst, {Principal: w.bot, Level: domain.MemberAgent}} {
 		if _, err := exec(fresh.Key, "start", who); !forbidden(err) || reasonOf(err) != DenyNoStageRole {
-			t.Fatalf("start agent: %v", err)
+			t.Fatalf("start ботом: %v", err)
 		}
 	}
 	if _, err := exec(fresh.Key, "start", maintainer); err != nil {
 		t.Fatalf("start сопровождающим: %v", err)
 	}
 	// Эпик: planning без исполнителя закрыт, decomposition (orchestrator)
-	// открыт agent с NULL; in_progress снова без исполнителя.
+	// открыт боту с NULL до вида принципала; in_progress снова без исполнителя.
 	epic, err := w.engine.CreateTask(w.ctx, "SDLC", w.system.ID, CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{TaskType: "epic", Title: "эпик"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	anyRole := Actor{Principal: w.lead, Level: domain.MemberAgent}
+	anyRole := Actor{Principal: w.bot, Level: domain.MemberAgent}
 	if _, err := exec(epic.Key, "start", anyRole); !forbidden(err) {
-		t.Fatalf("start эпика agent: %v", err)
+		t.Fatalf("start эпика ботом: %v", err)
 	}
 	w.move(epic.Key, "start")
-	if err := decide(epic.Key, "breakdown_done", "human_approval", anyRole, domain.GateResultPassed); err != nil {
-		t.Fatalf("апрув нарезки agent NULL: %v", err)
+	if err := decide(epic.Key, "breakdown_done", "human_approval", anyRole, domain.GateResultPassed); !forbidden(err) ||
+		!strings.Contains(err.Error(), "закрывает человек") {
+		t.Fatalf("апрув нарезки ботом NULL: %v", err)
 	}
-	if err := decide(epic.Key, "breakdown_done", "human_approval", analyst, domain.GateResultPassed); !forbidden(err) {
+	if err := decide(epic.Key, "breakdown_done", "human_approval", analyst, domain.GateResultPassed); !forbidden(err) ||
+		reasonOf(err) != DenyStageRole {
 		t.Fatalf("апрув нарезки аналитиком: %v", err)
 	}
 
@@ -337,24 +342,126 @@ func TestStageAuthorityEngine(t *testing.T) {
 	if _, err := exec(tt.Key, "cancel", bound); !forbidden(err) || !strings.Contains(err.Error(), ExecutorRefusal) {
 		t.Fatalf("cancel токеном задачи: %v", err)
 	}
-
-	// Бот (принципал вида agent) на своём этапе апрув не ставит — как раньше.
-	bot, err := w.store.ResolveActor(w.ctx, w.store.DB(), "bot", domain.PrincipalAgent)
-	if err != nil {
-		t.Fatal(err)
+	// Тот же токен у сотрудника уровня agent: рамка та же (0049).
+	employeeBound := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"},
+		Bound: &TaskBinding{StageRunID: run.ID, TaskID: tt.ID, TaskKey: tt.Key}}
+	for _, tr := range []string{"cancel"} {
+		if _, err := exec(tt.Key, tr, employeeBound); !forbidden(err) || !strings.Contains(err.Error(), ExecutorRefusal) {
+			t.Fatalf("%s токеном задачи сотрудника: %v", tr, err)
+		}
 	}
-	err = decide(tt.Key, "analysis_done", "human_approval", Actor{Principal: bot, Level: domain.MemberAgent}, domain.GateResultPassed)
+	if err := decide(tt.Key, "analysis_done", "human_approval", employeeBound, domain.GateResultPassed); !forbidden(err) ||
+		!strings.Contains(err.Error(), ExecutorRefusal) {
+		t.Fatalf("апрув токеном задачи сотрудника: %v", err)
+	}
+	// Бот с ролью этапа апрув не ставит и на чужой задаче.
+	err = decide(tt.Key, "analysis_done", "human_approval", analyst, domain.GateResultPassed)
 	if !forbidden(err) || !strings.Contains(err.Error(), "закрывает человек") {
 		t.Fatalf("апрув ботом: %v", err)
 	}
 }
 
-// AC-11, AC-20: сверка seen_artifact_id и устаревание апрува действуют для
-// agent так же; право (403) — раньше сверки (409); апрув agent засчитан.
+// R-6, R-7 CLAB-410 на демо-цикле (AC-5, AC-7, UC-3, UC-4): сотрудник без
+// роли статуса выполняет переходы любого вида — start из статуса без
+// исполнителя, advance и reject чужого этапа, cancel — и решает гейты
+// чужого этапа по своей таблице; вне таблицы — 403 maintainer_action.
+func TestEmployeeStageAuthority(t *testing.T) {
+	w := newRightsWorld(t)
+	dev := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenAPI}
+	none := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{}, TokenKind: domain.TokenSession}
+	decide := func(key, tr, gate string, who Actor, status string) error {
+		_, err := w.engine.DecideGateAs(w.ctx, key, tr, gate, who, status, json.RawMessage(`{}`), nil)
+		return err
+	}
+	exec := func(key, tr string, who Actor) (TransitionResult, error) {
+		return w.engine.ExecuteAs(w.ctx, key, tr, who, "")
+	}
+
+	// start из new — статуса без исполнителя.
+	task := w.task("new")
+	if res, err := exec(task.Key, "start", none); err != nil || res.Blocked || res.Task.StatusKey != "analysis" {
+		t.Fatalf("start сотрудником без ролей: %v %+v", err, res)
+	}
+	// Апрув и его провал на чужом этапе; waived апрува, перепроверка без
+	// предела и артефакты — вне таблицы.
+	for _, s := range []string{domain.GateResultFailed, domain.GateResultPassed} {
+		if err := decide(task.Key, "analysis_done", "human_approval", dev, s); err != nil {
+			t.Fatalf("апрув %s сотрудником: %v", s, err)
+		}
+	}
+	for _, c := range []struct{ gate, status string }{
+		{"human_approval", domain.GateResultWaived}, {"peer_review", domain.GateResultWaived},
+		{"peer_review", domain.GateResultPassed}, {"peer_review", domain.GateResultFailed},
+		{"artifacts", domain.GateResultWaived}, {"drift", domain.GateResultPassed},
+	} {
+		if err := decide(task.Key, "analysis_done", c.gate, dev, c.status); !forbidden(err) || reasonOf(err) != DenyMaintainerAction {
+			t.Fatalf("%s %s сотрудником: %v", c.gate, c.status, err)
+		}
+	}
+	ev := w.lastEvent(task, domain.EventGateDecided)
+	if ev["via"] != ViaLevel || ev["level"] != "agent" || ev["token_kind"] != "api" || ev["stage_role"] != "analyst" {
+		t.Fatalf("gate.decided сотрудника: %v", ev)
+	}
+	// Переход чужого этапа доходит до гейтов (409), а не до права.
+	if res, err := exec(task.Key, "analysis_done", dev); err != nil || !res.Blocked {
+		t.Fatalf("analysis_done сотрудником до гейтов: %v %+v", err, res)
+	}
+	for _, g := range []string{"artifacts", "peer_review", "drift", "repo_scope"} {
+		if _, err := w.engine.DecideGate(w.ctx, task.Key, "analysis_done", g, w.lead.ID, nil,
+			domain.GateResultWaived, json.RawMessage(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res, err := exec(task.Key, "analysis_done", dev); err != nil || res.Blocked || res.Task.StatusKey != "architecture" {
+		t.Fatalf("analysis_done сотрудником: %v %+v", err, res)
+	}
+	// Чек-лист чужого этапа: passed и failed — да, waived — нет.
+	for _, s := range []string{domain.GateResultFailed, domain.GateResultPassed} {
+		if err := decide(task.Key, "architecture_done", "traceability", dev, s); err != nil {
+			t.Fatalf("чек-лист %s сотрудником: %v", s, err)
+		}
+	}
+	if err := decide(task.Key, "architecture_done", "traceability", dev, domain.GateResultWaived); !forbidden(err) ||
+		reasonOf(err) != DenyMaintainerAction {
+		t.Fatalf("waived чек-листа сотрудником: %v", err)
+	}
+	// Возврат чужого этапа (гейт problem_report держит), затем cancel.
+	if res, err := exec(task.Key, "reject_to_analysis", dev); err != nil || !res.Blocked {
+		t.Fatalf("возврат без описания: %v %+v", err, res)
+	}
+	if _, err := w.engine.SubmitArtifact(w.ctx, task.Key, w.lead.ID, SubmitArtifactInput{
+		Kind: "problem.report", Title: "проблема", Content: []byte("# проблема")}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := exec(task.Key, "reject_to_analysis", dev); err != nil || res.Blocked || res.Task.StatusKey != "analysis" {
+		t.Fatalf("возврат сотрудником: %v %+v", err, res)
+	}
+	if res, err := exec(task.Key, "cancel", none); err != nil || res.Task.StatusKey != "cancelled" {
+		t.Fatalf("cancel сотрудником: %v %+v", err, res)
+	}
+
+	// Эпик: start из planning, апрув нарезки — без роли orchestrator.
+	epic, err := w.engine.CreateTask(w.ctx, "SDLC", w.system.ID, CreateTaskInput{
+		CreateTaskInput: postgres.CreateTaskInput{TaskType: "epic", Title: "эпик сотрудника"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec(epic.Key, "start", dev); err != nil {
+		t.Fatalf("start эпика сотрудником: %v", err)
+	}
+	if err := decide(epic.Key, "breakdown_done", "human_approval", dev, domain.GateResultPassed); err != nil {
+		t.Fatalf("апрув нарезки сотрудником: %v", err)
+	}
+}
+
+// AC-11, AC-20 (CLAB-379), AC-8 (CLAB-410): сверка seen_artifact_id и
+// устаревание апрува действуют для сотрудника так же — и на своём этапе, и
+// на чужом; право (403) — раньше сверки (409); апрув сотрудника засчитан.
 func TestStageAuthoritySeenAndStale(t *testing.T) {
 	w := newRightsWorld(t)
 	analyst := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}}
-	developer := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}
+	// Бот чужой роли — отказ по праву раньше сверки.
+	developer := Actor{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"developer"}}
 	task := w.task("analysis")
 	art, err := w.engine.SubmitArtifact(w.ctx, task.Key, w.lead.ID, SubmitArtifactInput{
 		Kind: "analysis.brief", Title: "brief", Content: []byte("# brief")})
@@ -397,6 +504,33 @@ func TestStageAuthoritySeenAndStale(t *testing.T) {
 	}
 	if s := gateStatus(); s != domain.GateResultPending {
 		t.Fatalf("апрув после новой сдачи не устарел: %s", s)
+	}
+
+	// Сотрудник вне роли этапа: та же сверка, апрув засчитан и устаревает.
+	outsider := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}
+	_, err = w.engine.DecideGateAs(w.ctx, task.Key, "analysis_done", "human_approval", outsider,
+		domain.GateResultPassed, json.RawMessage(`{}`), &seen)
+	if apperr.As(err).Code != apperr.CodeConflict || reasonOf(err) != SeenConflict {
+		t.Fatalf("сверка сотрудника вне роли: %v", err)
+	}
+	art2, err := w.store.LatestArtifactOfKind(w.ctx, w.store.DB(), task.ID, "analysis.brief")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen2 := art2.String()
+	if _, err := w.engine.DecideGateAs(w.ctx, task.Key, "analysis_done", "human_approval", outsider,
+		domain.GateResultPassed, json.RawMessage(`{}`), &seen2); err != nil {
+		t.Fatalf("апрув сотрудника вне роли со сверкой: %v", err)
+	}
+	if s := gateStatus(); s != domain.GateResultPassed {
+		t.Fatalf("апрув сотрудника вне роли не засчитан: %s", s)
+	}
+	if _, err := w.engine.SubmitArtifact(w.ctx, task.Key, w.lead.ID, SubmitArtifactInput{
+		Kind: "analysis.brief", Title: "brief 3", Content: []byte("# brief 3")}); err != nil {
+		t.Fatal(err)
+	}
+	if s := gateStatus(); s != domain.GateResultPending {
+		t.Fatalf("апрув сотрудника после новой сдачи не устарел: %s", s)
 	}
 }
 
@@ -456,12 +590,17 @@ func TestApprovalsAgentZone(t *testing.T) {
 	}{
 		{"maintainer", Actor{Principal: w.lead, Level: domain.MemberMaintainer}, true,
 			[]string{anaItem + "+", arcCheck + "+", arcApproval + "+"}},
-		{"agent NULL", Actor{Principal: w.lead, Level: domain.MemberAgent}, true,
+		{"сотрудник NULL", Actor{Principal: w.lead, Level: domain.MemberAgent}, true,
 			[]string{anaItem + "+", arcCheck + "+", arcApproval + "+"}},
-		{"agent [analyst]", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}}, true,
+		{"сотрудник [analyst]", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"analyst"}}, true,
 			[]string{anaItem + "+"}},
-		{"agent [developer]", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}, true, nil},
-		{"agent []", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{}}, false, nil},
+		{"сотрудник [developer]", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}}, true, nil},
+		// K-3 CLAB-410: сотрудник без ролей решает гейты любого этапа, список
+		// — зона ролей, пуст.
+		{"сотрудник []", Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{}}, true, nil},
+		{"бот []", Actor{Principal: bot, Level: domain.MemberAgent, Roles: []string{}}, false, nil},
+		{"бот [architect]", Actor{Principal: bot, Level: domain.MemberAgent, Roles: []string{"architect"}}, true,
+			[]string{arcCheck + "+", arcApproval + "-"}},
 		{"viewer", Actor{Principal: w.lead, Level: domain.MemberViewer}, false, nil},
 		// Бот на своём этапе видит гейт, но апрув ставит только человек.
 		{"бот agent NULL", Actor{Principal: bot, Level: domain.MemberAgent}, true,
@@ -493,9 +632,9 @@ func TestApprovalsAgentZone(t *testing.T) {
 
 // AC-6 на цикле Epic (CLAB-379, проверка тестировщика): in_progress — статус
 // без исполнителя. children_done и replan из него, решения по их гейтам и
-// cancel эпика agent закрыты при любом наборе ролей, в том числе NULL и
-// с ролью соседнего этапа (orchestrator); предсказание совпадает с отказом;
-// сопровождающему — как раньше.
+// cancel эпика боту закрыты при любом наборе ролей, в том числе NULL и
+// с ролью соседнего этапа (orchestrator); предсказание совпадает с отказом.
+// Сотрудник (CLAB-410, AC-5) закрывает эпик без роли, предсказание — «вправе».
 func TestStageAuthorityEpicWithoutExecutor(t *testing.T) {
 	w := newRightsWorld(t)
 	epic, err := w.engine.CreateTask(w.ctx, "SDLC", w.system.ID, CreateTaskInput{
@@ -517,8 +656,8 @@ func TestStageAuthorityEpicWithoutExecutor(t *testing.T) {
 	}
 
 	agents := []Actor{
-		{Principal: w.lead, Level: domain.MemberAgent},
-		{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"orchestrator", "analyst"}},
+		{Principal: w.bot, Level: domain.MemberAgent},
+		{Principal: w.bot, Level: domain.MemberAgent, Roles: []string{"orchestrator", "analyst"}},
 	}
 	for _, who := range agents {
 		views, err := w.engine.PreviewFor(w.ctx, epic, &who)
@@ -562,9 +701,22 @@ func TestStageAuthorityEpicWithoutExecutor(t *testing.T) {
 		t.Fatalf("отказы записали решения: %d %v", decided, err)
 	}
 
-	maintainer := Actor{Principal: w.lead, Level: domain.MemberMaintainer}
-	if res, err := w.engine.ExecuteAs(w.ctx, epic.Key, "children_done", maintainer, ""); err != nil ||
+	employee := Actor{Principal: w.lead, Level: domain.MemberAgent, Roles: []string{"developer"}, TokenKind: domain.TokenAPI}
+	views, err := w.engine.PreviewFor(w.ctx, after, &employee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range views {
+		if v.ActorMay == nil || !*v.ActorMay || v.ActorDeny != nil {
+			t.Fatalf("сотрудник: предсказание %s: %+v", v.Key, v)
+		}
+	}
+	if res, err := w.engine.ExecuteAs(w.ctx, epic.Key, "children_done", employee, ""); err != nil ||
 		res.Blocked || res.Task.StatusKey != "done" {
-		t.Fatalf("children_done сопровождающим: %v %+v", err, res)
+		t.Fatalf("children_done сотрудником: %v %+v", err, res)
+	}
+	adv := w.lastEvent(after, domain.EventTaskAdvanced)
+	if adv["transition"] != "children_done" || adv["via"] != ViaLevel || adv["level"] != "agent" || adv["token_kind"] != "api" {
+		t.Fatalf("task.advanced эпика сотрудником: %v", adv)
 	}
 }

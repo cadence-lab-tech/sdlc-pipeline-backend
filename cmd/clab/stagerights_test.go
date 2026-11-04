@@ -267,3 +267,44 @@ func TestDecideSuccessUnchanged(t *testing.T) {
 		t.Fatalf("decide: %v\n%q", err, out)
 	}
 }
+
+// CLAB-410, AC-7: сотрудник на чужом этапе — clab gates печатает вердикты,
+// которые отдал сервер: апрув и чек-лист passed и failed, пределы — waived,
+// перепроверку без предела — отказ с текстом сервера.
+func TestGatesPrintEmployeeDecisions(t *testing.T) {
+	withJSON(t, false)
+	const employee = `{"transitions":[
+ {"key":"testing_passed","name":"Testing passed","to_status":"done","allowed":false,"actor_may":true,
+  "gates":[
+   {"gate_key":"selfhosted","type":"checklist","blocking":true,"status":"pending",
+    "actor_may_decide":true,"actor_decisions":["passed","failed"]},
+   {"gate_key":"approval","type":"human_approval","blocking":true,"status":"pending",
+    "actor_may_decide":true,"actor_decisions":["passed","failed"]},
+   {"gate_key":"review","type":"agent_review","blocking":true,"status":"pending",
+    "actor_may_decide":false,"actor_deny":{"code":"forbidden","reason":"maintainer_action","message":"решение passed по гейту review — решение сопровождающего"}}
+  ]},
+ {"key":"testing_failed","name":"Testing failed","to_status":"development","allowed":false,"actor_may":true,
+  "gates":[
+   {"gate_key":"attempts","type":"attempts_limit","blocking":true,"status":"failed",
+    "actor_may_decide":true,"actor_decisions":["waived"]}
+  ]},
+ {"key":"cancel","name":"Cancel","to_status":"cancelled","allowed":true,"actor_may":true,"gates":[]}
+]}`
+	c := rightsServer(t, "", employee, nil)
+	out, _, err := capture(t, func() error { return cmdGates(context.Background(), c, []string{"CLAB-1"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"решить: passed, failed",
+		"решить: waived",
+		"решить: нельзя — решение passed по гейту review — решение сопровождающего",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в выводе gates нет %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "право: вправе") != 3 || strings.Contains(out, "не вправе") {
+		t.Errorf("право переходов сотрудника:\n%s", out)
+	}
+}

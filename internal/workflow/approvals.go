@@ -64,7 +64,8 @@ const (
 
 // Approvals — ответ выборки. CanDecide — есть ли у вызывающего зона решений
 // вообще: maintainer и выше — весь проект, agent — этапы его ролей (решение
-// 0072), если роль хоть одна; без зоны список пуст. Поле для клиентов
+// 0072), если роль хоть одна; без зоны список пуст. Сотрудник решает гейты
+// любого этапа, и у него поле true при любом наборе ролей. Поле для клиентов
 // прежней версии: решать ли по элементу, говорит его CanDecide.
 type Approvals struct {
 	Approvals []Approval `json:"approvals"`
@@ -119,6 +120,8 @@ type ApprovalRun struct {
 // (maintainer и выше), этапы своих ролей (agent) или ничего. Зону agent
 // выражает фильтр выборки (ApprovalFilter), поэтому задачи чужих этапов до
 // вычисления гейтов не доходят и число запросов от них не растёт.
+// Сотрудник решает гейты любого этапа (CLAB-410), поэтому can_decide у него
+// true и без ролей; список остаётся зоной его ролей и при [] пуст.
 func approvalZone(actor Actor) (canDecide bool, filter postgres.ApprovalFilter) {
 	switch {
 	case actor.Level.Covers(domain.MemberMaintainer):
@@ -126,7 +129,7 @@ func approvalZone(actor Actor) (canDecide bool, filter postgres.ApprovalFilter) 
 	case !actor.Level.Covers(domain.MemberAgent):
 		return false, postgres.ApprovalFilter{}
 	case actor.Roles != nil && len(actor.Roles) == 0:
-		return false, postgres.ApprovalFilter{}
+		return actor.Class() == ClassEmployee, postgres.ApprovalFilter{OwnStage: true, Roles: []string{}}
 	}
 	return true, postgres.ApprovalFilter{OwnStage: true, Roles: actor.Roles}
 }
@@ -143,7 +146,8 @@ func approvalZone(actor Actor) (canDecide bool, filter postgres.ApprovalFilter) 
 func (e *Engine) Approvals(ctx context.Context, q postgres.Querier, projectID uuid.UUID, actor Actor, limit int) (Approvals, error) {
 	canDecide, filter := approvalZone(actor)
 	out := Approvals{Approvals: []Approval{}, CanDecide: canDecide}
-	if !canDecide {
+	// Зона без ролей пуста и без запроса к базе.
+	if !canDecide || (filter.OwnStage && filter.Roles != nil && len(filter.Roles) == 0) {
 		return out, nil
 	}
 	if limit <= 0 {
