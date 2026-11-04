@@ -268,7 +268,9 @@ clab create --title "…" [--type epic] [--parent ABC-2] [--repos owner/name]
             [--model-level medium] [--model-level-for <status>=low ...]
 clab edit ABC-12 [--model-level high | --model-level ""]
                  [--model-level-for <status>=high | --model-level-for <status>=]
-clab relate ABC-3 --to ABC-4 --rel blocks
+clab relate ABC-3 --to ABC-4 --rel blocks    # ABC-4 waits for ABC-3 (not a place in the backlog)
+clab rank ABC-12 --before ABC-15 | --after ABC-15 | --top | --bottom   # exactly one place
+clab backlog [--parent ABC-2] [--limit 50] [--next] [--json]   # the backlog in server order
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
 clab wait ABC-12 --gate human_approval [--transition <transition>] [--timeout 8h]   # 0 passed, 3 returned, 4 changed, 5 timeout
 clab version                                 # CLI and server versions
@@ -287,6 +289,24 @@ clab import-guide                            # how to carry a team's rules into 
 Every command takes `--json` for the server's answer as is, and `--help`
 for its flags.
 
+**The backlog order** (needs server v0.25.0 or newer; a kit of an older
+version has no such commands and keeps working). The place of a task in the
+backlog is a rank kept by the server, inside a group: the top level of the
+project or the children of one epic. A new task goes to the end of its group.
+`clab rank <key>` takes exactly one place — `--before <key>`, `--after <key>`,
+`--top` or `--bottom` — and refuses a neighbour from another group ("in
+different backlog groups") and a closed task. `clab backlog` lists a group in
+server order with marks ("in work", "waits for <keys>"); `--parent <epic>`
+lists one epic, `--limit` takes 1…500 (default 50), `--json` gives the
+server's rows. `clab backlog --next` answers "what is next": the first task
+without open blockers, an epic in work opens up to its first free child;
+with `--json` it returns `{next, epic, skipped, first_blocked}`. `--next`
+exists only in the CLI. A `blocks` link says what waits for what, a priority
+(`clab edit --priority`) does not move a task: the place is `clab rank`.
+Moving the order needs level `agent` and above; a task token moves only the
+children of its own task, and the order of the project is the human's
+decision. The page `https://<instance>/p/<KEY>/backlog` shows the same order.
+
 ## MCP tools
 
 With the MCP server connected (named `sdlc` by default) the same operations
@@ -296,8 +316,13 @@ are tools: `sdlc_whoami`, `sdlc_list_tasks`, `sdlc_get_task`,
 `sdlc_get_drift`, `sdlc_resolve_drift`, `sdlc_report_usage`,
 `sdlc_check_gates`, `sdlc_request_transition`, `sdlc_release`,
 `sdlc_create_task`, `sdlc_update_task`, `sdlc_update_task_scope`,
-`sdlc_link_tasks`, `sdlc_assign_task`, plus the project's roles, documents
-and bundles for maintainers. The prompt `work_on_task` (in Claude Code
+`sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_rank_task` (a task and exactly
+one of `before`, `after`, `position` = `top` or `bottom`; server v0.25.0 or
+newer), plus the project's roles, documents and bundles for maintainers.
+`sdlc_list_tasks` takes `backlog: true` (the backlog in order, rows carry
+`rank`, `in_work`, `blocked_by`) and `top_level: true` (tasks without a
+parent; with `parent` the backlog of an epic). There is no `--next` over MCP:
+take the first row without `blocked_by`. The prompt `work_on_task` (in Claude Code
 `/mcp__sdlc__work_on_task <key>`) claims a task and hands over the role's
 documents and contract. `sdlc_claim_task` and `sdlc_get_task` carry the
 documents as `role.documents[]`.
