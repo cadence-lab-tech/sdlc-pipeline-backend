@@ -151,7 +151,8 @@ the rest of the commands.
 
 A task has a repository scope. Pull requests and artifacts stay inside it.
 Widening it (`clab scope <key> --add <owner/name> --reason "…"`) is a human
-decision — an agent describes the need instead of widening silently. A
+decision — an employee's or a maintainer's — and an agent describes the
+need instead of widening silently. A
 single-repository task refuses a second repository (`scope_expansion_forbidden`)
 until its `multi_repo` property is on: the human adds `--multi-repo` to the same
 command (`--multi-repo=false` turns it off), and that is the human's decision
@@ -166,23 +167,57 @@ them what they approve: the stage's artifacts with titles and the gist.
 A refusal — `--status failed --details '{"reason":"…"}'`.
 
 Who may close the gate is the **right of the stage**, not a
-level reserved for maintainers. The engine gives it to a person who works
-the stage's role: a member at level `agent` whose roles include the primary
-role of the task's current status approves or refuses that stage, and a
-maintainer or admin may do it on any stage. A task token never closes the
-gate (see "Task tokens"), and nothing changes in the gate itself: it still
-needs the artifacts the stage submitted, an approval goes stale when the
-stage submits again, and the gate has to be closed before the transition.
-A person who holds the right may approve the work of their own agent; that
-is allowed and it stays visible in the task feed, so the agent still asks
-the human and never decides for them.
+level reserved for maintainers. Levels are for people, roles are for
+agents:
+
+- **An employee** — a person at level `agent` (their session or personal
+  token, their own AI included) — works with any task of the project like
+  in a tracker: edits it and its choice of stages, creates tasks (also
+  without a parent), assigns, links, changes the scope with a reason, runs
+  any transition of the cycle (start and cancel too) and decides the gates
+  of any stage: `passed` or `failed` on `human_approval` and checklists,
+  `waived` on attempt, time and review limits (the engine gives the verdict
+  of a limit, a person only lifts it). The roles on the membership only
+  decide which stages the person may claim and hand to their agent.
+- **A maintainer or admin** may do the same, plus the project's rules
+  (cycle, roles, instructions, project documents) and the remaining gate
+  types.
+- **A bot** — an agent principal with its own token at level `agent` —
+  keeps the right of the stage by role: on the status of its own role only,
+  forward and return transitions and a checklist `passed`; it never closes
+  `human_approval`, never moves a task to a status and never changes the
+  scope.
+- **A task token never closes** the gate (see "Task tokens").
+
+Nothing changes in the gate itself: it still needs the artifacts the stage
+submitted, an approval goes stale when the stage submits again, and the
+gate has to be closed before the transition. A person may approve the work
+of their own agent; that is allowed and it stays visible in the task feed,
+so the agent still asks the human and never decides for them.
 
 Do not guess who may do what: `clab gates <key>` and `clab show <key>` print
 what the server answers for the current actor — whether the transition may
 be requested, which verdicts the actor may give on each gate, and the reason
-for a refusal. When the actor may not, the reason says whom to turn to: the
-member who works the stage's role or a maintainer. Report that and stop; do
-not look for another transition or another token.
+for a refusal; `clab show <key> --json` carries `actor_rights` (edit, stage
+choice, child, assign, link, scope, move) and `clab whoami` names the
+actor's class. When the actor may not, the reason says whom to turn to: an
+employee of the project or a maintainer. Report that and stop; do not look
+for another transition or another token.
+
+**Moving a task to a status.** An employee or a maintainer may put a task
+into any status of its cycle without a transition: `clab move <key> --to
+<status> --reason "…"` (MCP `sdlc_move_task`; server v0.25.0 or newer). The
+reason is required, gates are not checked, the current run closes with the
+outcome `moved` and the target status opens a new attempt; moving to the
+current status is one more pass of the stage, and a closed task reopens
+this way instead of being copied. A stage switched off for the task is
+refused with `stage_disabled` — switch it on first (`clab edit <key>
+--stage <status>=on`). An agent moves a task only when the human asks.
+
+**Merging is work, not a status.** Moving a task to `done` merges nothing:
+a pull request is merged and a tag is set only by the stage executor of the
+`integrator` role with its own GitHub credentials, and the protection of
+`main` and of `v*` tags in GitHub holds that line.
 
 An agent does not hold its turn waiting for an approval. It waits on the
 server: `clab wait <key> --gate human_approval [--transition <transition>]
@@ -204,8 +239,11 @@ claimed: `clab token task <key> --config-dir <dir>`. The token lives as a
 (agent `clab-stage`) runs every command as `env -u SDLC_TOKEN -u
 SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab …`. A task token opens only the
 role's work on its own task: no rules, no scope changes, no tokens, no
-approvals; of gate decisions only `passed` on a checklist of its own
-transition — the one decision a task token has.
+approvals, no moves to a status, no tasks outside its own; of gate
+decisions only `passed` on a checklist of its own transition — the one
+decision a task token has. The frame holds at any level of the human who
+issued the token. Asked for something closed, an executor does not do it:
+it writes the request into the submitted artifact and the report.
 
 ## Recommended model level
 
@@ -272,6 +310,7 @@ clab relate ABC-3 --to ABC-4 --rel blocks    # ABC-4 waits for ABC-3 (not a plac
 clab rank ABC-12 --before ABC-15 | --after ABC-15 | --top | --bottom   # exactly one place
 clab backlog [--parent ABC-2] [--limit 50] [--next] [--json]   # the backlog in server order
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
+clab move ABC-12 --to <status> --reason "…"   # any status of the cycle, no gates (a person only)
 clab wait ABC-12 --gate human_approval [--transition <transition>] [--timeout 8h]   # 0 passed, 3 returned, 4 changed, 5 timeout
 clab version                                 # CLI and server versions
 ```
@@ -315,6 +354,8 @@ are tools: `sdlc_whoami`, `sdlc_list_tasks`, `sdlc_get_task`,
 `sdlc_heartbeat`, `sdlc_submit_artifact`, `sdlc_link_repo_ref`,
 `sdlc_get_drift`, `sdlc_resolve_drift`, `sdlc_report_usage`,
 `sdlc_check_gates`, `sdlc_request_transition`, `sdlc_release`,
+`sdlc_decide_gate` (a person's gate decision with `seen_artifact_id`),
+`sdlc_move_task` (a move to a status with `to` and `reason`),
 `sdlc_create_task`, `sdlc_update_task`, `sdlc_update_task_scope`,
 `sdlc_link_tasks`, `sdlc_assign_task`, `sdlc_rank_task` (a task and exactly
 one of `before`, `after`, `position` = `top` or `bottom`; server v0.25.0 or

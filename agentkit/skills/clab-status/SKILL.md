@@ -1,6 +1,6 @@
 ---
 name: clab-status
-description: Show the state of work in Cadence Lab — the queue, epics and tasks, what blocks a given task's transition — and close an approval gate when the human asks. Use for questions like "what is in the queue", "what is next in the backlog", "where is ABC-5 stuck", "approve the analysis of ABC-3".
+description: Show the state of work in Cadence Lab — the queue, epics and tasks, what blocks a given task's transition — close an approval gate or move a task to a status when the human asks. Use for questions like "what is in the queue", "what is next in the backlog", "where is ABC-5 stuck", "approve the analysis of ABC-3", "send ABC-7 back to analysis".
 argument-hint: [ABC-12] [approve]
 ---
 
@@ -89,13 +89,15 @@ passed and why, what is needed from the human. Read artifact contents with
 
 ## Approval
 
-A `human_approval` gate is closed by a human who holds the right of the
-stage — a member at level `agent` whose roles include the role of the
-task's current status, or a maintainer or admin — on the task card or with a
-command, and **only when explicitly asked**. A task token never closes it.
-Check the right with `clab gates ABC-12` (it prints, per transition and per
-gate, whether the actor may and why not) instead of guessing. Approving the
-work of one's own agent is allowed and is visible in the task feed:
+A `human_approval` gate is closed by a human on the task card, with a
+command or with the MCP tool `sdlc_decide_gate`, and **only when explicitly
+asked**. For a person the right of the stage comes from the level: an
+employee — a person at level `agent` — decides the gates of any stage, the
+role of the status is not needed for that; a maintainer or admin may too.
+A task token never closes it. Check the right with `clab gates ABC-12` (it
+prints, per transition and per gate, whether the actor may and why not)
+instead of guessing. Approving the work of one's own agent is allowed and
+is visible in the task feed:
 
 ```bash
 clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
@@ -105,4 +107,31 @@ Take the transition and the gate key from `clab gates ABC-12`, not from
 memory. `--status failed` with `--details '{"reason":"…"}'` is a refusal;
 after it the executor returns the task with a return transition. Before
 approving, show the human what exactly they approve: the stage's artifacts
-with titles and a short gist.
+with titles and a short gist. The choice of optional stages at the approval
+is set by the same person (`clab edit ABC-12 --stage <status>=off`).
+
+## Moving a task to a status
+
+A task that stands in the wrong place is moved, not copied — and **only
+when the human explicitly asks**, with a reason:
+
+```bash
+clab move ABC-12 --to <status> --reason "…"
+```
+
+An employee or a maintainer may move a task (`actor_rights.move` in
+`clab show ABC-12 --json`); a bot and a task token may not. The status is
+any status of the task's cycle: forward, back, to a terminal status and
+out of it; the current status means one more pass of the stage. Gates are
+not checked on a move: the current run closes with the outcome `moved`,
+the lease is dropped, and the target status opens a new attempt with its
+own gates; the task feed gets a `task.moved` event with the reason. After
+the move tell the human the new status and the attempt number.
+
+- A `stage_disabled` refusal — the stage is switched off for the task:
+  first `clab edit ABC-12 --stage <status>=on`, then the move.
+- "The server does not know moving to a status" (the CLI prints it in its
+  own language) — the server is older (v0.25.0 or newer is needed): tell
+  the human and do not look for a workaround such as a copy of the task or
+  another token.
+- Over MCP — `sdlc_move_task` with `task_key`, `to`, `reason`.
