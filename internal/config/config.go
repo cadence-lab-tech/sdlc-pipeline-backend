@@ -487,9 +487,6 @@ func Load() (Config, error) {
 	default:
 		return c, fmt.Errorf("SDLC_TENANCY: %q — не shared или single", c.Tenancy)
 	}
-	if (c.GitHubAppClientID == "") != (c.GitHubAppClientSecret == "") {
-		return c, fmt.Errorf("SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET задаются вместе")
-	}
 	if c.AuthMode == "token" && c.AdminToken == "" {
 		if c.Env == "development" {
 			fmt.Fprintln(os.Stderr, "SDLC_AUTH_MODE=token без SDLC_ADMIN_TOKEN: первого администратора завести некому")
@@ -574,6 +571,19 @@ const (
 // наш инстанс так и настроен. Общие SDLC_EMBEDDINGS_URL и _API_KEY служат
 // Voyage запасными к SDLC_VOYAGE_*, но сами провайдера не выбирают: по ним не
 // понять, чей это сервер.
+// CheckAPI проверяет настройки, которые читает только api: вход людей через
+// GitHub (OAuth) делает api, воркеру пара идентификатора и секрета клиента
+// не нужна. Проверка поэтому стоит не в Load, общей для api и воркера, а в
+// старте api: чарт отдаёт секрет клиента только api, и воркер, получивший
+// идентификатор через общий extraEnv, падал на старте (self-hosted#105,
+// CLAB-430).
+func (c Config) CheckAPI() error {
+	if (c.GitHubAppClientID == "") != (c.GitHubAppClientSecret == "") {
+		return fmt.Errorf("SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET задаются вместе")
+	}
+	return nil
+}
+
 func resolveEmbeddings(c *Config) error {
 	if c.EmbeddingProvider == "" {
 		if c.VoyageAPIKey != "" {

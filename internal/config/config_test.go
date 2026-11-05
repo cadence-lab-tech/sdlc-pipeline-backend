@@ -1024,3 +1024,60 @@ func TestBlobS3STSEndpoint(t *testing.T) {
 		t.Fatalf("из окружения: %q %v", c.BlobS3.STSEndpoint, err)
 	}
 }
+
+// Вход через GitHub делает только api, и Load, общая для api и воркера,
+// пару идентификатора и секрета клиента не проверяет: воркер, получивший
+// одну половину (Helm кладёт идентификатор в общий extraEnv, а секрет
+// монтирует только api), стартует (self-hosted#105, CLAB-430).
+func TestLoadAcceptsHalfOfGitHubClientPair(t *testing.T) {
+	for name, vars := range map[string]map[string]string{
+		"только идентификатор": {"SDLC_GITHUB_APP_CLIENT_ID": "Iv1.client"},
+		"только секрет":        {"SDLC_GITHUB_APP_CLIENT_SECRET": "s3cret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+			t.Setenv("SDLC_GITHUB_APP_CLIENT_ID", "")
+			t.Setenv("SDLC_GITHUB_APP_CLIENT_SECRET", "")
+			for k, v := range vars {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err != nil {
+				t.Fatalf("Load с половиной пары: %v", err)
+			}
+		})
+	}
+}
+
+// api пару проверяет как прежде: половина роняет старт с прежним текстом,
+// полная пара и пустая проходят.
+func TestCheckAPIGitHubClientPair(t *testing.T) {
+	const want = "SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET задаются вместе"
+	for _, tc := range []struct {
+		name, id, secret string
+		fails            bool
+	}{
+		{"только идентификатор", "Iv1.client", "", true},
+		{"только секрет", "", "s3cret", true},
+		{"полная пара", "Iv1.client", "s3cret", false},
+		{"без обеих", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+			t.Setenv("SDLC_GITHUB_APP_CLIENT_ID", tc.id)
+			t.Setenv("SDLC_GITHUB_APP_CLIENT_SECRET", tc.secret)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.CheckAPI()
+			switch {
+			case tc.fails && err == nil:
+				t.Fatal("половина пары прошла проверку api")
+			case tc.fails && err.Error() != want:
+				t.Fatalf("текст ошибки %q, ждали %q", err, want)
+			case !tc.fails && err != nil:
+				t.Fatalf("проверка api: %v", err)
+			}
+		})
+	}
+}

@@ -61,6 +61,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.CheckAPI(); err != nil {
+		return err
+	}
 	log := newLogger(cfg)
 	// Трассировки — стандартные OTEL_*, а не SDLC_*: их знают сборщики и
 	// платформенные команды. Неподдерживаемое значение роняет старт до
