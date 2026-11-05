@@ -36,10 +36,10 @@ func sample(v secrets.Var) string {
 }
 
 // needs — что ещё нужно читателю, чтобы принять секрет: не копия имён
-// перечня, а правила config.Load, которые держат пары переменных.
-var needs = map[string]map[string]string{
-	"SDLC_GITHUB_APP_CLIENT_SECRET": {"SDLC_GITHUB_APP_CLIENT_ID": "Iv1.id"},
-}
+// перечня, а правила config.Load, которые держат пары переменных. Сейчас
+// таких пар нет: пару входа через GitHub проверяет старт api
+// (Config.CheckAPI), а не Load (CLAB-430).
+var needs = map[string]map[string]string{}
 
 // loadConfig — config.Load на окружении env поверх минимального.
 func loadConfig(t *testing.T, env map[string]string) (config.Config, error) {
