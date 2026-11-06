@@ -20,7 +20,7 @@
 # arm64-половина сборки на amd64-раннере шла бы через QEMU, которого в CI
 # нет, и падала. Обычный `docker build` (make image, deploy.yml) ничего не
 # замечает: BuildKit подставляет в TARGETOS/TARGETARCH платформу хоста.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS build
 
 WORKDIR /src
 
