@@ -85,6 +85,9 @@ if ! out=$(docker buildx imagetools inspect "$other" 2>&1); then
   echo "::notice::в реестре нет образа $other — событие в $TARGET не отправлено."
   echo "Его отправит выпуск $other_repo, когда опубликует свой образ $VERSION:"
   echo "поставьте тег $VERSION там или перезапустите упавший прогон."
+  echo "Тег там уже стоит, а прогона release.yml по нему нет (событие тега потеряно) —"
+  echo "запустите его вручную на теге:"
+  echo "  gh workflow run release.yml --repo $OWNER/$other_repo --ref $VERSION -f tag=$VERSION"
   registry_says
   exit 0
 fi
