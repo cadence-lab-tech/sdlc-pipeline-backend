@@ -16,17 +16,72 @@
 # архивов CLI подписан так же, бандл checksums.txt.sigstore.json уходит в
 # релиз тапа рядом с архивами. Команды проверки для клиента — docs/admin.md
 # в self-hosted, «Verifying a release».
+#
+# Ручной запуск (CLAB-435). Бывает, что GitHub принимает push тега, а
+# прогона не создаёт (v0.25.0, CLAB-431): перезапускать нечего, а
+# переставить тег не даёт ruleset tags-v-immutable. Тогда выпуск запускают
+# вручную по тому же тегу — на ref самого тега:
+#   gh workflow run release.yml --repo cadence-lab-tech/sdlc-pipeline-backend \
+#     --ref vX.Y.Z -f tag=vX.Y.Z
+# Только на ref тега: identity keyless-подписи — <этот файл>@<github.ref>, и
+# на теге она та же, что у push (…/release.yml@refs/tags/vX.Y.Z). Прогон на
+# main подписал бы образ и checksums.txt identity …@refs/heads/main, и
+# подпись не приняли бы ни релиз-PR self-hosted, ни clab server,
+# get-cadence.sh и upgrade.sh клиента. У сертификата ручного прогона поле
+# workflow trigger — workflow_dispatch; клиент его не проверяет.
+# Прогон на ref тега берёт этот файл из самого тега, поэтому путь работает
+# для тегов, поставленных после CLAB-435.
+#
+# Первое задание, tag (.github/release/check-tag.sh, такой же во frontend),
+# на любом событии проверяет: ref прогона — тег, вход tag совпадает с ним,
+# имя — версия, тег есть на origin, аннотированный и указывает на коммит
+# этого прогона. Его ждут все задания с побочным эффектом — build, release
+# и image: не прошло — ничего не публикуется.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег выпуска vX.Y.Z; запускать на ref этого же тега (--ref vX.Y.Z)"
+        required: true
+        type: string
+
+# Поздний push и ручной запуск одного тега идут друг за другом, а не
+# наперегонки за тег образа в GHCR и релиз тапа. Ждущий прогон в группе
+# один: следующий вытесняет ждущего, начатый не отменяется.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Вход — через env, а не подстановкой в run: значение задаёт
+      # запустивший прогон.
+      - id: check
+        name: проверить тег
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/release/check-tag.sh
+
   build:
+    needs: [tag]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -77,7 +132,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build]
+    needs: [tag, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,6 +236,7 @@ jobs:
   # SHA. Задание не зависит от CLI: архивы и тап выходят, даже если образ
   # не собрался.
   image:
+    needs: [tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read

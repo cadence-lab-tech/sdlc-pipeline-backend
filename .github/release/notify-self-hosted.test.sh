@@ -63,11 +63,15 @@ expect_not() {
 run half-backend 0 SELF=backend HAS_TOKEN=true FAKE_OTHER=missing
 expect half-backend out "::notice::в реестре нет образа ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v9.9.9"
 expect half-backend out "not found"
+# Прежний совет и команда ручного запуска соседа на теге (CLAB-435).
+expect half-backend out "поставьте тег v9.9.9 там или перезапустите упавший прогон."
+expect half-backend out "gh workflow run release.yml --repo cadence-lab-tech/sdlc-pipeline-frontend --ref v9.9.9 -f tag=v9.9.9"
 expect_not half-backend out "::error::"
 expect_not half-backend log "gh "
 
 run half-frontend 0 SELF=frontend HAS_TOKEN=true FAKE_OTHER=missing
 expect half-frontend out "нет образа ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v9.9.9"
+expect half-frontend out "gh workflow run release.yml --repo cadence-lab-tech/sdlc-pipeline-backend --ref v9.9.9 -f tag=v9.9.9"
 expect_not half-frontend log "gh "
 
 # Отказ реестра — не «образа нет», а поломка доступа (CLAB-99): прогон
@@ -79,6 +83,7 @@ expect denied out "Manage Actions access"
 expect denied out "gh api repos/cadence-lab-tech/self-hosted/dispatches -f event_type=cadence-release"
 expect_not denied out "::notice::"
 expect_not denied log "gh "
+expect_not denied out "gh workflow run"
 
 # Реестр недоступен — тоже не половина выпуска: красный, команда руками.
 run unreachable 1 SELF=frontend HAS_TOKEN=true FAKE_OTHER=unreachable
