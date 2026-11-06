@@ -68,7 +68,7 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
       commit: ${{ steps.check.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Вход — через env, а не подстановкой в run: значение задаёт
@@ -92,7 +92,7 @@ jobs:
           - {goos: linux, goarch: arm64}
           - {goos: windows, goarch: amd64}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # v7, как в ci.yml: v5 читает из go.mod только строку go (ставил бы
       # 1.26.0 и докачивал тулчейн сам), v7 берёт строку toolchain и ставит
       # GOTOOLCHAIN=local — сборка идёт ровно на тулчейне из go.mod.
@@ -125,7 +125,7 @@ jobs:
           fi
           rm -r "$name"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -145,8 +145,8 @@ jobs:
       HAS_TAP_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN != '' }}
       TAP: cadence-lab-tech/homebrew-tap
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -172,7 +172,7 @@ jobs:
       # Здесь — только заметки: архивы CLI живут в публичном релизе тапа,
       # и качают их оттуда.
       # Черновик не нужен: тег ставится, когда релиз уже решён.
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
 
@@ -246,7 +246,7 @@ jobs:
     env:
       HAS_SELF_HOSTED_TOKEN: ${{ secrets.SELF_HOSTED_DISPATCH_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Образ версии уходит наружу и без лицензии выходить не должен.
       # Dockerfile отсутствие файла терпит — ради сборок по SHA.
@@ -262,8 +262,8 @@ jobs:
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -283,7 +283,7 @@ jobs:
       # provenance заданы явно: по умолчанию action даёт max только
       # публичному репозиторию, а версию предиката выбирает BuildKit.
       - id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
