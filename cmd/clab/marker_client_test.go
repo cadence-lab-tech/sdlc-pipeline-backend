@@ -283,6 +283,10 @@ func TestWhoamiMarkerProjectNotFound(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "проект MISSING взят из маркера "+path) || !errors.As(err, &apiErr) {
 		t.Fatalf("проект не найден: %v", err)
 	}
+	// exit() печатает только Code и Message APIError: путь — в сообщении.
+	if apiErr.Code != "not_found" || !strings.Contains(apiErr.Message, "взят из маркера "+path) {
+		t.Fatalf("путь маркера не в сообщении APIError: %#v", apiErr)
+	}
 }
 
 // AC-17: без CLAB_CONFIG_DIR, XDG_CONFIG_HOME и домашнего каталога конфигу

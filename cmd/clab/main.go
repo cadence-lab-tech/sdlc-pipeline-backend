@@ -308,6 +308,14 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	if key != "" {
 		if project, err = c.whoamiProject(ctx, key); err != nil {
 			if pc.marker != nil {
+				// exit() печатает только Code и Message найденного APIError,
+				// обёртку %w он отбрасывает: файл-источник — в самом сообщении.
+				var apiErr *APIError
+				if errors.As(err, &apiErr) {
+					named := *apiErr
+					named.Message = fmt.Sprintf("%s (проект %s взят из маркера %s)", apiErr.Message, key, pc.marker.Path)
+					return &named
+				}
 				return fmt.Errorf("проект %s взят из маркера %s: %w", key, pc.marker.Path, err)
 			}
 			return err
