@@ -369,8 +369,10 @@ func minVersionText(agent string) string {
 	return fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2])
 }
 
-// genericConfig — конфигурация MCP для агента без привязки: вместо токена —
-// ${SDLC_TOKEN}, ни в вывод, ни в файл он не попадает.
+// genericConfig — конфигурация MCP для печати (агент без привязки, claude или
+// codex не найден в PATH): вместо токена — ${SDLC_TOKEN}, ни в вывод, ни в
+// файл он не попадает. Единственное место, где токен идёт вне выбранного
+// агента, — аргумент --header у claude mcp add (рекомендация 2).
 func genericConfig(c *Client, name, mcpURL, headerName, headerValue string) map[string]any {
 	if c.token != "" {
 		headerValue = "Bearer ${" + codexTokenEnv + "}"
@@ -401,7 +403,7 @@ func (r *agentRun) connect(ctx context.Context, c *Client, dryRun bool, mcpURL, 
 		case r.path == "":
 			rep.MCP = mcpSkipped
 			if !dryRun {
-				raw, _ := json.MarshalIndent(mcpConfig(rep.Name, mcpURL, headerName, headerValue), "", "  ")
+				raw, _ := json.MarshalIndent(genericConfig(c, rep.Name, mcpURL, headerName, headerValue), "", "  ")
 				return fmt.Errorf("claude не найден в PATH: MCP не подключён. Конфигурация для агента:\n%s", raw)
 			}
 		case dryRun:

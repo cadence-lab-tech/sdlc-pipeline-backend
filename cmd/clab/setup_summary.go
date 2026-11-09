@@ -100,10 +100,14 @@ func mcpText(a *agentReport, dryRun bool) string {
 			}
 			return "не подключён: агент без привязки — конфигурация MCP напечатана ниже"
 		default:
-			if dryRun {
-				return "не будет подключён: " + a.Program + " не найден в PATH"
+			why := a.Program + " не найден в PATH"
+			if a.Found {
+				why = "набор для " + a.Program + " недоступен у этого сервера"
 			}
-			return "не подключён: " + a.Program + " не найден в PATH"
+			if dryRun {
+				return "не будет подключён: " + why
+			}
+			return "не подключён: " + why
 		}
 	}
 	return mcpLabels[dryRun][a.MCP]
@@ -162,11 +166,13 @@ func mcpCell(a *agentReport, dryRun bool) string {
 	if a.Agent == agentGeneric {
 		return a.Name + ": конфигурация напечатана"
 	}
+	// В ячейке — только действие: прежний адрес («был http://…») назван в
+	// строке «MCP:» выше, а двоеточие в адресе обрезало бы ячейку.
 	text := mcpText(a, dryRun)
-	if i := strings.Index(text, ":"); i > 0 {
+	if i := strings.Index(text, " ("); i > 0 {
 		text = text[:i]
 	}
-	if i := strings.Index(text, " ("); i > 0 && a.MCP != mcpReplaced {
+	if i := strings.Index(text, ":"); i > 0 {
 		text = text[:i]
 	}
 	return a.Name + ": " + text
@@ -324,6 +330,9 @@ func printTrust(rep *setupReport) {
 	switch {
 	case tr.Action == trustUnchanged:
 		fmt.Printf("Доверие Codex: %s уже доверен (%s).\n", tr.Path, tr.File)
+	case tr.Action == trustUnreadable:
+		// Конфиг не разобран, причина — в тексте ошибки ниже.
+		fmt.Printf("Доверие Codex: запись для %s в %s не проверена — файл не разобран, clab его не правит.\n", tr.Path, tr.File)
 	case tr.Action == trustConflict:
 		fmt.Printf("Доверие Codex: для %s в %s уже есть запись с trust_level = %q — clab её не правит; поменяйте вручную.\n", tr.Path, tr.File, tr.Level)
 	case tr.Action == trustAdded && rep.DryRun:

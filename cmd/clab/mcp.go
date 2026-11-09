@@ -82,7 +82,7 @@ func installMCP(ctx context.Context, c *Client, agent, key, nameFlag, scopeFlag,
 	if agent == "auto" && selected[0].name == agentGeneric {
 		// Не нашлось ни одного агента: для команды подключения это ошибка,
 		// как до выбора агента по привязкам.
-		raw, _ := json.MarshalIndent(mcpConfig(agentMCPName(agentClaude, scopeFlag, nameFlag, key), mcpURL, headerName, headerValue), "", "  ")
+		raw, _ := json.MarshalIndent(genericConfig(c, agentMCPName(agentClaude, scopeFlag, nameFlag, key), mcpURL, headerName, headerValue), "", "  ")
 		return fmt.Errorf("claude не найден в PATH. Конфигурация для агента:\n%s", raw)
 	}
 	if scopeFlag == "project" && c.token != "" && hasAgent(selected, agentClaude) {
@@ -98,7 +98,7 @@ func installMCP(ctx context.Context, c *Client, agent, key, nameFlag, scopeFlag,
 		var err error
 		switch sel.name {
 		case agentClaude:
-			err = installClaudeMCP(ctx, sel.path, &res, mcpURL, headerName, headerValue)
+			err = installClaudeMCP(ctx, c, sel.path, &res, mcpURL, headerName, headerValue)
 		case agentCodex:
 			switch {
 			case res.Scope == "project":
@@ -139,9 +139,9 @@ func installMCP(ctx context.Context, c *Client, agent, key, nameFlag, scopeFlag,
 }
 
 // installClaudeMCP — прежний claude mcp add: вывод агента идёт на терминал.
-func installClaudeMCP(ctx context.Context, claude string, res *mcpInstalled, mcpURL, headerName, headerValue string) error {
+func installClaudeMCP(ctx context.Context, c *Client, claude string, res *mcpInstalled, mcpURL, headerName, headerValue string) error {
 	if claude == "" {
-		raw, _ := json.MarshalIndent(mcpConfig(res.Name, mcpURL, headerName, headerValue), "", "  ")
+		raw, _ := json.MarshalIndent(genericConfig(c, res.Name, mcpURL, headerName, headerValue), "", "  ")
 		return fmt.Errorf("claude не найден в PATH. Конфигурация для агента:\n%s", raw)
 	}
 	argv := []string{"mcp", "add", "--transport", "http", "--scope", res.Scope, res.Name, mcpURL,

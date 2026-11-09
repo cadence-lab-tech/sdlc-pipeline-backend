@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -98,6 +99,9 @@ type agentKit struct {
 	// CLAB-417. Levels — привязки для таблицы моделей.
 	Bindings []kitBinding   `json:"-"`
 	Levels   []agentBinding `json:"-"`
+	// Skipped — имена привязок агентов, которых clab не знает: не проверяются
+	// и не используются, setup предупреждает.
+	Skipped []string `json:"-"`
 }
 
 func (k *agentKit) binding(name string) *kitBinding {
@@ -223,7 +227,12 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 		return err
 	}
 	rep.ServerVersion = serverVersion
-	if kit != nil && len(kit.Bindings) == 0 {
+	if kit != nil {
+		for _, name := range kit.Skipped {
+			rep.Warnings = append(rep.Warnings, fmt.Sprintf("привязка агента %q пропущена: этот clab (%s) такого агента не знает — обновите clab; остальные агенты настроены как обычно", name, version))
+		}
+	}
+	if kit != nil && len(kit.Bindings) == 0 && len(kit.Skipped) == 0 && (hasAgent(selected, agentClaude) || hasAgent(selected, agentCodex)) {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("привязки агентов недоступны: сервер %s их не раздаёт (они приходят с выпуска с привязками; этот clab — %s). Набор Claude ставится из прежнего списка файлов; для Codex обновите инстанс.",
 			dash(serverVersion), version))
 	}
@@ -349,6 +358,18 @@ func (c *Client) fetchAgentKit(ctx context.Context) (*agentKit, string, error) {
 		}
 		kit.Levels = parseBindings(kit.RawBindings)
 	}
+	// Привязка агента, которого clab не знает, пропускается с предупреждением:
+	// старый clab продолжает ставить Claude, когда сервер добавил нового агента.
+	// Для известных (claude, codex, generic) проверка путей строгая, как в AC-8.
+	known := kit.Bindings[:0]
+	for _, b := range kit.Bindings {
+		if !slices.Contains([]string{agentClaude, agentCodex, agentGeneric}, b.Name) {
+			kit.Skipped = append(kit.Skipped, b.Name)
+			continue
+		}
+		known = append(known, b)
+	}
+	kit.Bindings = known
 	for _, b := range kit.Bindings {
 		if b.Kit == nil {
 			continue

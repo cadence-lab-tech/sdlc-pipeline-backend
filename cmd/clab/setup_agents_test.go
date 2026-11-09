@@ -525,6 +525,12 @@ func TestSetupCodexMCPStates(t *testing.T) {
 		t.Fatalf("замена: %v", cx.calls(t))
 	}
 	mustContain(t, out, "заменён (был "+c1.origin+"/mcp/projects/ACME)")
+	// Ячейка таблицы — действие без адреса: двоеточие в «http://» не должно
+	// обрезать её на полуслове (CLAB-418, замечание тестировщика).
+	mustContain(t, out, "sdlc-acme: заменён")
+	if strings.Contains(out, "заменён (был http\n") || strings.Contains(out, "sdlc-acme: заменён (") {
+		t.Fatalf("ячейка таблицы с адресом:\n%s", out)
+	}
 	servers := readHomeConfig(t, home)["mcp_servers"].(map[string]any)
 	if len(servers) != 1 || servers["sdlc-acme"].(map[string]any)["url"] != c2.origin+"/mcp/projects/ACME" {
 		t.Fatalf("конфиг: %v", servers)
@@ -734,6 +740,20 @@ func TestSetupTrust(t *testing.T) {
 	}
 	mustContain(t, out, "untrusted", "не правит")
 
+	// Битый TOML: запись доверия не сделана, в итоге нет ложного trust_level = "".
+	broken := "[projects\nx = \n"
+	if err := os.WriteFile(cfg, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = runSetup(t, c, "--project", "ACME", "--trust", "--no-marker")
+	if err == nil || !strings.Contains(readText(t, cfg), "[projects\nx = ") || strings.Contains(readText(t, cfg), `"trusted"`) {
+		t.Fatalf("битый TOML: %v\n%s", err, readText(t, cfg))
+	}
+	mustContain(t, out, "не разобран")
+	if strings.Contains(out, `trust_level = ""`) {
+		t.Fatalf("ложный уровень доверия:\n%s", out)
+	}
+
 	// Без codex среди агентов — предупреждение, записи нет.
 	t.Setenv("PATH", "/usr/bin:/bin")
 	if err := os.Remove(cfg); err != nil {
@@ -939,6 +959,11 @@ func TestSetupServerWithoutBindings(t *testing.T) {
 		t.Fatalf("ожидалась ошибка с советом обновить: %v", err)
 	}
 	mustContain(t, out, "привязки агентов недоступны", "сервер v1.0.0")
+	// Codex в PATH есть: причина не «не найден в PATH», а сервер без набора.
+	mustContain(t, out, "набор для codex недоступен у этого сервера")
+	if strings.Contains(out, "codex не найден в PATH") {
+		t.Fatalf("причина названа неверно:\n%s", out)
+	}
 	for _, f := range kitV1["files"].([]map[string]string) {
 		if readText(t, filepath.Join(root, ".claude", f["path"])) != f["content"] {
 			t.Errorf("%s не как в files", f["path"])
@@ -1131,4 +1156,163 @@ func TestAgentNames(t *testing.T) {
 	if agentScope(agentCodex, "local") != "user" || agentScope(agentCodex, "project") != "project" || agentScope(agentClaude, "") != "local" {
 		t.Error("области")
 	}
+}
+
+// Привязка агента, которого clab не знает, не ломает setup: пропускается с
+// предупреждением, Claude ставится. Пути такой привязки не проверяются и не
+// пишутся — что бы сервер в ней ни отдал.
+func TestSetupUnknownAgentSkipped(t *testing.T) {
+	withJSON(t, false)
+	root, home := setupEnv(t)
+	cl := installClaude(t, "")
+	outside := filepath.Join(filepath.Dir(root), "gemini-escape")
+
+	kit := agentKitFx("v1.0.0", "1", nil)
+	kit["bindings"] = append(kit["bindings"].([]any), map[string]any{
+		"name": "gemini",
+		"kit":  map[string]string{"manifest": "../evil.json", "skills_dir": ".gemini/skills", "agents_dir": "/etc"},
+		"files": entries([]kitFile{
+			{"../gemini-escape/x.md", "x"}, {"/etc/x", "x"}, {".claude/settings.json", "{}"},
+			{".gemini/skills/x/SKILL.md", "x"},
+		}),
+		"detect": nil, "levels": nil,
+	})
+	c := (&setupServer{kit: kit}).start(t)
+
+	out, errOut, err := runSetup(t, c, "--project", "ACME")
+	if err != nil {
+		t.Fatalf("неизвестный агент остановил setup: %v", err)
+	}
+	mustContain(t, out, `привязка агента "gemini" пропущена`)
+	if !cl.called(t, "mcp add") || !exists(filepath.Join(root, ".claude/skills/clab-work/SKILL.md")) {
+		t.Fatalf("Claude не настроен: %v", cl.calls(t))
+	}
+	for _, p := range []string{filepath.Join(root, ".gemini"), filepath.Join(root, ".claude/settings.json"), outside, filepath.Join(filepath.Dir(root), "evil.json")} {
+		if exists(p) {
+			t.Errorf("записано по привязке неизвестного агента: %s", p)
+		}
+	}
+	if strings.Contains(out+errOut, "ничего не записано") {
+		t.Errorf("отказ из-за неизвестного агента:\n%s%s", out, errOut)
+	}
+	_ = home
+
+	// --json: предупреждение там же.
+	withJSON(t, true)
+	out, _, err = runSetup(t, c, "--project", "ACME", "--no-marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Warnings []string `json:"warnings"`
+	}
+	if json.Unmarshal([]byte(out), &rep) != nil || len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "gemini") {
+		t.Fatalf("--json:\n%s", out)
+	}
+}
+
+// Известный агент с вредным путём — по-прежнему отказ, даже если рядом есть
+// привязка неизвестного агента: защита AC-8 для claude, codex и generic.
+func TestSetupKnownAgentStaysStrictBesideUnknown(t *testing.T) {
+	withJSON(t, false)
+	root, home := setupEnv(t)
+	installClaude(t, "")
+	installCodex(t, "0.167.0")
+
+	unknown := map[string]any{
+		"name": "gemini", "kit": map[string]string{"manifest": ".gemini/clab-kit.json", "skills_dir": ".gemini/skills", "agents_dir": ".gemini/agents"},
+		"files": entries([]kitFile{{".gemini/skills/x/SKILL.md", "x"}}), "detect": nil, "levels": nil,
+	}
+	cases := map[string]func(b map[string]any){
+		"claude: путь наружу":        func(b map[string]any) { b["files"] = entries([]kitFile{{"../x/SKILL.md", "x"}}) },
+		"claude: settings.json":      func(b map[string]any) { b["files"] = entries([]kitFile{{".claude/settings.json", "{}"}}) },
+		"claude: чужой каталог":      func(b map[string]any) { b["kit"].(map[string]string)["skills_dir"] = ".git/hooks" },
+		"codex: config.toml":         func(b map[string]any) { b["files"] = entries([]kitFile{{".codex/config.toml", "x"}}) },
+		"codex: манифест вне списка": func(b map[string]any) { b["kit"].(map[string]string)["manifest"] = ".codex/config.toml" },
+		"generic: каталог набора": func(b map[string]any) {
+			b["kit"] = map[string]string{"manifest": ".agents/clab-kit.json", "skills_dir": "docs", "agents_dir": ".codex/agents"}
+		},
+	}
+	for name, mod := range cases {
+		kit := agentKitFx("v1.0.0", "1", nil)
+		bs := kit["bindings"].([]any)
+		var idx int
+		switch {
+		case strings.HasPrefix(name, "claude"):
+			idx = 0
+		case strings.HasPrefix(name, "codex"):
+			idx = 1
+		default:
+			idx = 2
+			bs[2].(map[string]any)["files"] = entries([]kitFile{{".agents/skills/x/SKILL.md", "x"}})
+		}
+		mod(bs[idx].(map[string]any))
+		kit["bindings"] = append([]any{unknown}, bs...)
+		c := (&setupServer{kit: kit}).start(t)
+		before := snapshot(t, root, home)
+		_, _, err := runSetup(t, c, "--project", "ACME")
+		if err == nil || !strings.Contains(err.Error(), "недопустимый путь") || !strings.Contains(err.Error(), "ничего не записано") {
+			t.Errorf("%s: %v", name, err)
+		}
+		sameSnapshot(t, before, snapshot(t, root, home), name)
+	}
+}
+
+// Токен не печатается нигде: ни когда агента нет в PATH, ни с --dry-run, ни
+// в --json, ни в тексте ошибки. Единственное место — --header у вызова
+// claude mcp add (журнал заглушки), его тест не смотрит.
+func TestTokenNeverPrinted(t *testing.T) {
+	root, home := setupEnv(t)
+	c := (&setupServer{kit: agentKitFx("v1.0.0", "1", nil)}).start(t)
+
+	setup := func(args ...string) func() (string, string, error) {
+		return func() (string, string, error) {
+			return runSetup(t, c, append([]string{"--project", "ACME"}, args...)...)
+		}
+	}
+	install := func(args ...string) func() (string, string, error) {
+		return func() (string, string, error) {
+			return capture(t, func() error {
+				return cmdMCP(context.Background(), c, append([]string{"install", "--project", "ACME"}, args...))
+			})
+		}
+	}
+	runs := map[string]func() (string, string, error){
+		"setup auto":               setup(),
+		"setup claude":             setup("--agent", "claude"),
+		"setup claude dry-run":     setup("--agent", "claude", "--dry-run"),
+		"setup codex":              setup("--agent", "codex"),
+		"setup generic":            setup("--agent", "generic"),
+		"setup auto dry-run":       setup("--dry-run"),
+		"mcp install auto":         install(),
+		"mcp install claude":       install("--agent", "claude"),
+		"mcp install codex":        install("--agent", "codex"),
+		"mcp install generic":      install("--agent", "generic"),
+		"mcp install claude scope": install("--agent", "claude", "--scope", "user"),
+	}
+
+	for _, asJSON := range []bool{false, true} {
+		for _, found := range []bool{false, true} {
+			if found {
+				installClaude(t, "")
+				installCodex(t, "0.167.0")
+			} else {
+				t.Setenv("PATH", "/usr/bin:/bin")
+			}
+			for name, f := range runs {
+				withJSON(t, asJSON)
+				out, errOut, err := f()
+				texts := []string{out, errOut}
+				if err != nil {
+					texts = append(texts, err.Error())
+				}
+				for i, s := range texts {
+					if strings.Contains(s, setupToken) {
+						t.Errorf("%s (json=%v, агенты в PATH=%v): токен в тексте #%d:\n%s", name, asJSON, found, i, s)
+					}
+				}
+			}
+		}
+	}
+	noToken(t, nil, root, home)
 }

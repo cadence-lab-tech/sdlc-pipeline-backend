@@ -179,6 +179,7 @@ const (
 	trustAdded        = "added"
 	trustUnchanged    = "unchanged"
 	trustConflict     = "conflict"
+	trustUnreadable   = "unreadable"
 )
 
 type trustReport struct {
@@ -233,7 +234,7 @@ func setupTrust(ctx context.Context, root string, requested, dryRun bool) (*trus
 	doc, err := readTOML(file)
 	if err != nil {
 		if requested {
-			tr.Action = trustConflict
+			tr.Action = trustUnreadable
 			return tr, fmt.Errorf("--trust: %w; запись доверия не сделана", err)
 		}
 		return tr, nil
