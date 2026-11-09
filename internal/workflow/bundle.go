@@ -47,6 +47,10 @@ type Bundle struct {
 	Instructions []BundleInstruction `json:"instructions,omitempty"`
 	Documents    []BundleDocument    `json:"documents,omitempty"`
 	Workflows    []BundleWorkflow    `json:"workflows,omitempty"`
+	// Настройка агентов проекта (решение 0077, п. 4.10): необязательное
+	// поле формата 3, как instructions. Экспорт пишет активную версию;
+	// сервер прежней версии поле теряет, и CLI предупреждает по отчёту.
+	AgentSettings *BundleAgentSettings `json:"agent_settings,omitempty"`
 	// Связка первой версии несла ровно один цикл. Поле читается на импорте,
 	// чтобы старые связки продолжали применяться; экспорт его не пишет.
 	Workflow *BundleWorkflow `json:"workflow,omitempty"`
@@ -247,8 +251,15 @@ type ImportReport struct {
 	Instructions []ImportEntry `json:"instructions,omitempty"`
 	Documents    []ImportEntry `json:"documents"`
 	Workflows    []ImportEntry `json:"workflows,omitempty"`
+	// Настройка агентов (CLAB-428): ключа нет, если связка её не несла;
+	// нет ключа при связке с полем — сервер прежней версии его потерял.
+	// Исходы: draft_created | updated | unchanged.
+	AgentSettings *ImportEntry `json:"agent_settings,omitempty"`
 	// Проверка каждого пришедшего цикла как графа, в том же порядке.
 	Validations []Validation `json:"workflow_validations,omitempty"`
+	// «Было → стало» для журнала действий; в ответ не идёт. Нет при
+	// unchanged и в сухом прогоне: записи не было.
+	AgentSettingsChange *AgentSettingsChange `json:"-"`
 }
 
 type ImportEntry struct {
@@ -262,9 +273,24 @@ type ImportEntry struct {
 // errDryRun откатывает транзакцию импорта, не считаясь ошибкой.
 var errDryRun = errors.New("dry run")
 
-// Import применяет связку к проекту. Всё одной транзакцией: половина
-// импортированной связки хуже, чем ни одной.
+// Import применяет связку без настройки агентов: путь для кода сервиса и
+// тестов, актор — одним идентификатором, без права. Связка с agent_settings
+// сюда не идёт — её право решает вид принципала, а он есть только у Actor
+// (ImportAs).
 func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UUID, b Bundle, dryRun bool) (ImportReport, error) {
+	if b.AgentSettings != nil {
+		return ImportReport{DryRun: dryRun}, apperr.Internal(nil, "связка с agent_settings применяется через ImportAs")
+	}
+	return a.ImportAs(ctx, projectKey, Actor{Principal: domain.Principal{ID: actor}}, b, dryRun)
+}
+
+// ImportAs применяет связку к проекту от имени актора. Всё одной
+// транзакцией: половина импортированной связки хуже, чем ни одной.
+// Настройку агентов в связке вправе нести тот, кому AgentSettingsWriteRight
+// разрешает её правку (решение 0077, п. 4.9): бот отбивается до любой
+// записи, в том числе в dry_run.
+func (a *Authoring) ImportAs(ctx context.Context, projectKey string, who Actor, b Bundle, dryRun bool) (ImportReport, error) {
+	actor := who.Principal.ID
 	report := ImportReport{
 		DryRun:       dryRun,
 		Repositories: []ImportEntry{},
@@ -290,6 +316,20 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 				e := apperr.As(err)
 				return report, apperr.New(e.Code, "цикл %q: %s", w.Name, e.Message).WithDetails(e.Details)
 			}
+		}
+	}
+
+	// Настройка агентов: право и проверка документа — до транзакции, до
+	// первой записи; отказ откатывает всю связку, сухой прогон отбивается так
+	// же.
+	var agentDoc json.RawMessage
+	if b.AgentSettings != nil {
+		if err := AgentSettingsWriteRight(who); err != nil {
+			return report, err
+		}
+		var err error
+		if agentDoc, err = checkBundleAgentSettings(b.AgentSettings); err != nil {
+			return report, err
 		}
 	}
 
@@ -336,6 +376,16 @@ func (a *Authoring) Import(ctx context.Context, projectKey string, actor uuid.UU
 			}
 			report.Workflows = append(report.Workflows, entry)
 			report.Validations = append(report.Validations, validation)
+		}
+		if b.AgentSettings != nil {
+			entry, change, err := a.importAgentSettings(ctx, tx, project, who, b.AgentSettings, agentDoc)
+			if err != nil {
+				return fmt.Errorf("настройка агентов: %w", err)
+			}
+			report.AgentSettings = &entry
+			if !dryRun {
+				report.AgentSettingsChange = change
+			}
 		}
 
 		if dryRun {
@@ -897,6 +947,10 @@ func (a *Authoring) Export(ctx context.Context, projectKey string) (Bundle, erro
 			return out, err
 		}
 		out.Workflows = append(out.Workflows, *exportWorkflow(wf))
+	}
+
+	if out.AgentSettings, err = a.exportAgentSettings(ctx, project.ID); err != nil {
+		return out, err
 	}
 	return out, nil
 }
