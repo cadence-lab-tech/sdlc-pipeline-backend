@@ -88,10 +88,15 @@ internal/
   tracing/          OTLP/HTTP-трассировки api: включение только явными OTEL_*,
                     провайдер с версией сборки; спан на запрос — httpapi
 migrations/         схема и сиды; embed.go встраивает их в бинарник
-agentkit/           набор агента для пользователей: скилы и саб-агент Claude Code
-                    на английском, встроены в api (go:embed), отдаёт их
-                    GET /v1/agent-kit, ставит clab setup (решение 0050);
-                    kit_test.go держит набор без привязки к нашему инстансу
+agentkit/           набор агента для пользователей на английском, встроен в api
+                    (go:embed), отдаёт его GET /v1/agent-kit, ставит clab setup
+                    (решение 0050): core/ — нейтральное ядро (скилы, агент
+                    исполнителя, guide.md для clab guide), bindings/<имя>.json
+                    и bindings/<имя>/ — привязки claude, codex, generic с
+                    фрагментами (решение 0077, п. 3); поле files ответа —
+                    раскладка claude для clab прошлых версий; kit_test.go и
+                    bindings_test.go держат ядро нейтральным, а набор — без
+                    привязки к нашему инстансу
 dev/                docker-compose для локального запуска, e2e.sh;
                     history-cleanup/ — разовая чистка истории от devops/
 deploy/             продовый стек: compose за Caddy, deploy.sh, дампы
