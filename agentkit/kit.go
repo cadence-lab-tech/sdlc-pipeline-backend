@@ -25,7 +25,7 @@ import (
 	"sync"
 )
 
-//go:embed skills agents
+//go:embed core
 var source embed.FS
 
 // File — файл набора с содержимым и его sha256: по сумме clab setup узнаёт,
@@ -63,7 +63,14 @@ var (
 // не меняется до следующей сборки. Версию подставляет вызывающий — набор её
 // не знает.
 func Load(version string) (Kit, error) {
-	loadOnce.Do(func() { loaded, loadErr = build(source) })
+	loadOnce.Do(func() {
+		core, err := fs.Sub(source, "core")
+		if err != nil {
+			loadErr = err
+			return
+		}
+		loaded, loadErr = build(core)
+	})
 	if loadErr != nil {
 		return Kit{}, loadErr
 	}
