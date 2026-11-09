@@ -21,8 +21,25 @@ import (
 // CLAB-414; интегратор сверяет его с тегом выпуска.
 const agentTextMinServer = "v0.28.0"
 
-// guideKitPath — руководство в наборе агента: тело скила clab-guide.
+// guideKitPath — руководство в наборе сервера прежней версии (до CLAB-417):
+// тело скила clab-guide в files.
 const guideKitPath = "skills/clab-guide/SKILL.md"
+
+// guideKit — то из ответа /v1/agent-kit, что нужно clab guide: нейтральная
+// справка core.guide (CLAB-417, решение 0077, п. 3) и прежнее поле files.
+// Тип свой, а не agentKit из setup.go: набор привязок читает clab setup.
+type guideKit struct {
+	Version string `json:"version"`
+	Core    *struct {
+		Guide struct {
+			Content string `json:"content"`
+		} `json:"guide"`
+	} `json:"core"`
+	Files []struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	} `json:"files"`
+}
 
 // errOldServer — сервер не отдаёт того, что нужно команде: маршрута нет,
 // вместо JSON пришла страница, в наборе нет руководства. Ошибка домена (404
@@ -99,9 +116,10 @@ func promptWork(ctx context.Context, c *Client, args []string) error {
 	})
 }
 
-// cmdGuide печатает руководство по механизму — тело скила clab-guide из
-// набора агента инстанса (GET /v1/agent-kit, открытая ручка): тот же текст,
-// что ставит clab setup.
+// cmdGuide печатает руководство по механизму из набора агента инстанса
+// (GET /v1/agent-kit, открытая ручка): нейтральную справку core.guide — тот
+// же текст, что тело скила clab-guide без заметок привязки. Сервер прежней
+// версии core не отдаёт — тогда тело скила clab-guide из files.
 func cmdGuide(ctx context.Context, c *Client, args []string) error {
 	if _, err := flags("guide", args, func(*flag.FlagSet) {}); err != nil {
 		return err
@@ -113,13 +131,16 @@ func cmdGuide(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	var kit agentKit
+	var kit guideKit
 	if json.Unmarshal(raw, &kit) != nil {
 		return c.oldServerRefusal(ctx, "clab guide", "руководство агента", "")
 	}
 	text := ""
+	if kit.Core != nil {
+		text = kit.Core.Guide.Content
+	}
 	for _, f := range kit.Files {
-		if f.Path == guideKitPath {
+		if text == "" && f.Path == guideKitPath {
 			text = stripFrontmatter(f.Content)
 		}
 	}
