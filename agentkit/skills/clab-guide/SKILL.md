@@ -26,9 +26,11 @@ clab whoami                                 # who am I, which instance, which pr
 ```
 
 The project is taken from `--project`, then `SDLC_PROJECT`, then the
-`git remote` of the current directory (the repository bound to the
-project). `clab setup` connects the project's MCP server to Claude Code and
-installs this kit into `.claude/`; running it again is harmless and updates
+binding line in `AGENTS.md` or `CLAUDE.md` of the current directory or a
+directory above it, then the `git remote` of the current directory (the
+repository bound to the project). `clab setup` connects the project's MCP
+server to Claude Code and installs this kit into `.claude/`; running it
+again is harmless and updates
 the kit to the instance's version. The web page `https://<instance>/docs`
 has the same steps with ready-to-copy commands.
 
@@ -262,9 +264,12 @@ recommendation, never a gate:
   level (`none` — the chat's model) and names the choice in the chat;
 - `clab-work` and the prompt `work_on_task` only tell the human when their
   model differs from the level, and go on;
-- `clab usage --model` takes the full model id of the session
-  (`claude-opus-5-5`), not an alias: the server does not normalise model
-  names.
+- the model of the level for your agent comes from the project's agent
+  settings on the server: the claim names it next to the level. When the
+  claim names no model for your agent, name the level and your model
+  without judging whether they match;
+- `clab usage --model` takes the full model id of the session, as your
+  agent names it, not an alias: the server does not normalise model names.
 - `clab usage --billing api|subscription` says how the run was paid: on a
   subscription the cost is notional and stays out of the team budget;
   without the flag the row counts as money, like `api`.
@@ -288,6 +293,8 @@ found and what it demanded.
 clab queue                                   # what can be claimed now, by role
 clab tasks [--status S] [--type epic] [--parent ABC-2]
 clab show ABC-12                             # status, run, scope, transitions
+clab prompt work ABC-12 [--role <role>]      # the stage start instruction, same text as the MCP prompt work_on_task
+clab guide                                   # this guide
 clab claim ABC-12                            # take the stage: role documents, contract, inputs
 clab claim ABC-12 --instructions-dir <run directory>/role/   # documents as files in a new empty subdirectory
 clab claim ABC-12 --instructions-file <file>                 # documents joined into one file
@@ -309,7 +316,7 @@ clab edit ABC-12 [--model-level high | --model-level ""]
 clab relate ABC-3 --to ABC-4 --rel blocks    # ABC-4 waits for ABC-3 (not a place in the backlog)
 clab rank ABC-12 --before ABC-15 | --after ABC-15 | --top | --bottom   # exactly one place
 clab backlog [--parent ABC-2] [--limit 50] [--next] [--json]   # the backlog in server order
-clab decide ABC-12 --transition <transition> --gate <gate key> --status passed
+clab decide ABC-12 --transition <transition> --gate <gate key> --status passed [--seen-artifact <id>]
 clab move ABC-12 --to <status> --reason "…"   # any status of the cycle, no gates (a person only)
 clab wait ABC-12 --gate human_approval [--transition <transition>] [--timeout 8h]   # 0 passed, 3 returned, 4 changed, 5 timeout
 clab version                                 # CLI and server versions
@@ -365,5 +372,6 @@ newer), plus the project's roles, documents and bundles for maintainers.
 parent; with `parent` the backlog of an epic). There is no `--next` over MCP:
 take the first row without `blocked_by`. The prompt `work_on_task` (in Claude Code
 `/mcp__sdlc__work_on_task <key>`) claims a task and hands over the role's
-documents and contract. `sdlc_claim_task` and `sdlc_get_task` carry the
+documents and contract; an agent without MCP prompts gets the same text
+from `clab prompt work <key>`. `sdlc_claim_task` and `sdlc_get_task` carry the
 documents as `role.documents[]`.
