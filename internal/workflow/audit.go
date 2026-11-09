@@ -213,7 +213,7 @@ func (a *Audit) Record(ctx context.Context, e AuditEntry) {
 		Target:    e.Target,
 		Channel:   e.Channel,
 		Action:    e.Action,
-		Params:    SanitizeAuditParams(e.Params),
+		Params:    sanitizeAuditParams(e.Params, auditDigestActions[e.Action]),
 		Outcome:   e.Outcome,
 		RequestID: e.RequestID,
 	}
@@ -255,6 +255,28 @@ func (a *Audit) Record(ctx context.Context, e AuditEntry) {
 // без схемы и в процентной записи — вырезаются userinfo и значения
 // секретных параметров запроса и фрагмента (CLAB-226).
 func SanitizeAuditParams(params any) json.RawMessage {
+	return sanitizeAuditParams(params, nil)
+}
+
+// auditDigestActions — действия, у которых тело поля пишется размером и
+// sha256 на любой глубине, как content: документ настройки агентов
+// (CLAB-425). Секрет в нём ищется не по имени ключа, а по значению (sdlc_…
+// под ключом model), и санитайзер его не узнал бы; «было → стало» эти
+// действия пишут из принятых версий (AgentSettingsChange).
+var auditDigestActions = map[string]map[string]bool{}
+
+func init() {
+	doc := map[string]bool{"document": true}
+	for _, a := range []string{
+		RESTAction("POST", "/v1/projects/:projectKey/agent-settings/draft"),
+		RESTAction("PUT", "/v1/projects/:projectKey/agent-settings/draft"),
+		"sdlc_put_agent_settings_draft",
+	} {
+		auditDigestActions[a] = doc
+	}
+}
+
+func sanitizeAuditParams(params any, digestKeys map[string]bool) json.RawMessage {
 	if params == nil {
 		return json.RawMessage(`{}`)
 	}
@@ -269,7 +291,7 @@ func SanitizeAuditParams(params any) json.RawMessage {
 	if err := dec.Decode(&v); err != nil {
 		return digestJSON(raw)
 	}
-	v = sanitizeValue(v, "")
+	v = sanitizeValueWith(v, "", digestKeys)
 	out, err := json.Marshal(v)
 	if err != nil {
 		return json.RawMessage(`{"_unserializable":true}`)
@@ -280,7 +302,7 @@ func SanitizeAuditParams(params any) json.RawMessage {
 	return truncateParams(v, out)
 }
 
-func sanitizeValue(v any, key string) any {
+func sanitizeValueWith(v any, key string, digestKeys map[string]bool) any {
 	lk := strings.ToLower(key)
 	if auditSecretKeys[lk] {
 		if v == nil {
@@ -288,7 +310,7 @@ func sanitizeValue(v any, key string) any {
 		}
 		return auditRedacted
 	}
-	if auditBodyKeys[lk] && v != nil {
+	if (auditBodyKeys[lk] || digestKeys[lk]) && v != nil {
 		if s, ok := v.(string); ok {
 			return digest([]byte(s))
 		}
@@ -298,12 +320,12 @@ func sanitizeValue(v any, key string) any {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, val := range x {
-			x[k] = sanitizeValue(val, k)
+			x[k] = sanitizeValueWith(val, k, digestKeys)
 		}
 		return x
 	case []any:
 		for i, val := range x {
-			x[i] = sanitizeValue(val, "")
+			x[i] = sanitizeValueWith(val, "", digestKeys)
 		}
 		return x
 	case string:

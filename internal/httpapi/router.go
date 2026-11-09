@@ -219,6 +219,16 @@ func (s *Server) Handler() http.Handler {
 		// проверяет движок.
 		v1.GET("/projects/:projectKey/usage-policy", viewer, s.usagePolicy)
 		v1.PATCH("/projects/:projectKey/usage-policy", projectAdmin, s.setUsagePolicy)
+		// Настройка агентов проекта (CLAB-425, решение 0077 п. 4.6): читают
+		// все участники и токен задачи (executor.go); правит человек уровня
+		// maintainer — порог маршрута viewer, право с причиной считает движок.
+		v1.GET("/projects/:projectKey/agent-settings", viewer, s.agentSettings)
+		v1.GET("/projects/:projectKey/agent-settings/versions", viewer, s.agentSettingsVersions)
+		v1.GET("/projects/:projectKey/agent-settings/versions/:version", viewer, s.agentSettingsVersion)
+		v1.POST("/projects/:projectKey/agent-settings/draft", viewer, s.createAgentSettingsDraft)
+		v1.PUT("/projects/:projectKey/agent-settings/draft", viewer, s.putAgentSettingsDraft)
+		v1.DELETE("/projects/:projectKey/agent-settings/draft", viewer, s.discardAgentSettingsDraft)
+		v1.POST("/projects/:projectKey/agent-settings/draft/activate", viewer, s.activateAgentSettings)
 
 		// Роли. Версия роли иммутабельна: правка инструкции — новая версия,
 		// потому что пройденные этапы ссылаются на ту, по которой работали.

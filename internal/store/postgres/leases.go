@@ -155,6 +155,16 @@ func (s *Store) SnapshotModelLevel(ctx context.Context, tx pgx.Tx, runID uuid.UU
 	return translate(err)
 }
 
+// SnapshotExecution пишет снимок прогона при захвате одним UPDATE: пару
+// уровня (решение 0060) и версию настройки агентов проекта (решение 0077,
+// п. 4.4; nil — активной версии нет). Закрытый прогон не переписывается.
+func (s *Store) SnapshotExecution(ctx context.Context, tx pgx.Tx, runID uuid.UUID, level *string, source string, agentSettings *uuid.UUID) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE stage_runs SET model_level = $2, model_level_source = $3, agent_settings_version_id = $4
+		WHERE id = $1 AND finished_at IS NULL`, runID, level, source, agentSettings)
+	return translate(err)
+}
+
 // ExtendLease продлевает аренду. Продлить может только держатель: heartbeat
 // чужого агента не должен удерживать задачу за тем, кто её уже потерял.
 func (s *Store) ExtendLease(ctx context.Context, tx pgx.Tx, runID, actor uuid.UUID, expires time.Time) (bool, error) {

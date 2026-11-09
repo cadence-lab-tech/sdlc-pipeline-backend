@@ -665,7 +665,13 @@ func (e *Engine) stageState(ctx context.Context, q postgres.Querier, task domain
 		out.Role = role
 		roleLevel = role.ModelLevel
 	}
-	out.Execution = runExecution(task, run, roleLevel)
+	settings, err := e.runAgentSettings(ctx, q, task, run)
+	if err != nil {
+		return out, err
+	}
+	if out.Execution, err = withAgentSettings(runExecution(task, run, roleLevel), settings); err != nil {
+		return out, err
+	}
 	if out.StageLimit, err = e.limitOfStage(ctx, q, run, time.Now()); err != nil {
 		return out, err
 	}
@@ -723,7 +729,8 @@ func (e *Engine) roleView(ctx context.Context, q postgres.Querier, statusID, rol
 }
 
 // snapshotExecution разрешает уровень прогона по текущим уровням этапа,
-// задачи и версии роли прогона и пишет его на прогон.
+// задачи и версии роли прогона и пишет его на прогон вместе с активной
+// версией настройки агентов проекта.
 func (e *Engine) snapshotExecution(ctx context.Context, tx pgx.Tx, task domain.Task, run *domain.StageRun) error {
 	var roleLevel *string
 	if run.RoleVersionID != nil {
@@ -734,11 +741,19 @@ func (e *Engine) snapshotExecution(ctx context.Context, tx pgx.Tx, task domain.T
 		roleLevel = rv.ModelLevel
 	}
 	exec := resolveExecution(task, *run, roleLevel)
-	if err := e.store.SnapshotModelLevel(ctx, tx, run.ID, exec.ModelLevel, exec.ModelLevelSource); err != nil {
+	// Версия настройки агентов — тем же снимком и тем же UPDATE, что пара
+	// уровня (решение 0077, п. 4.4): активация новой версии потом идущий
+	// прогон не трогает.
+	settings, err := e.store.ActiveAgentSettingsID(ctx, tx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	if err := e.store.SnapshotExecution(ctx, tx, run.ID, exec.ModelLevel, exec.ModelLevelSource, settings); err != nil {
 		return err
 	}
 	source := exec.ModelLevelSource
 	run.ModelLevel, run.ModelLevelSource = exec.ModelLevel, &source
+	run.AgentSettingsVersionID = settings
 	return nil
 }
 

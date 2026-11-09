@@ -697,11 +697,13 @@ const stageRunSelect = `
 	       sr.parent_run_id, sr.gate_id, sr.rejected_from_run_id,
 	       sr.entered_at, sr.finished_at, sr.outcome, sr.summary,
 	       sr.model_level, sr.model_level_source,
-	       sr.entered_via_transition_id, sr.overdue_at
+	       sr.entered_via_transition_id, sr.overdue_at,
+	       sr.agent_settings_version_id, asv.version
 	FROM stage_runs sr
 	JOIN workflow_statuses ws ON ws.id = sr.status_id
 	LEFT JOIN roles ro       ON ro.id = sr.role_id
-	LEFT JOIN principals pr  ON pr.id = sr.claimed_by`
+	LEFT JOIN principals pr  ON pr.id = sr.claimed_by
+	LEFT JOIN agent_settings_versions asv ON asv.id = sr.agent_settings_version_id`
 
 func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) {
 	var r domain.StageRun
@@ -712,7 +714,8 @@ func scanStageRun(row interface{ Scan(...any) error }) (domain.StageRun, error) 
 		&r.ParentRunID, &r.GateID, &r.RejectedFromRunID,
 		&r.EnteredAt, &r.FinishedAt, &r.Outcome, &r.Summary,
 		&r.ModelLevel, &r.ModelLevelSource,
-		&r.EnteredViaTransitionID, &r.OverdueAt)
+		&r.EnteredViaTransitionID, &r.OverdueAt,
+		&r.AgentSettingsVersionID, &r.AgentSettingsVersion)
 	if roleKey != nil {
 		r.RoleKey = *roleKey
 	}
