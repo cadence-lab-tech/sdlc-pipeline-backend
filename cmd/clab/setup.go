@@ -1,16 +1,23 @@
 package main
 
 // clab setup — связать локальный проект с проектом Cadence Lab одной
-// командой (CLAB-232, решение 0050): MCP-сервер проекта у Claude Code и набор
-// агента (скилы, саб-агент исполнителя) в .claude/. Набор берётся с
+// командой (CLAB-232, решение 0050; агенты по привязкам — CLAB-418, решение
+// 0077): каждому найденному в PATH агенту (claude, codex; иначе generic)
+// ставится набор — скилы и агент исполнителя — туда, где агент его найдёт, и
+// подключается MCP-сервер проекта способом его привязки. Набор берётся с
 // инстанса — GET /v1/agent-kit, — поэтому его версия всегда совпадает с
 // версией сервера, а не CLI.
 //
 // Повторный запуск безвреден: то, что уже стоит, не трогается. Правку
-// человека clab узнаёт по манифесту .claude/clab-kit.json (sha256 каждого
+// человека clab узнаёт по манифесту рядом с набором (sha256 каждого
 // поставленного файла) и без --force не перезаписывает. Токенов в файлах
-// нет: токен уходит только аргументом в claude mcp add, в его локальную
-// конфигурацию вне репозитория.
+// нет: у Claude Code токен уходит аргументом в claude mcp add (в его
+// локальную конфигурацию вне репозитория), у Codex — вообще не уходит:
+// сервер читает его из переменной окружения SDLC_TOKEN.
+//
+// Файл агента чужой: clab не пишет своих ключей в .claude/settings*.json и
+// в config.toml Codex. Исключения — штатная запись MCP-сервера и, по
+// явному --trust, запись доверия проекту.
 
 import (
 	"bytes"
@@ -31,7 +38,7 @@ import (
 	"strings"
 )
 
-// kitManifest — имя манифеста рядом с набором.
+// kitManifest — имя манифеста рядом с набором Claude.
 const kitManifest = "clab-kit.json"
 
 // Действия с файлами набора; те же слова — в --json.
@@ -43,24 +50,66 @@ const (
 	fileSkipModified = "skip-modified"
 )
 
-// Действия с MCP-сервером. check — только в --dry-run: claude там не
+// Действия с MCP-сервером. check — только в --dry-run: агент там не
 // зовётся, и что именно будет (добавить или заменить), решит настоящий
-// запуск.
+// запуск. manual — запись есть и ведёт на другой адрес, а чужой файл
+// настроек clab не правит. failed — подключение не удалось.
 const (
 	mcpAdded     = "added"
 	mcpUnchanged = "unchanged"
 	mcpReplaced  = "replaced"
 	mcpSkipped   = "skipped"
 	mcpCheck     = "check"
+	mcpManual    = "manual"
+	mcpFailed    = "failed"
 )
 
+// kitEntry — файл набора с содержимым и суммой.
+type kitEntry struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	SHA256  string `json:"sha256"`
+}
+
+// kitLayout — где привязка кладёт набор: пути от корня проекта.
+type kitLayout struct {
+	Manifest  string `json:"manifest"`
+	SkillsDir string `json:"skills_dir"`
+	AgentsDir string `json:"agents_dir"`
+}
+
+// kitBinding — из привязки набору нужны место и готовые файлы; признак и
+// таблицу уровней читает parseBindings.
+type kitBinding struct {
+	Name  string     `json:"name"`
+	Kit   *kitLayout `json:"kit"`
+	Files []kitEntry `json:"files"`
+}
+
 type agentKit struct {
-	Version string `json:"version"`
-	Files   []struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-		SHA256  string `json:"sha256"`
-	} `json:"files"`
+	Version string     `json:"version"`
+	Files   []kitEntry `json:"files"`
+	Core    *struct {
+		Skills []kitEntry `json:"skills"`
+	} `json:"core"`
+	RawBindings json.RawMessage `json:"bindings"`
+
+	// Bindings — привязки с местом и файлами; пусто у сервера до
+	// CLAB-417. Levels — привязки для таблицы моделей.
+	Bindings []kitBinding   `json:"-"`
+	Levels   []agentBinding `json:"-"`
+}
+
+func (k *agentKit) binding(name string) *kitBinding {
+	if k == nil {
+		return nil
+	}
+	for i := range k.Bindings {
+		if k.Bindings[i].Name == name {
+			return &k.Bindings[i]
+		}
+	}
+	return nil
 }
 
 type kitState struct {
@@ -92,22 +141,33 @@ type setupReport struct {
 	// (решение 0077, п. 6); пустой список — --no-marker.
 	Marker []markerAction `json:"marker"`
 	Docs   string         `json:"docs"`
-	// Config — только у --agent other: конфигурация для ручного
-	// подключения, с тем же заголовком, что печатает clab mcp config.
+	// Config — у generic: конфигурация для ручного подключения, с тем же
+	// заголовком, что печатает clab mcp config, но токен — ${SDLC_TOKEN}.
 	Config map[string]any `json:"config,omitempty"`
+
+	// Поля выше — первый из агентов, как до выбора агента по привязкам;
+	// Agents — все поставленные.
+	Agents []*agentReport `json:"agents"`
+	// AgentSettingsVersion — активная версия настройки агентов проекта;
+	// null — настройки нет и модели взяты из таблицы привязки.
+	AgentSettingsVersion *int         `json:"agent_settings_version"`
+	Trust                *trustReport `json:"trust,omitempty"`
+	Notes                []string     `json:"notes,omitempty"`
+	Warnings             []string     `json:"warnings,omitempty"`
 }
 
 func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, scope, agent, name string
-	var dryRun, force, plugin, noMarker bool
+	var dryRun, force, plugin, noMarker, trust bool
 	var markerFiles repeated
 	fs, err := flags("setup", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта; иначе SDLC_PROJECT или проект по git remote")
-		fs.StringVar(&scope, "scope", "local", "local — набор в .claude/ корня проекта и MCP для этого каталога; user — набор в ~/.claude/ и MCP везде; project — MCP в .mcp.json (только без токена)")
-		fs.StringVar(&agent, "agent", "claude", "claude — подключить Claude Code; other — только напечатать конфигурацию MCP для другого агента")
-		fs.StringVar(&name, "name", "sdlc", "имя MCP-сервера у агента")
-		fs.BoolVar(&dryRun, "dry-run", false, "показать, что будет сделано, ничего не меняя и не вызывая claude")
+		fs.StringVar(&scope, "scope", "", "у claude: local (по умолчанию) — набор в .claude/ корня проекта и MCP для этого каталога; user — набор в ~/.claude/ и MCP везде; project — MCP в .mcp.json (только без токена). У codex: user (по умолчанию) — MCP в ~/.codex/config.toml; project — MCP в .codex/config.toml корня проекта (без токена; Codex читает его у доверенного проекта)")
+		fs.StringVar(&agent, "agent", "auto", "auto — каждый найденный в PATH агент (claude, codex), а если ни одного — generic; claude, codex — только он; generic (прежнее other) — ядро набора в .agents/skills и печать конфигурации MCP для любого другого агента")
+		fs.StringVar(&name, "name", "", "имя MCP-сервера у агента; по умолчанию sdlc у claude и sdlc-<ключ проекта> у codex (--scope project у codex — sdlc)")
+		fs.BoolVar(&dryRun, "dry-run", false, "показать, что будет сделано, ничего не меняя и не вызывая агентов")
 		fs.BoolVar(&force, "force", false, "перезаписать и файлы набора, изменённые после установки")
+		fs.BoolVar(&trust, "trust", false, "codex: добавить в ~/.codex/config.toml (или $CODEX_HOME) запись доверия [projects.\"<корень проекта>\"] trust_level = \"trusted\" — только для каталога запуска; без флага clab её только подсказывает")
 		fs.Var(&markerFiles, "marker-file", "AGENTS.md или CLAUDE.md — писать блок привязки только в него; флаг можно повторять (по умолчанию — в каждый существующий, нет ни одного — создаётся AGENTS.md)")
 		fs.BoolVar(&noMarker, "no-marker", false, "не писать блок привязки каталога к проекту в AGENTS.md / CLAUDE.md")
 		fs.BoolVar(&plugin, "plugin", false, "только плагин Claude clab-plugin: вшит в clab, ставится в Claude в области user; без входа, проекта и сети, сочетается только с --dry-run")
@@ -122,20 +182,19 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 		return cmdSetupPlugin(ctx, dryRun)
 	}
 	switch scope {
-	case "local", "user", "project":
+	case "", "local", "user", "project":
 	default:
 		return fmt.Errorf("--scope: local, user или project")
 	}
-	switch agent {
-	case "claude", "other":
-	default:
-		return fmt.Errorf("--agent: claude или other")
-	}
-	if scope == "project" && c.token != "" {
-		return errProjectScopeToken
+	if agent, err = normalizeAgent(agent); err != nil {
+		return err
 	}
 	if noMarker && len(markerFiles) > 0 {
 		return fmt.Errorf("--no-marker и --marker-file вместе не задаются")
+	}
+	selected := selectAgents(agent)
+	if scope == "project" && c.token != "" && hasAgent(selected, agentClaude) {
+		return errProjectScopeToken
 	}
 	key, err := c.project(ctx, projectFlag)
 	if err != nil {
@@ -143,11 +202,12 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	}
 	mcpURL, headerName, headerValue := c.mcpEndpoint(key)
 	rep := &setupReport{
-		Project: key, URL: mcpURL, Name: name, Scope: scope, Agent: agent, DryRun: dryRun,
+		Project: key, URL: mcpURL, DryRun: dryRun, Agents: []*agentReport{},
 		Files: []fileAction{}, Marker: []markerAction{}, Docs: c.origin + "/docs?project=" + url.QueryEscape(key),
 	}
 	// Блок привязки — в каталог запуска, не в корень git (решение 0077,
-	// п. 6). План — до любой записи: неверное имя файла ничего не меняет.
+	// п. 6). План — до любой записи: неверное имя файла и неверный --agent
+	// ничего не меняют.
 	if !noMarker {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -158,78 +218,93 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 		}
 	}
 
-	if agent == "other" {
-		// Другой агент: ни claude, ни файлов — конфигурация и страница.
-		rep.MCP = mcpSkipped
-		rep.Config = mcpConfig(name, mcpURL, headerName, headerValue)
-		if !dryRun {
-			if err := applySetupMarker(rep.Marker); err != nil {
-				return err
-			}
-		}
-		if jsonOut {
-			return print(rep)
-		}
-		raw, _ := json.MarshalIndent(rep.Config, "", "  ")
-		printSetupMarker(rep.Marker, dryRun)
-		fmt.Printf("Конфигурация MCP проекта %s для вашего агента:\n%s\n", key, raw)
-		fmt.Printf("Инструкция: %s\n", rep.Docs)
-		return nil
-	}
-
 	kit, serverVersion, err := c.fetchAgentKit(ctx)
 	if err != nil {
 		return err
 	}
 	rep.ServerVersion = serverVersion
-	var root, dir string
-	var plan []fileAction
-	var next []byte
-	if kit != nil {
-		if root, dir, err = kitDir(ctx, scope); err != nil {
-			return err
-		}
-		rep.KitVersion, rep.KitDir = &kit.Version, dir
-		if plan, next, err = planKit(dir, kit, force); err != nil {
-			return err
-		}
-		rep.Files = plan
-	} else if scope != "user" {
-		root, _ = projectRoot(ctx)
+	if kit != nil && len(kit.Bindings) == 0 {
+		rep.Notes = append(rep.Notes, fmt.Sprintf("привязки агентов недоступны: сервер %s их не раздаёт (они приходят с выпуска с привязками; этот clab — %s). Набор Claude ставится из прежнего списка файлов; для Codex обновите инстанс.",
+			dash(serverVersion), version))
 	}
 
-	if !dryRun && kit != nil {
-		if err := applyKit(dir, plan, next); err != nil {
+	// План всех агентов — до любой записи: ошибка пути или суммы не
+	// оставляет половину набора.
+	runs := make([]*agentRun, 0, len(selected))
+	for _, sel := range selected {
+		r := &agentRun{path: sel.path, rep: &agentReport{
+			Agent: sel.name, Program: agentPrograms[sel.name], Found: sel.path != "",
+			Scope: agentScope(sel.name, scope), Name: agentMCPName(sel.name, scope, name, key),
+			Files: []fileAction{}, Start: agentStart(sel.name, key),
+		}}
+		if err := r.planKit(ctx, kit, serverVersion, force); err != nil {
 			return err
 		}
+		runs = append(runs, r)
 	}
+
 	if !dryRun {
+		for _, r := range runs {
+			if r.plan.hasKit {
+				if err := applyKit(r.plan.dir, r.plan.manifest, r.rep.Files, r.plan.next); err != nil {
+					return err
+				}
+			}
+		}
 		if err := applySetupMarker(rep.Marker); err != nil {
 			return err
 		}
 	}
 
-	claude, lookErr := exec.LookPath("claude")
-	switch {
-	case lookErr != nil:
-		rep.MCP = mcpSkipped
-	case dryRun:
-		rep.MCP = mcpCheck
-	default:
-		header := headerName + ": " + headerValue
-		if rep.MCP, rep.MCPPrevious, err = connectMCP(ctx, claude, root, scope, name, mcpURL, header, headerValue); err != nil {
-			return err
+	var errs []error
+	for _, r := range runs {
+		if err := r.connect(ctx, c, dryRun, mcpURL, headerName, headerValue); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	if err := emit(rep, func() error { printSetup(rep, dir); return nil }); err != nil {
+	var codex *agentRun
+	for _, r := range runs {
+		if r.rep.Agent == agentCodex {
+			codex = r
+		}
+	}
+	switch {
+	case trust && codex == nil:
+		rep.Warnings = append(rep.Warnings, "--trust относится к Codex, а среди агентов его нет: ничего не записано")
+	case codex != nil && codex.failure == nil:
+		root := codex.plan.dir
+		if root == "" {
+			root, _ = projectRoot(ctx)
+		}
+		tr, err := setupTrust(ctx, root, trust, dryRun)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		rep.Trust = tr
+	}
+
+	fillModels(ctx, c, key, kit, runs, rep)
+	for _, r := range runs {
+		rep.Agents = append(rep.Agents, r.rep)
+	}
+	first := runs[0].rep
+	rep.Agent, rep.Name, rep.Scope = first.Agent, first.Name, first.Scope
+	if len(runs) > 1 {
+		names := make([]string, 0, len(runs))
+		for _, r := range runs {
+			names = append(names, r.rep.Agent)
+		}
+		rep.Agent = strings.Join(names, ",")
+	}
+	rep.KitVersion, rep.KitDir, rep.Files = first.KitVersion, first.KitDir, first.Files
+	rep.MCP, rep.MCPPrevious, rep.Config = first.MCP, first.MCPPrevious, first.Config
+	codexOnlyClaudeMD(rep, runs)
+
+	if err := emit(rep, func() error { printSetup(rep); return nil }); err != nil {
 		return err
 	}
-	if lookErr != nil && !dryRun {
-		raw, _ := json.MarshalIndent(mcpConfig(name, mcpURL, headerName, headerValue), "", "  ")
-		return fmt.Errorf("claude не найден в PATH: MCP не подключён. Конфигурация для агента:\n%s", raw)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // fetchAgentKit — набор с инстанса. Сервер старше ручки (404) — не ошибка:
@@ -252,12 +327,50 @@ func (c *Client) fetchAgentKit(ctx context.Context) (*agentKit, string, error) {
 		if err := kitPathValid(f.Path); err != nil {
 			return nil, "", err
 		}
-		sum := sha256.Sum256([]byte(f.Content))
-		if hex.EncodeToString(sum[:]) != f.SHA256 {
-			return nil, "", fmt.Errorf("набор агента: sha256 файла %s не сходится с содержимым — ничего не записано", f.Path)
+		if err := checkSum(f); err != nil {
+			return nil, "", err
+		}
+	}
+	if kit.Core != nil {
+		for _, f := range kit.Core.Skills {
+			if err := kitPathValid(f.Path); err != nil {
+				return nil, "", err
+			}
+			if err := checkSum(f); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+	// Привязки терпимы к форме: непонятные считаются отсутствующими, как у
+	// сервера прежней версии; а путь наружу или чужой каталог — отказ.
+	if len(kit.RawBindings) > 0 {
+		if json.Unmarshal(kit.RawBindings, &kit.Bindings) != nil {
+			kit.Bindings = nil
+		}
+		kit.Levels = parseBindings(kit.RawBindings)
+	}
+	for _, b := range kit.Bindings {
+		if b.Kit == nil {
+			continue
+		}
+		if err := checkBindingKit(b); err != nil {
+			return nil, "", err
+		}
+		for _, f := range b.Files {
+			if err := checkSum(f); err != nil {
+				return nil, "", err
+			}
 		}
 	}
 	return &kit, kit.Version, nil
+}
+
+func checkSum(f kitEntry) error {
+	sum := sha256.Sum256([]byte(f.Content))
+	if hex.EncodeToString(sum[:]) != f.SHA256 {
+		return fmt.Errorf("набор агента: sha256 файла %s не сходится с содержимым — ничего не записано", f.Path)
+	}
+	return nil
 }
 
 // kitPathValid — набор пишет только скилы и агентов внутри своего каталога:
@@ -283,7 +396,7 @@ var projectRoot = func(ctx context.Context) (string, error) {
 	return os.Getwd()
 }
 
-// kitDir — куда ставится набор: .claude/ корня проекта или каталог
+// kitDir — куда ставится набор Claude: .claude/ корня проекта или каталог
 // конфигурации Claude Code пользователя (~/.claude, CLAUDE_CONFIG_DIR).
 func kitDir(ctx context.Context, scope string) (root, dir string, err error) {
 	if scope == "user" {
@@ -315,15 +428,35 @@ func fileSum(p string) (string, bool, error) {
 	return hex.EncodeToString(sum[:]), true, nil
 }
 
-// planKit сверяет набор с диском и манифестом прошлой установки. Файл,
+// kitOwner описывает, чем набор владеет в каталоге: owns решает, чей путь
+// из манифеста — наш и его можно удалить, если он ушёл из набора;
+// keepForeign сохраняет в новом манифесте чужие записи (общий манифест
+// Codex и generic); confine не пускает записи и удаления через ссылки
+// наружу корня.
+type kitOwner struct {
+	owns        func(string) bool
+	keepForeign bool
+	confine     bool
+}
+
+// claudeOwner — набор Claude: пути skills/ и agents/ от .claude/.
+var claudeOwner = kitOwner{owns: func(p string) bool { return kitPathValid(p) == nil }}
+
+// planKit — набор Claude (пути от каталога .claude/).
+func planKit(dir string, kit *agentKit, force bool) ([]fileAction, []byte, error) {
+	return planKitFiles(dir, kitManifest, kit.Version, kit.Files, claudeOwner, force)
+}
+
+// planKitFiles сверяет набор с диском и манифестом прошлой установки. Файл,
 // который на диске не совпадает ни с набором, ни с тем, что ставили в прошлый
 // раз, — правка человека (или его собственный файл с тем же именем): без
 // --force он не трогается. next — новый манифест; nil — он не изменился.
-func planKit(dir string, kit *agentKit, force bool) ([]fileAction, []byte, error) {
+func planKitFiles(dir, manifest, kitVersion string, files []kitEntry, o kitOwner, force bool) ([]fileAction, []byte, error) {
+	manifestPath := filepath.Join(dir, filepath.FromSlash(manifest))
 	old := kitState{Files: map[string]string{}}
-	if raw, err := os.ReadFile(filepath.Join(dir, kitManifest)); err == nil {
+	if raw, err := os.ReadFile(manifestPath); err == nil {
 		if err := json.Unmarshal(raw, &old); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", filepath.Join(dir, kitManifest), err)
+			return nil, nil, fmt.Errorf("%s: %w", manifestPath, err)
 		}
 		if old.Files == nil {
 			old.Files = map[string]string{}
@@ -333,9 +466,14 @@ func planKit(dir string, kit *agentKit, force bool) ([]fileAction, []byte, error
 	}
 
 	plan := []fileAction{}
-	nm := kitState{Version: kit.Version, Files: map[string]string{}}
+	nm := kitState{Version: kitVersion, Files: map[string]string{}}
 	inKit := map[string]bool{}
-	for _, f := range kit.Files {
+	for _, f := range files {
+		if o.confine {
+			if err := confined(dir, f.Path); err != nil {
+				return nil, nil, err
+			}
+		}
 		inKit[f.Path] = true
 		nm.Files[f.Path] = f.SHA256
 		disk, exists, err := fileSum(filepath.Join(dir, filepath.FromSlash(f.Path)))
@@ -356,15 +494,23 @@ func planKit(dir string, kit *agentKit, force bool) ([]fileAction, []byte, error
 		plan = append(plan, a)
 	}
 	gone := make([]string, 0)
-	for p := range old.Files {
-		if !inKit[p] {
-			gone = append(gone, p)
+	for p, sum := range old.Files {
+		if inKit[p] {
+			continue
 		}
+		if !o.owns(p) {
+			if o.keepForeign {
+				nm.Files[p] = sum
+			}
+			continue
+		}
+		gone = append(gone, p)
 	}
 	sort.Strings(gone)
 	for _, p := range gone {
-		if kitPathValid(p) != nil {
-			// Чужая строка в манифесте: удалять по ней ничего нельзя.
+		if o.confine && confined(dir, p) != nil {
+			// Запись манифеста ведёт через ссылку наружу: удалять по ней
+			// ничего нельзя.
 			continue
 		}
 		disk, exists, err := fileSum(filepath.Join(dir, filepath.FromSlash(p)))
@@ -387,13 +533,13 @@ func planKit(dir string, kit *agentKit, force bool) ([]fileAction, []byte, error
 		return nil, nil, err
 	}
 	raw = append(raw, '\n')
-	if cur, err := os.ReadFile(filepath.Join(dir, kitManifest)); err == nil && bytes.Equal(cur, raw) {
+	if cur, err := os.ReadFile(manifestPath); err == nil && bytes.Equal(cur, raw) {
 		raw = nil
 	}
 	return plan, raw, nil
 }
 
-func applyKit(dir string, plan []fileAction, next []byte) error {
+func applyKit(dir, manifest string, plan []fileAction, next []byte) error {
 	for _, a := range plan {
 		target := filepath.Join(dir, filepath.FromSlash(a.Path))
 		switch a.Action {
@@ -414,7 +560,7 @@ func applyKit(dir string, plan []fileAction, next []byte) error {
 		}
 	}
 	if next != nil {
-		return writeAtomic(filepath.Join(dir, kitManifest), next)
+		return writeAtomic(filepath.Join(dir, filepath.FromSlash(manifest)), next)
 	}
 	return nil
 }
@@ -514,61 +660,4 @@ func parseMCPGet(out string) (mcpURL, scope string) {
 		}
 	}
 	return mcpURL, scope
-}
-
-var fileLabels = map[bool]map[string]string{
-	false: {fileCreate: "создан", fileUpdate: "обновлён", fileDelete: "удалён", fileSkipModified: "пропущен"},
-	true:  {fileCreate: "создать", fileUpdate: "обновить", fileDelete: "удалить", fileSkipModified: "пропустить"},
-}
-
-func printSetup(rep *setupReport, dir string) {
-	if rep.DryRun {
-		fmt.Println("--dry-run: ничего не записано, claude не вызывался.")
-	}
-	fmt.Printf("Проект:  %s\n", rep.Project)
-
-	mcp := map[string]string{
-		mcpAdded:     "подключён",
-		mcpUnchanged: "уже подключён",
-		mcpReplaced:  "заменён (был " + rep.MCPPrevious + ")",
-		mcpSkipped:   "не подключён: claude не найден в PATH",
-		mcpCheck:     "будет проверен: добавлен, если не подключён, или заменён, если адрес другой",
-	}[rep.MCP]
-	if rep.DryRun && rep.MCP == mcpSkipped {
-		mcp = "не будет подключён: claude не найден в PATH"
-	}
-	fmt.Printf("MCP:     %s → %s (%s): %s\n", rep.Name, rep.URL, rep.Scope, mcp)
-
-	changed := false
-	if rep.KitVersion == nil {
-		fmt.Printf("Набор:   сервер %s не раздаёт набор агента — он приходит с сервера начиная с выпуска с clab setup (этот clab — %s). Обновите инстанс и запустите clab setup ещё раз.\n",
-			dash(rep.ServerVersion), version)
-	} else {
-		fmt.Printf("Набор:   %s → %s\n", *rep.KitVersion, dir)
-		labels := fileLabels[rep.DryRun]
-		for _, f := range rep.Files {
-			if f.Action == fileUnchanged {
-				continue
-			}
-			changed = true
-			if f.Action == fileSkipModified {
-				fmt.Printf("  %-10s %s — изменён после установки; --force перезапишет\n", labels[f.Action], filepath.Join(dir, filepath.FromSlash(f.Path)))
-				continue
-			}
-			fmt.Printf("  %-10s %s\n", labels[f.Action], f.Path)
-		}
-		if !changed {
-			fmt.Println("  файлы набора актуальны")
-		}
-	}
-	printSetupMarker(rep.Marker, rep.DryRun)
-	for _, a := range rep.Marker {
-		if a.Action == markerCreate || a.Action == markerUpdate {
-			changed = true
-		}
-	}
-	if !rep.DryRun && rep.MCP == mcpUnchanged && rep.KitVersion != nil && !changed {
-		fmt.Println("Уже актуально.")
-	}
-	fmt.Printf("Дальше: в Claude Code — /clab-work %s-<номер>; инструкция — %s\n", rep.Project, rep.Docs)
 }

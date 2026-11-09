@@ -37,6 +37,9 @@ type setupServer struct {
 	kit     map[string]any // nil — сервер без /v1/agent-kit (404)
 	version string
 	repos   map[string]string // owner/name → ключ проекта
+	// settings — тело ответа GET /v1/projects/{key}/agent-settings; пусто —
+	// 404, как у сервера без настройки агентов.
+	settings string
 }
 
 func (s *setupServer) start(t *testing.T) *Client {
@@ -50,6 +53,12 @@ func (s *setupServer) start(t *testing.T) *Client {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(s.kit)
+		case "/v1/projects/ACME/agent-settings", "/v1/projects/ABC/agent-settings", "/v1/projects/XYZ/agent-settings":
+			if s.settings == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(s.settings))
 		case "/v1/instance":
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": s.version})
 		case "/v1/projects":
@@ -457,10 +466,15 @@ func TestSetupOtherAgent(t *testing.T) {
 		!strings.Contains(out, c.origin+"/docs") {
 		t.Fatalf("вывод:\n%s", out)
 	}
+	// CLAB-418: other — псевдоним generic, токена в конфигурации нет.
+	if strings.Contains(out, setupToken) || !strings.Contains(out, "${SDLC_TOKEN}") {
+		t.Fatalf("токен в выводе --agent other:\n%s", out)
+	}
 }
 
-// Критерий 11: claude нет в PATH — набор поставлен, MCP нет, конфигурация для
-// ручного подключения и ненулевой код.
+// CLAB-418 AC-4: ни одного агента в PATH — не отказ, а generic (прежний
+// ответ «claude не найден» остался за явным --agent claude): код 0, MCP не
+// подключён, конфигурация напечатана, файлов Claude нет.
 func TestSetupWithoutClaude(t *testing.T) {
 	withJSON(t, false)
 	root := withRoot(t)
@@ -468,14 +482,26 @@ func TestSetupWithoutClaude(t *testing.T) {
 	c := (&setupServer{kit: kitV1}).start(t)
 
 	out, _, err := runSetup(t, c, "--project", "ACME")
+	if err != nil {
+		t.Fatalf("без агентов: %v", err)
+	}
+	if exists(filepath.Join(root, ".claude")) {
+		t.Fatal("без claude записан набор Claude")
+	}
+	for _, want := range []string{"не подключён", `"mcpServers"`, "${SDLC_TOKEN}", "clab guide"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в выводе нет %q:\n%s", want, out)
+		}
+	}
+
+	// Явный claude без программы — как раньше: набор поставлен, MCP нет,
+	// конфигурация в ошибке.
+	_, _, err = runSetup(t, c, "--project", "ACME", "--agent", "claude")
 	if err == nil || !strings.Contains(err.Error(), "claude не найден") || !strings.Contains(err.Error(), `"mcpServers"`) {
-		t.Fatalf("без claude: %v", err)
+		t.Fatalf("--agent claude без claude: %v", err)
 	}
 	if !exists(filepath.Join(root, ".claude/skills/clab-work/SKILL.md")) {
 		t.Fatal("набор не поставлен")
-	}
-	if !strings.Contains(out, "не подключён") {
-		t.Fatalf("вывод:\n%s", out)
 	}
 }
 
@@ -630,10 +656,14 @@ func TestSetupHelp(t *testing.T) {
 	if err != flag.ErrHelp {
 		t.Fatalf("--help: %v", err)
 	}
-	for _, f := range []string{"-project", "-scope", "-agent", "-name", "-dry-run", "-force"} {
+	for _, f := range []string{"-project", "-scope", "-agent", "-name", "-dry-run", "-force", "-trust", "-marker-file", "-no-marker"} {
 		if !strings.Contains(errOut, f) {
 			t.Errorf("clab setup --help без %s:\n%s", f, errOut)
 		}
+	}
+	// CLAB-418 AC-1: по умолчанию --agent auto.
+	if !strings.Contains(errOut, `(default "auto")`) || !strings.Contains(errOut, "codex") || !strings.Contains(errOut, "generic") {
+		t.Errorf("справка не называет --agent auto, codex и generic:\n%s", errOut)
 	}
 }
 
