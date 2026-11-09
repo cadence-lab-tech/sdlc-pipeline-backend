@@ -274,8 +274,8 @@ func cmdExport(ctx context.Context, c *Client, args []string) error {
 	var force bool
 	_, err := flags("export", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
-		fs.StringVar(&dir, "dir", "", "выгрузить каталогом: bundle.json, roles/<ключ роли>/ (role.json и документы <имя>.md) и instructions/<ключ>/ (instruction.json и v<N>.md)")
-		fs.BoolVar(&force, "force", false, "с --dir: заменить bundle.json, roles/ и instructions/ в непустом каталоге")
+		fs.StringVar(&dir, "dir", "", "выгрузить каталогом: bundle.json, roles/<ключ роли>/ (role.json и документы <имя>.md), instructions/<ключ>/ (instruction.json и v<N>.md) и agent-settings.json (настройка агентов, если есть активная)")
+		fs.BoolVar(&force, "force", false, "с --dir: заменить bundle.json, roles/, instructions/ и agent-settings.json в непустом каталоге")
 	})
 	if err != nil {
 		return err
@@ -337,7 +337,7 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
 		fs.StringVar(&file, "file", "", "связка JSON; - читает stdin")
 		fs.StringVar(&from, "from", "", "взять связку из проекта-шаблона вместо файла")
-		fs.StringVar(&dir, "dir", "", "каталог связки: bundle.json и roles/<ключ роли>/ (role.json и документы <имя>.md)")
+		fs.StringVar(&dir, "dir", "", "каталог связки: bundle.json, roles/<ключ роли>/ (role.json и документы <имя>.md) и agent-settings.json (настройка агентов)")
 		fs.StringVar(&to, "to", "", "применить к нескольким проектам через запятую")
 		fs.BoolVar(&dryRun, "dry-run", false, "только отчёт, без изменений")
 	})
@@ -390,6 +390,8 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 		}
 	}
 
+	// Настройка агентов: сервер прежней версии её теряет, отчёт это выдаёт.
+	sentSettings := bundleCarriesAgentSettings(bundle)
 	reports := make([]map[string]any, 0, len(targets))
 	for _, key := range targets {
 		path := "/projects/" + url.PathEscape(key) + "/import"
@@ -404,6 +406,7 @@ func cmdImport(ctx context.Context, c *Client, args []string) error {
 			continue
 		}
 		out["project"] = key
+		warnLostAgentSettings(key, sentSettings, out)
 		reports = append(reports, out)
 	}
 	if len(reports) == 1 {
