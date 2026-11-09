@@ -36,6 +36,7 @@ import (
 	"io/fs"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -150,6 +151,7 @@ var (
 	knownMCPMethods = []string{"claude-mcp-add", "codex-config-toml"}
 	knownPlacements = []string{"agent-frontmatter", "launch"}
 	knownRunSlots   = []string{"{model}", "{effort}", "{mcp_config}", "{mcp_url}", "{config_dir}", "{allowed_tools}", "{prompt}"}
+	runSlot         = regexp.MustCompile(`\{[a-z_]+\}`)
 )
 
 var (
@@ -428,7 +430,7 @@ func decodeFields(fields map[string]json.RawMessage, b *Binding) error {
 		return fmt.Errorf("поле run: нужен null или непустой массив строк")
 	}
 	for _, arg := range b.Run {
-		for _, slot := range regexp.MustCompile(`\{[a-z_]+\}`).FindAllString(arg, -1) {
+		for _, slot := range runSlot.FindAllString(arg, -1) {
 			if !contains(knownRunSlots, slot) {
 				return fmt.Errorf("поле run: подстановка %s — известны %s", slot, strings.Join(knownRunSlots, " "))
 			}
@@ -741,12 +743,7 @@ func relPath(p string) bool {
 }
 
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 func hasEntry(list []coreEntry, name string) bool {
