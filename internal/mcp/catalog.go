@@ -60,6 +60,7 @@ func (s *Server) registerCatalogTools() {
 		s.getRole)
 	s.registerRoleProposalTools()
 	s.registerInstructionTools()
+	s.registerAgentSettingsTools()
 	add(s, "sdlc_put_document",
 		"Положить проектный документ: содержимым, ссылкой или путём в репозитории. "+
 			"Тот же kind и title — обновление.",

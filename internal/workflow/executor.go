@@ -49,6 +49,9 @@ func init() {
 		// Чтение правил.
 		"sdlc_get_role", "sdlc_list_documents", "sdlc_get_document",
 		"sdlc_list_instructions", "sdlc_get_instruction",
+		// Настройка агентов проекта — чтение (решение 0077, п. 4.9); запись
+		// закрыта умолчанием.
+		"sdlc_get_agent_settings", "sdlc_list_agent_settings_versions",
 		// Запись в круг своей задачи (RequireWriteCircle, RequireLink).
 		"sdlc_update_task", "sdlc_link_tasks", "sdlc_assign_task",
 		// Порядок детей своей задачи (решение 0075, RequireRankCircle).
@@ -67,6 +70,9 @@ func init() {
 		RESTAction("GET", "/v1/projects/:projectKey/instructions"),
 		RESTAction("GET", "/v1/projects/:projectKey/instructions/:instructionKey"),
 		RESTAction("GET", "/v1/projects/:projectKey/instructions/:instructionKey/versions/:version"),
+		RESTAction("GET", "/v1/projects/:projectKey/agent-settings"),
+		RESTAction("GET", "/v1/projects/:projectKey/agent-settings/versions"),
+		RESTAction("GET", "/v1/projects/:projectKey/agent-settings/versions/:version"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents/:documentID"),
 		RESTAction("GET", "/v1/projects/:projectKey/documents/:documentID/content"),

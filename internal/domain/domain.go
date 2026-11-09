@@ -845,6 +845,36 @@ type StageRun struct {
 	EnteredViaTransitionID *uuid.UUID `json:"entered_via_transition_id,omitempty"`
 	// Когда воркер заметил просрочку и написал stage.overdue.
 	OverdueAt *time.Time `json:"overdue_at,omitempty"`
+	// Снимок версии настройки агентов проекта при захвате (решение 0077,
+	// п. 4.4): id — для стоимости по прайсу версии (CLAB-426), номер — для
+	// карточки. nil — настройки не было или прогон взят до снимка.
+	AgentSettingsVersionID *uuid.UUID `json:"-"`
+	AgentSettingsVersion   *int       `json:"agent_settings_version"`
+}
+
+// Состояния версии настройки агентов проекта (решение 0077, п. 4.3) — те же,
+// что у версии цикла (решение 0016).
+const (
+	AgentSettingsDraft   = "draft"
+	AgentSettingsActive  = "active"
+	AgentSettingsRetired = "retired"
+)
+
+// AgentSettingsVersion — версия настройки агентов проекта: какие модели и
+// усилие стоят на уровнях у каждого агента и по какому прайсу считаются
+// суммы. Документ проверяет движок (workflow.ValidateAgentSettings); правится
+// только черновик.
+type AgentSettingsVersion struct {
+	ID          uuid.UUID       `json:"id"`
+	ProjectID   uuid.UUID       `json:"project_id"`
+	Version     int             `json:"version"`
+	State       string          `json:"state"`
+	Document    json.RawMessage `json:"document"`
+	Changelog   *string         `json:"changelog"`
+	CreatedBy   *string         `json:"created_by"`
+	CreatedAt   time.Time       `json:"created_at"`
+	ActivatedBy *string         `json:"activated_by"`
+	ActivatedAt *time.Time      `json:"activated_at"`
 }
 
 // LeaseHeld — держит ли прогон живую аренду на момент now.
