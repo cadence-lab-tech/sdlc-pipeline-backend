@@ -5,8 +5,11 @@ description: Change the roles or the cycle of a Cadence Lab project — a role's
 
 # Roles and cycle of a project
 
-Request: `$ARGUMENTS`. The project comes from `git remote`; outside a
-repository of the project — `SDLC_PROJECT=<KEY>`.
+The request is the text this skill was invoked with. `clab` finds the
+project itself — `--project`, then `SDLC_PROJECT`, then the binding line in
+`AGENTS.md` or `CLAUDE.md`, then the `git remote` of the current directory;
+where it finds none, bind the directory (`clab setup --project <KEY>`) or
+pass `--project <KEY>` to the commands that take a project.
 
 Roles and cycles are project data. They change by versions, never in
 place: a role gets a new version of its whole set of documents, a cycle gets
@@ -21,8 +24,8 @@ Two kinds of documents, do not mix them up:
 
 - **role documents** — `documents` inside a role (`main.md`, `git.md`, …):
   ordered parts of one role's rules, delivered only to the executor of that
-  role. They are not skills or agents of Claude Code and never go into
-  `.claude/skills` or `.claude/agents`;
+  role. They are not skills or agents of your agent and never go into the
+  skills or agents folder of the kit;
 - **project documents** — `documents` at the top of the bundle (guidelines,
   architecture, ADRs): read by every role.
 
@@ -195,4 +198,4 @@ Do not edit an active cycle or a role version "in place" through the
 database. Do not hard-code a role for a particular status anywhere. Do not
 delete roles that statuses of active cycles refer to. Do not change rules
 silently: a cycle change is a change of the team's agreements. Do not put
-role documents into `.claude/skills` or `.claude/agents`.
+role documents into the skills or agents folder of the agent's kit.

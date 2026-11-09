@@ -5,8 +5,11 @@ description: Show the state of work in Cadence Lab — the queue, epics and task
 
 # State of work in Cadence Lab
 
-Request: `$ARGUMENTS`. The project comes from `git remote`; outside a
-repository of the project — `SDLC_PROJECT=<KEY>`.
+The request is the text this skill was invoked with. `clab` finds the
+project itself — `--project`, then `SDLC_PROJECT`, then the binding line in
+`AGENTS.md` or `CLAUDE.md`, then the `git remote` of the current directory;
+where it finds none, bind the directory (`clab setup --project <KEY>`) or
+pass `--project <KEY>` to the commands that take a project.
 
 ## Overview
 

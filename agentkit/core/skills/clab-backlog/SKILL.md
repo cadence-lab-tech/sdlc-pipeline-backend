@@ -5,8 +5,11 @@ description: Create an epic or tasks in Cadence Lab with a breakdown and an orde
 
 # Cadence Lab backlog
 
-Request: `$ARGUMENTS`. The project comes from `git remote`; outside a
-repository of the project put `SDLC_PROJECT=<KEY>` before the commands.
+The request is the text this skill was invoked with. `clab` finds the
+project itself — `--project`, then `SDLC_PROJECT`, then the binding line in
+`AGENTS.md` or `CLAUDE.md`, then the `git remote` of the current directory;
+where it finds none, bind the directory (`clab setup --project <KEY>`) or
+pass `--project <KEY>` to the commands that take a project.
 
 ## What to create
 

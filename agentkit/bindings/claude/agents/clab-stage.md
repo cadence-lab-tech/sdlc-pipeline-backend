@@ -39,3 +39,14 @@ hooks:
             echo 'clab without the task-token directory (clab under any name clab*, go run of cmd/clab or a script of the package). Every such call needs the prefix from the prompt: env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=<dir> <command>' >&2
             exit 2
 ---
+
+## Notes for Claude Code
+
+- The orchestrator is `/clab-run`; it starts you as a sub-agent of type
+  `clab-stage`, and the automatic check is the `PreToolUse` hook of this
+  definition. Claude Code runs it only in a trusted project folder, so it
+  is a safety net, not a boundary.
+- The skills and agents folders of the kit are `.claude/skills` and
+  `.claude/agents`: role documents never go there.
+- The session's temporary directory is the one Claude Code names in the
+  system prompt.
