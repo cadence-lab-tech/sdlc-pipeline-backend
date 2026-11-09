@@ -31,6 +31,14 @@ var stageSettingFields = []string{"model_level"}
 type Execution struct {
 	ModelLevel       *string `json:"model_level"`
 	ModelLevelSource string  `json:"model_level_source"`
+	// Номер версии-снимка настройки агентов проекта (решение 0077, п. 4.5);
+	// null — настройки не было. Отдаётся всегда: по его отсутствию клиент
+	// узнаёт сервер прежней версии.
+	AgentSettingsVersion *int `json:"agent_settings_version"`
+	// Модель уровня этапа у каждого агента версии-снимка; поля нет без
+	// уровня или версии, а пустой объект — версия без записи для уровня.
+	// Указатель — чтобы {} не съел omitempty.
+	Models *map[string]AgentModel `json:"models,omitempty"`
 }
 
 // checkModelLevel проверяет уровень на записи: пустая строка — «снять» или

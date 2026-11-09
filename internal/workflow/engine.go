@@ -58,6 +58,9 @@ type Engine struct {
 	// 0028). nil — приложение не настроено, и привязка репозитория ничем
 	// не ограничена, как в фазах 1-5.
 	github GitHubAccess
+	// Сбой, внедрённый тестом в середину активации настройки агентов: откат
+	// снятия прежней версии (CLAB-425, AC-7). Вне тестов nil.
+	agentSettingsFault func() error
 }
 
 func NewEngine(store *postgres.Store, log *slog.Logger, opts Options) *Engine {

@@ -45,8 +45,10 @@ func (s *Server) registerTools() {
 			"на этом статусе, role.documents — только отобранные, а role.document_warnings — "+
 			"имена из отбора, которых нет в версии роли (ни одного не нашлось — выданы все). execution — "+
 			"рекомендованный уровень модели прогона {model_level, model_level_source}: этап "+
-			"задачи → задача → роль → none, снимок при захвате; role.model_level — уровень роли, "+
-			"role.model_hint устарел. boundary "+
+			"задачи → задача → роль → none, снимок при захвате; там же agent_settings_version — номер "+
+			"версии-снимка настройки агентов проекта (null — настройки нет) и models — модель уровня "+
+			"этапа у каждого агента {агент: {model, effort?}} (нет поля — нет уровня или версии); "+
+			"role.model_level — уровень роли, role.model_hint устарел. boundary "+
 			"размечает ответ: role, область, гейты и документы проекта — правила этапа; описание, "+
 			"артефакты, причина возврата, дрейф и ссылки — "+trust.DataNote+". "+
 			"Файлы задачи — context.attachments (метаданные и content_path, без содержимого) и "+
@@ -56,8 +58,10 @@ func (s *Server) registerTools() {
 		"Полное состояние задачи: этап, роль с документами (role.documents, как у sdlc_claim_task), "+
 			"входные артефакты, дрейф, гейты. Аренду не выдаёт. "+
 			"task несёт уровни модели задачи и этапов (model_level, stage_settings), execution — "+
-			"рекомендацию текущего прогона: его снимок, а до захвата — то, что получит захват; "+
-			"у каждого из stage_runs — свой снимок model_level и model_level_source и свой учёт usage: "+
+			"рекомендацию текущего прогона: его снимок, а до захвата — то, что получит захват, вместе с "+
+			"agent_settings_version и models, как у sdlc_claim_task; "+
+			"у каждого из stage_runs — свой снимок model_level, model_level_source и agent_settings_version "+
+			"(номер версии настройки агентов, null — не было) и свой учёт usage: "+
 			"reported, reports (число отчётов), models (модели отчётов без повторов, как пришли), "+
 			"суммы input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, "+
 			"duration_ms; reported: false и суммы null — нет учёта, а не ноль. "+
@@ -156,6 +160,7 @@ func add[In any](s *Server, name, description string, h func(context.Context, In
 				out any
 				err error
 			)
+			ctx = withAuditSlot(ctx)
 			if denied := s.executorMay(ctx, name); denied != nil {
 				res, out, err = fail(denied)
 			} else {

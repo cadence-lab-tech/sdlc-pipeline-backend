@@ -32,12 +32,18 @@ func (s *Server) recordCall(ctx context.Context, tool string, in any, res *sdk.C
 		SignalID:   uuidArg(args, "signal_id"),
 		StageRunID: uuidArg(args, "stage_run_id"),
 	}
+	params := map[string]any(args)
+	if change := auditChange(ctx); change != nil {
+		// «Было → стало» рядом с аргументами — как у REST (ctxAuditChange):
+		// ключ change в аргументах тулов не встречается.
+		params["change"] = change
+	}
 	s.audit.Record(ctx, workflow.AuditEntry{
 		Target:    target,
 		Identity:  identity(ctx),
 		Channel:   workflow.AuditMCP,
 		Action:    tool,
-		Params:    args,
+		Params:    params,
 		Outcome:   outcome,
 		RequestID: requestID(ctx),
 	})
@@ -105,4 +111,29 @@ func uuidArg(args map[string]any, key string) *uuid.UUID {
 		return nil
 	}
 	return &id
+}
+
+// auditSlot — место для «было → стало» вызова тула: обёртка add кладёт его в
+// контекст, тул записи заполняет, recordCall пишет рядом с аргументами. Так
+// у MCP тот же путь изменения в журнал, что ctxAuditChange у REST.
+type auditSlot struct{ change any }
+
+type auditSlotKey struct{}
+
+func withAuditSlot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, auditSlotKey{}, &auditSlot{})
+}
+
+// setAuditChange запоминает изменение вызова для журнала.
+func setAuditChange(ctx context.Context, change any) {
+	if slot, ok := ctx.Value(auditSlotKey{}).(*auditSlot); ok {
+		slot.change = change
+	}
+}
+
+func auditChange(ctx context.Context) any {
+	if slot, ok := ctx.Value(auditSlotKey{}).(*auditSlot); ok {
+		return slot.change
+	}
+	return nil
 }
