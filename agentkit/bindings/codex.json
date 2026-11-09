@@ -1,0 +1,36 @@
+{
+  "name": "codex",
+  "kit": {
+    "manifest": ".agents/clab-kit.json",
+    "skills_dir": ".agents/skills",
+    "agents_dir": ".codex/agents"
+  },
+  "mcp": {
+    "method": "codex-config-toml",
+    "table": "mcp_servers",
+    "bearer_token_env_var": "SDLC_TOKEN",
+    "scopes": ["user", "project"]
+  },
+  "run": [
+    "codex", "exec", "--json", "--sandbox", "workspace-write",
+    "--add-dir", "{config_dir}",
+    "-c", "sandbox_workspace_write.network_access=true",
+    "-m", "{model}",
+    "-c", "model_reasoning_effort=\"{effort}\"",
+    "-c", "mcp_servers.sdlc.url=\"{mcp_url}\"",
+    "-c", "mcp_servers.sdlc.bearer_token_env_var=\"SDLC_TOKEN\"",
+    "{prompt}"
+  ],
+  "executor": "process",
+  "hook": {
+    "placement": "launch",
+    "event": "PreToolUse",
+    "matcher": "Bash"
+  },
+  "output": "codex-jsonl",
+  "detect": [
+    {"env": "CODEX_THREAD_ID", "non_empty": true}
+  ],
+  "levels": null,
+  "tool_policy": null
+}

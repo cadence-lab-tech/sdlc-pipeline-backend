@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -211,24 +213,23 @@ func kitServer(t *testing.T, kit any) (*Client, *[]string) {
 	return &Client{base: srv.URL + "/v1", origin: srv.URL, actor: "user:alice", http: srv.Client()}, &auth
 }
 
-// AC-7: clab guide печатает тело clab-guide настоящего набора без шапки;
-// --json — {version, name, text}; токен не нужен.
+// AC-7: clab guide печатает справку настоящего набора без шапки; --json —
+// {version, name, text}; токен не нужен. С CLAB-417 (AC-10) текст — core.guide
+// нового сервера: нейтральное ядро без заметок привязки claude.
 func TestGuidePrintsKitGuide(t *testing.T) {
 	kit, err := agentkit.Load("v0.28.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var source string
-	for _, f := range kit.Files {
-		if f.Path == guideKitPath {
-			source = f.Content
+	body := kit.Core.Guide.Content
+	if !strings.HasPrefix(body, "# ") {
+		t.Fatalf("core.guide не справка: %.60q", body)
+	}
+	for _, s := range []string{"Claude", "claude", ".claude", "mcp__", "haiku", "opus", "Codex"} {
+		if strings.Contains(body, s) {
+			t.Errorf("core.guide называет провайдера: %q", s)
 		}
 	}
-	if !strings.HasPrefix(source, "---\nname: clab-guide\n") {
-		t.Fatalf("в наборе нет clab-guide с шапкой: %.60q", source)
-	}
-	body := source[strings.Index(source, "\n---\n")+len("\n---\n"):]
-	body = strings.TrimLeft(body, "\n")
 
 	withJSON(t, false)
 	c, auth := kitServer(t, kit)
@@ -255,6 +256,57 @@ func TestGuidePrintsKitGuide(t *testing.T) {
 	var v map[string]string
 	if err := json.Unmarshal([]byte(out), &v); err != nil || v["version"] != "v0.28.0" || v["name"] != "clab-guide" || v["text"] != body {
 		t.Fatalf("--json: %.300q", out)
+	}
+}
+
+// AC-10 (CLAB-417): сервер до ядра и привязок отдаёт только files — clab
+// guide печатает тело скила clab-guide оттуда, без шапки, как раньше.
+func TestGuideServerWithoutCore(t *testing.T) {
+	old := map[string]any{
+		"version": "v0.28.0",
+		"files": []map[string]string{
+			{"path": "skills/clab-work/SKILL.md", "content": "---\nname: clab-work\n---\nwork"},
+			{"path": guideKitPath, "content": "---\nname: clab-guide\ndescription: d\n---\n\n# Old guide\n\ntext\n"},
+		},
+	}
+	withJSON(t, false)
+	c, _ := kitServer(t, old)
+	out, _, err := capture(t, func() error { return cmdGuide(context.Background(), c, nil) })
+	if err != nil || out != "# Old guide\n\ntext\n" {
+		t.Fatalf("прежний сервер: %v / %q", err, out)
+	}
+}
+
+// AC-11 (CLAB-417): clab последнего релиза ставит из files настоящего набора
+// — каждый путь проходит kitPathValid, суммы сходятся с содержимым, а новые
+// поля core и bindings ему не мешают (тип agentKit их не знает).
+func TestKitFilesInstallableByOldClab(t *testing.T) {
+	kit, err := agentkit.Load("v0.28.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(kit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got agentKit
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 7 {
+		t.Fatalf("files: %d", len(got.Files))
+	}
+	for _, f := range got.Files {
+		if err := kitPathValid(f.Path); err != nil {
+			t.Error(err)
+		}
+		sum := sha256.Sum256([]byte(f.Content))
+		if hex.EncodeToString(sum[:]) != f.SHA256 {
+			t.Errorf("%s: sha256 не сходится", f.Path)
+		}
+	}
+	if len(kit.Bindings) == 0 || kit.Core.Guide.Content == "" {
+		t.Fatal("в наборе нет core и bindings")
 	}
 }
 

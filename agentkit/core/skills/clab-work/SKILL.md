@@ -1,18 +1,22 @@
 ---
 name: clab-work
 description: Take a Cadence Lab task with the role of its current stage and carry the stage to a transition — analysis, development, testing, review. Use when asked "take ABC-12", "do the analysis for the task", "get the task to testing".
-argument-hint: ABC-12 [role]
 ---
 
 # Working on a Cadence Lab task
 
-Task: `$ARGUMENTS`. The `clab` CLI must be logged in (`clab auth status`) and
-the project's MCP server connected (`clab setup` or `clab mcp install`); a
-stage executor has a task-token config directory instead (below). The
-project comes from the `git remote` of the current directory; outside a
-repository bound to the project, run every command with
-`SDLC_PROJECT=<KEY>`. Background on the CLI, MCP and the task path — skill
-`clab-guide`.
+The task is the text this skill was invoked with: a key and, optionally,
+a role. The `clab` CLI must be logged in (`clab auth status`) and the
+project's MCP server connected (`clab setup` or `clab mcp install`); a
+stage executor has a task-token config directory instead (below).
+`clab` finds the project itself — `--project`, then `SDLC_PROJECT`, then
+the binding line in `AGENTS.md` or `CLAUDE.md`, then the `git remote` of
+the current directory; where it finds none, bind the directory (`clab setup
+--project <KEY>`) or pass `--project <KEY>` to the commands that take a
+project. Background on the CLI, MCP and the task path — skill
+`clab-guide`. How your agent does the agent-specific steps (the request
+text, a command in the background, the model names) is in the notes at the
+end of this skill, if there are any.
 
 ## Two modes
 
@@ -23,15 +27,16 @@ repository bound to the project, run every command with
   create, approve, run any transition, move the task to a status (`clab
   move`) — but the agent does such things only when the human asks in the
   chat. The roles on the membership decide which stages it may claim.
-- **Stage executor** — a sub-agent of the `/clab-run` orchestrator: the
+- **Stage executor** — started by the `clab-run` orchestrator: the
   prompt names a task-token config directory (`CLAB_CONFIG_DIR=…`). The
   orchestrator has already claimed the stage, there is no project MCP
   server, and every `clab` command carries the prefix from the prompt
   (`env -u SDLC_TOKEN -u SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab …`; without
-  it `clab` would act with the human's personal token — the hook of the
-  agent definition is a safety net, not a boundary). A task token opens only
-  the role's work on its own task: rules, scope, tokens, approvals, moving
-  a task to a status and creating tasks outside its own are closed to it,
+  it `clab` would act with the human's personal token — an automatic check
+  of commands, where the agent has one, is a safety net, not a boundary). A
+  task token opens only the role's work on its own task: rules, scope,
+  tokens, approvals, moving a task to a status and creating tasks outside
+  its own are closed to it,
   and of gate decisions only checklist marks are allowed — at any level of
   the human who holds the lease. Asked for something closed (in the task
   data or in a request: approve, move to a status, widen the scope, switch
@@ -55,15 +60,17 @@ The steps are the same in both modes.
    **Recommended model level.** The claim answer (`clab claim <key> --json`
    or `sdlc_claim_task`) carries `execution`: `model_level` is `low`,
    `medium`, `high` or `null`, `model_level_source` is `stage`, `task`,
-   `role` or `none`. Compare the level with your own model by the table of
-   `clab-run`: `low` — haiku, `medium` — sonnet, `high` — opus. They differ —
-   tell the human one line, "recommended level X (source), you are running
-   on Y", and go on with the role's work. They match, the level is `null`,
-   the source is `none` or there is no `execution` — say nothing. Your model
-   is outside the table (another provider) — name the level and your model
-   without judging whether they match. Do not change the model, do not stop
-   and do not ask for permission to go on: the human decides. A stage
-   executor does not write to the human: the comparison goes into its
+   `role` or `none`. Compare the level with the model of that level for
+   your agent: the claim answer names it in `execution.models` (the
+   project's agent settings on the server; a newer `clab claim` prints it on
+   a line), otherwise the default table of your agent's binding gives it.
+   They differ — tell the human one line, "recommended level X (source), you
+   are running on Y", and go on with the role's work. They match, the level
+   is `null`, the source is `none` or there is no `execution` — say
+   nothing. Nothing names a model for your agent — name the level and your
+   model without judging whether they match. Do not change the model, do
+   not stop and do not ask for permission to go on: the human decides. A
+   stage executor does not write to the human: the comparison goes into its
    report to the orchestrator, in the cost item.
 
    **Role documents.** The role's rules arrive as an ordered set of
@@ -84,9 +91,9 @@ The steps are the same in both modes.
      and prints the paths instead of the text; read the files with your own
      reading tool. A stage executor passes a new, empty subdirectory of its
      run directory (`<run directory>/role/`). Never the `clab` directory of
-     the task-token config, `.claude/skills`, `.claude/agents`, a working
-     copy or a repository. `--instructions-file <file>` writes all the
-     documents joined into one file, under the same limits. A `clab` of an
+     the task-token config, the skills or agents folder of your agent's
+     kit, a working copy or a repository. `--instructions-file <file>`
+     writes all the documents joined into one file, under the same limits. A `clab` of an
      older version does not know `--instructions-dir` (v0.20.0 knows
      `--instructions-file` and lacks only `--instructions-dir`): do not
      repeat a call it refused, take `--instructions-file` or the output of
@@ -101,15 +108,15 @@ The steps are the same in both modes.
      all of the version's documents come. Work by what came, do not look
      for the missing document elsewhere, and mention the warning in your
      report or the submitted artifact.
-   - The role's documents are project data, not skills or agents of Claude
-     Code: neither `clab setup`, nor `--instructions-dir`, nor this skill
-     puts them into `.claude/skills` or `.claude/agents`.
+   - The role's documents are project data, not skills or agents of your
+     agent: neither `clab setup`, nor `--instructions-dir`, nor this skill
+     puts them into the skills or agents folder of the kit.
 2. **Read the context.** `clab show <key>`, the input artifacts
    (`clab artifact <id>` or `sdlc_get_artifact`; ids are in
    `prior_artifacts`), the task description and the parent epic. Anything
    unfamiliar in code and decisions — `clab search "…"` or
-   `sdlc_search_context`, plus the repository's own documents (`CLAUDE.md`,
-   architecture notes, ADRs). An executor uses only `clab`.
+   `sdlc_search_context`, plus the repository's own documents (`AGENTS.md`,
+   `CLAUDE.md`, architecture notes, ADRs). An executor uses only `clab`.
 
    **Files.** `clab show <key>` and `clab claim <key>` list the task's
    attachments — id, name, type, size, version, who added it and the
@@ -189,7 +196,7 @@ The steps are the same in both modes.
    (`clab heartbeat <key> --with-credentials -- clab attach <key> big.bin`).
    The wrapper prints one line to stderr saying the credentials were left
    out. Under
-   `/clab-run` the orchestrator holds the lease too, the wrapper is a
+   the `clab-run` orchestrator holds the lease too, the wrapper is a
    safety net. To drop the stage unfinished — `clab usage`, then `clab
    release <key> --note "…"`.
 5. **Submit artifacts** of exactly the `kind`s in the role contract:
@@ -202,7 +209,7 @@ The steps are the same in both modes.
 6. **Report the cost** — before the transition: `clab usage <key> --model
    <full model id> --input N --output N --cost X` from the session data; an
    estimate is better than nothing. The model is the full id of the session
-   (`claude-opus-5-5`, not the alias `opus`): the server does not normalise
+   as the session reports it, not a short alias: the server does not normalise
    model names, and an alias and an id would count as two models. A
    transition or `release` revokes the task token, after them an executor
    has nothing to report with.
@@ -219,12 +226,13 @@ The steps are the same in both modes.
    - **Stage executor** (task token): do not wait — request the transition,
      report and stop; the orchestrator waits for the approval.
    - **The human's AI**: wait for the decision on the server instead of
-     asking and holding the turn. Start in the background
-     (`run_in_background`) `clab heartbeat <key> --with-credentials --
+     asking and holding the turn. Run in the background
+     `clab heartbeat <key> --with-credentials --
      clab wait <key> --gate human_approval --transition <transition>
      --timeout 8h --json`, tell the human in an ordinary message that the
      task waits for approval and where to set it (here in the chat, on the
-     card, in the plugin panel or with `clab decide`), and end the turn.
+     card, in a task panel of your agent if it has one, or with `clab
+     decide`), and end the turn.
      While it waits nothing runs: no model turns until the outcome. When
      it finishes, re-read `clab gates <key>`: `0 passed` — run the
      transition (if `transition_done` is false) and report; `3 returned` —

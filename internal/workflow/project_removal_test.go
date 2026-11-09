@@ -29,7 +29,7 @@ var projectOwnedTables = []string{
 	"repositories", "repo_index_runs", "code_files", "code_chunks",
 	"document_chunks", "project_documents", "project_members", "project_teams",
 	"agent_tokens", "roles", "role_versions", "workflows", "workflow_statuses",
-	"workflow_transitions", "gates", "invites", "stage_run_usage",
+	"workflow_transitions", "gates", "invites", "stage_run_usage", "agent_settings_versions",
 	"task_property_defs",
 }
 
@@ -73,6 +73,23 @@ func projectWithEverything(t *testing.T, ctx context.Context, store *postgres.St
 		t.Fatal(err)
 	}
 
+	// Версия настройки агентов с прайсом: прогон снимает её при захвате, а
+	// строка учёта по прайсу ссылается на неё (CLAB-426) — удаление проекта
+	// обязано пройти внешние ключи в обоих направлениях.
+	human, err := store.ResolveActor(ctx, store.DB(), "pricer-removal", domain.PrincipalUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintainer := Actor{Principal: human, Level: domain.MemberMaintainer}
+	draft, _, err := engine.CreateAgentSettingsDraft(ctx, "SDLC", maintainer, AgentSettingsDraftInput{
+		Document: json.RawMessage(`{"pricing":{"as_of":"2026-11-01","models":{"claude-opus-5":{"input":3,"output":15}}}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.ActivateAgentSettings(ctx, "SDLC", maintainer, &draft.Version); err != nil {
+		t.Fatal(err)
+	}
+
 	task, err := engine.CreateTask(ctx, "SDLC", actor.ID, CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{Title: "Живая задача", Repositories: []string{"acme/api"}},
 	})
@@ -112,10 +129,15 @@ func projectWithEverything(t *testing.T, ctx context.Context, store *postgres.St
 		task.ID, repo.ID, strings.Repeat("c", 40)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.ReportUsage(ctx, task.Key, actor.ID, ReportUsageInput{
+	priced, err := engine.ReportUsage(ctx, task.Key, actor.ID, ReportUsageInput{
 		StageRunID: &claimed.StageRunID, Model: "claude-opus-5", CostUSD: ptr(1.5),
-	}); err != nil {
+		InputTokens: ptr(int64(100_000)), OutputTokens: ptr(int64(80_000)), // 0.3 + 1.2 = 1.5 по прайсу
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if priced.CostSource == nil || *priced.CostSource != domain.CostSourcePricing {
+		t.Fatalf("строка учёта проекта не по прайсу: %+v", priced)
 	}
 }
 

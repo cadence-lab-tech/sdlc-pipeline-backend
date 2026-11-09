@@ -917,7 +917,29 @@ type StageRunUsage struct {
 	Details          json.RawMessage `json:"details"`
 	// api, subscription или null — не указано, считается как api (решение 0062).
 	Billing *string `json:"billing"`
+	// Откуда сумма (решение 0077 п. 4.11, CLAB-426): CostSourcePricing —
+	// посчитал сервер по прайсу версии настройки агентов, PricingVersion —
+	// её номер; CostSourceReported — как назвал агент; null — суммы нет или
+	// строка записана до миграции 000048. CostUSD при этом — итоговая сумма,
+	// которую читают бюджет, карточка и метрики; то, что назвал агент,
+	// лежит отдельно в ReportedCostUSD (null — не называл).
+	CostSource      *string  `json:"cost_source"`
+	PricingVersion  *int     `json:"pricing_version"`
+	ReportedCostUSD *float64 `json:"reported_cost_usd"`
+	// Предупреждения ответа на отчёт (например, модель есть в прайсе, а
+	// токенов нет). В базе не хранятся: заполняет только workflow.ReportUsage,
+	// при чтении строк — пустой массив.
+	Warnings []string `json:"warnings"`
 }
+
+// Источники суммы строки учёта (StageRunUsage.CostSource).
+const (
+	CostSourcePricing  = "pricing"
+	CostSourceReported = "reported"
+	// CostSourceMixed — только у прогона (RunUsage.CostSource): в нём есть
+	// строки обоих источников.
+	CostSourceMixed = "mixed"
+)
 
 // RunUsage — учёт одного прогона в карточке задачи: сумма строк
 // stage_run_usage этого прогона (решение 0026, форма — CLAB-264).
@@ -948,13 +970,22 @@ type RunUsage struct {
 	APICostUSD          *float64 `json:"api_cost_usd"`
 	UnspecifiedCostUSD  *float64 `json:"unspecified_cost_usd"`
 	SubscriptionCostUSD *float64 `json:"subscription_cost_usd"`
+	// Откуда сумма прогона (CLAB-426): pricing или reported — все строки со
+	// своим источником одного рода, mixed — обоих, null — ни у одной строки
+	// источника нет (суммы нет или строки до миграции 000048). CostUSD при
+	// этом прежняя сумма строк. PricingVersions — номера версий прайса строк
+	// по прайсу, по возрастанию; ReportedCostUSD — сумма оценок, названных
+	// агентами, null — никто не называл.
+	CostSource      *string  `json:"cost_source"`
+	PricingVersions []int    `json:"pricing_versions"`
+	ReportedCostUSD *float64 `json:"reported_cost_usd"`
 }
 
 // NoRunUsage — учёт прогона, о котором никто не отчитался. Состояние —
 // not_applicable, пока склеивающий не скажет иначе: забирали ли прогон, знает
 // запрос состояний (RunUsageStates), а не отсутствие строк.
 func NoRunUsage() RunUsage {
-	return RunUsage{Models: []string{}, State: UsageStateNotApplicable}
+	return RunUsage{Models: []string{}, PricingVersions: []int{}, State: UsageStateNotApplicable}
 }
 
 // Состояния учёта прогона (CLAB-219, дополнение к решению 0026). Одно

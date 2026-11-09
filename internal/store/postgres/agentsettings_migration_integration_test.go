@@ -20,14 +20,31 @@ import (
 
 const agentSettingsMigration = "000047_agent_settings"
 
-func execAgentSettingsMigration(t *testing.T, pool *pgxpool.Pool, suffix string) {
+// usagePricingMigration (CLAB-426) ссылается внешним ключом на таблицу
+// версий, поэтому откат 000047 идёт после отката 000048, а накат 000048 —
+// после наката 000047: порядок обычного отката. Остальная схема тест не
+// трогает, и после него база снова полная.
+const usagePricingMigration = "000048_usage_pricing"
+
+func execMigrationByName(t *testing.T, pool *pgxpool.Pool, name string) {
 	t.Helper()
-	body, err := migrations.Schema.ReadFile(agentSettingsMigration + suffix)
+	body, err := migrations.Schema.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(context.Background(), string(body)); err != nil {
-		t.Fatalf("%s%s: %v", agentSettingsMigration, suffix, err)
+		t.Fatalf("%s: %v", name, err)
+	}
+}
+
+func execAgentSettingsMigration(t *testing.T, pool *pgxpool.Pool, suffix string) {
+	t.Helper()
+	if suffix == ".down.sql" {
+		execMigrationByName(t, pool, usagePricingMigration+suffix)
+	}
+	execMigrationByName(t, pool, agentSettingsMigration+suffix)
+	if suffix == ".up.sql" {
+		execMigrationByName(t, pool, usagePricingMigration+suffix)
 	}
 }
 

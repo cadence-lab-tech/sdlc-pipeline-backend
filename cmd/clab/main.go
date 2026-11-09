@@ -92,6 +92,7 @@ func commands() []command {
 		{"instruction", "библиотека инструкций: общие правила ролей версиями, «обновить в ролях»", "clab instruction list | clab instruction show git [--version N] | clab instruction put --key git --file git.md [--name ...] [--summary ...] [--kind instructions] [--changelog ...] (ключ есть — новая версия, нет — инструкция с версией 1) | clab instruction apply git --role developer [--role integrator] [--version N] [--changelog ...] (каждой роли — новая версия с git.md, закреплённым за версией инструкции; роль уже на ней — без изменений)", cmdInstruction},
 		{"doc", "проектные документы", "clab doc list | clab doc put --kind guideline --title Соглашения --file CLAUDE.md | clab doc get <id>", cmdDoc},
 		{"workflow", "версии цикла: список, проверка, активация черновика", "clab workflow list | clab workflow validate <id> | clab workflow activate <id>", cmdWorkflow},
+		{"agents", "настройка агентов проекта: модель и усилие на уровне у каждого агента, прайс для сумм", "clab agents show [--version N] [--json] | clab agents versions | clab agents draft [--empty] [--file settings.json] [--changelog \"…\"] | clab agents put --file settings.json [--changelog \"…\"] (--file - — из stdin) | clab agents diff [--version N] | clab agents activate [--version N] | clab agents discard — читает любой участник и токен задачи, пишет человек уровня maintainer и выше; diff считается на клиенте; нужен сервер v0.28.0 или новее; проект — --project, SDLC_PROJECT или каталог", cmdAgents},
 		{"version", "версия clab и сервера", "clab version", cmdVersion},
 
 		{"server", "self-hosted installation on this machine: install, upgrade, backup, restore, status, starter", "clab server install|upgrade|backup|restore|status|starter [--dir DIR] — clab server --help", cmdServer},
@@ -551,7 +552,9 @@ func cmdShow(ctx context.Context, c *Client, args []string) error {
 	if err := c.get(ctx, "/tasks/"+task+"/state", nil, &out); err != nil {
 		return err
 	}
-	return emit(out, func() error { return renderStateRights(out, rights) })
+	return emit(out, func() error {
+		return renderStateModel(out, rights, modelLines(ctx, c, stateExecution(out)))
+	})
 }
 
 // transitionRights — право актора по переходам из текущего статуса: тот же
@@ -622,7 +625,7 @@ func cmdClaim(ctx context.Context, c *Client, args []string) error {
 		}
 		return nil
 	}
-	return renderClaim(out, instructionsFile, instructionsDir)
+	return renderClaimModel(out, modelLines(ctx, c, stateExecution(out)), instructionsFile, instructionsDir)
 }
 
 func cmdRelease(ctx context.Context, c *Client, args []string) error {
