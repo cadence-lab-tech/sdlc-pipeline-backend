@@ -41,10 +41,10 @@ type command struct {
 
 func commands() []command {
 	return []command{
-		{"auth", "вход через браузер, состояние, выход", "clab auth login [--host https://sdlc.example.com] [--days 365] [--no-browser] | clab auth status | clab auth logout | clab auth token", cmdAuth},
+		{"auth", "вход через браузер, состояние, выход", "clab auth login [--host https://sdlc.example.com] [--days 365] [--no-browser] | clab auth status | clab auth logout | clab auth token — без --host и SDLC_API_URL хост — из маркера каталога (строка привязки в AGENTS.md или CLAUDE.md), иначе хост по умолчанию; вход по маркеру не меняет хост по умолчанию, --with-token — только с явным --host; auth status показывает проект и хост каталога и вошли ли на него", cmdAuth},
 		{"mcp", "подключить локального агента к MCP проекта", "clab mcp install [--project SDLC] [--name sdlc] [--scope local|user] | clab mcp config | clab mcp url", cmdMCP},
-		{"setup", "связать локальный проект с проектом: MCP и набор агента (скилы) с инстанса", "clab setup [--project SDLC] [--scope local|user] [--agent claude|other] [--name sdlc] [--dry-run] [--force] — в корне локального клона; повторный запуск обновляет набор до версии инстанса. clab setup --plugin [--dry-run] — плагин Claude clab-plugin", cmdSetup},
-		{"whoami", "кто я, на каком инстансе и что могу в проекте", "clab whoami [--project SDLC]", cmdWhoami},
+		{"setup", "связать локальный проект с проектом: MCP и набор агента (скилы) с инстанса", "clab setup [--project SDLC] [--scope local|user] [--agent claude|other] [--name sdlc] [--dry-run] [--force] [--marker-file AGENTS.md|CLAUDE.md] [--no-marker] — в корне локального клона; повторный запуск обновляет набор до версии инстанса; в каталог запуска пишет блок привязки к проекту (в каждый из AGENTS.md и CLAUDE.md, нет ни одного — создаёт AGENTS.md; меняется только текст блока, ничего не коммитится). clab setup --plugin [--dry-run] — плагин Claude clab-plugin", cmdSetup},
+		{"whoami", "кто я, на каком инстансе и что могу в проекте", "clab whoami [--project SDLC] — называет, откуда взяты проект (флаг, SDLC_PROJECT, маркер каталога, git remote) и хост (флаг, SDLC_API_URL, маркер, по умолчанию); --json — project.project_source, project.marker_path, host, host_source", cmdWhoami},
 		{"queue", "что сейчас можно забрать", "clab queue [--role reviewer] [--status analysis]", cmdQueue},
 		{"tasks", "задачи проекта", "clab tasks [--status analysis] [--type epic] [--parent SDLC-4] [--external PROJ-12 | --external jira:PROJ-12]", cmdTasks},
 		{"show", "состояние задачи глазами агента", "clab show SDLC-42", cmdShow},
@@ -154,6 +154,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Начало работы: clab auth login --host https://sdlc.example.com; конфиг — ~/.config/clab.")
 	fmt.Fprintln(os.Stderr, "Окружение перекрывает конфиг: SDLC_API_URL, SDLC_TOKEN (без него действующее")
 	fmt.Fprintln(os.Stderr, "лицо берётся из SDLC_ACTOR), SDLC_PROJECT — иначе проект по git remote.")
+	fmt.Fprintln(os.Stderr, "Проект и хост каталога — строка привязки в AGENTS.md или CLAUDE.md (пишет clab setup):")
+	fmt.Fprintln(os.Stderr, "она слабее флагов и окружения, сильнее git remote; с CLAB_CONFIG_DIR не читается.")
 }
 
 // version подставляется при сборке: -ldflags "-X main.version=…".
@@ -266,10 +268,11 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	key, err := c.optionalProject(ctx, projectFlag)
+	pc, err := c.resolveProject(ctx, projectFlag)
 	if err != nil {
 		return err
 	}
+	key := pc.key
 
 	var me struct {
 		Principal struct {
@@ -306,12 +309,27 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 	var project *whoamiProject
 	if key != "" {
 		if project, err = c.whoamiProject(ctx, key); err != nil {
+			if pc.marker != nil {
+				// exit() печатает только Code и Message найденного APIError,
+				// обёртку %w он отбрасывает: файл-источник — в самом сообщении.
+				var apiErr *APIError
+				if errors.As(err, &apiErr) {
+					named := *apiErr
+					named.Message = fmt.Sprintf("%s (проект %s взят из маркера %s)", apiErr.Message, key, pc.marker.Path)
+					return &named
+				}
+				return fmt.Errorf("проект %s взят из маркера %s: %w", key, pc.marker.Path, err)
+			}
 			return err
+		}
+		project.ProjectSource = pc.source
+		if pc.marker != nil {
+			project.MarkerPath = pc.marker.Path
 		}
 	}
 
 	out := map[string]any{"principal": who, "authenticated": me.Authenticated, "api": c.base,
-		"instance": instance, "project": project}
+		"instance": instance, "project": project, "host": c.origin, "host_source": c.hostSource}
 	if taskToken != nil {
 		out["task_token"] = taskToken
 	}
@@ -321,6 +339,9 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 			how = "по заголовку"
 		}
 		pairs := []string{"Кто:", who + " (" + how + ")", "API:", c.base}
+		if c.hostSource != "" {
+			pairs = append(pairs, "Хост:", c.origin+" ("+c.hostSourceLabel()+")")
+		}
 		if taskToken != nil {
 			pairs = append(pairs, "Токен:", "задачи "+me.Token.TaskKey+", роль "+joinOr(me.Token.RoleKeys, "—"))
 		}
@@ -336,7 +357,7 @@ func cmdWhoami(ctx context.Context, c *Client, args []string) error {
 			kv(pairs...)
 			return nil
 		}
-		pairs = append(pairs, "Проект:", project.Key+" — "+project.Name)
+		pairs = append(pairs, "Проект:", project.Key+" — "+project.Name, "Источник:", projectSourceLabel(pc))
 		if a := project.Access; a != nil {
 			roles := "любые"
 			if a.AllowedRoles != nil {
@@ -374,6 +395,40 @@ type whoamiProject struct {
 		} `json:"task_work,omitempty"`
 	} `json:"access"`
 	Roles []string `json:"roles"`
+	// Откуда взят проект (решение 0077, п. 12): flag, env, marker,
+	// git_remote; у маркера — путь файла.
+	ProjectSource string `json:"project_source,omitempty"`
+	MarkerPath    string `json:"marker_path,omitempty"`
+}
+
+// projectSourceLabel — источник проекта словами для clab whoami.
+func projectSourceLabel(pc projectChoice) string {
+	switch pc.source {
+	case projectFromFlag:
+		return "флаг --project"
+	case projectFromEnv:
+		return "окружение SDLC_PROJECT"
+	case projectFromMarker:
+		return "маркер " + pc.marker.Path
+	case projectFromRemote:
+		return "git remote"
+	}
+	return "—"
+}
+
+// hostSourceLabel — источник хоста словами для clab whoami.
+func (c *Client) hostSourceLabel() string {
+	switch c.hostSource {
+	case hostFromFlag:
+		return "флаг --host"
+	case hostFromEnv:
+		return "окружение SDLC_API_URL"
+	case hostFromMarker:
+		return "маркер " + c.hostMarker.Path
+	case hostFromDefault:
+		return "хост по умолчанию"
+	}
+	return "—"
 }
 
 func (c *Client) whoamiProject(ctx context.Context, key string) (*whoamiProject, error) {

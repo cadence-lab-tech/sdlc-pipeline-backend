@@ -121,10 +121,12 @@ func (fc *fakeClaude) called(t *testing.T, prefix string) bool {
 	return false
 }
 
-// withRoot — корень проекта без git: временный каталог.
+// withRoot — корень проекта без git: временный каталог. Он же текущий:
+// clab setup пишет туда блок привязки (CLAB-424), а не в каталог пакета.
 func withRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	t.Chdir(root)
 	prev := projectRoot
 	projectRoot = func(context.Context) (string, error) { return root, nil }
 	t.Cleanup(func() { projectRoot = prev })
