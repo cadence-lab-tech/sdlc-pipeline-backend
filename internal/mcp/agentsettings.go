@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -88,9 +87,11 @@ func (s *Server) listAgentSettingsVersions(ctx context.Context, _ noInput) (*sdk
 }
 
 type putAgentSettingsInput struct {
-	Document  json.RawMessage `json:"document,omitempty" jsonschema:"документ настройки целиком: {agents, pricing}"`
-	From      string          `json:"from,omitempty" jsonschema:"active или empty — только при заведении без document"`
-	Changelog *string         `json:"changelog,omitempty" jsonschema:"что и зачем меняется, до 2000 символов"`
+	// any, а не json.RawMessage: схему тула выводит jsonschema-go, и
+	// RawMessage для него — массив байтов (как external_ref у sdlc_create_task).
+	Document  any     `json:"document,omitempty" jsonschema:"документ настройки целиком: {agents, pricing}"`
+	From      string  `json:"from,omitempty" jsonschema:"active или empty — только при заведении без document"`
+	Changelog *string `json:"changelog,omitempty" jsonschema:"что и зачем меняется, до 2000 символов"`
 }
 
 // agentSettingsActor — порог viewer и актор для права движка.
@@ -111,8 +112,12 @@ func (s *Server) putAgentSettingsDraft(ctx context.Context, in putAgentSettingsI
 	if err != nil {
 		return fail(err)
 	}
+	doc, err := rawArgument(in.Document)
+	if err != nil {
+		return fail(err)
+	}
 	view, change, created, err := s.engine.UpsertAgentSettingsDraft(ctx, key, who,
-		workflow.AgentSettingsDraftInput{From: in.From, Document: in.Document, Changelog: in.Changelog})
+		workflow.AgentSettingsDraftInput{From: in.From, Document: doc, Changelog: in.Changelog})
 	if err != nil {
 		return fail(err)
 	}

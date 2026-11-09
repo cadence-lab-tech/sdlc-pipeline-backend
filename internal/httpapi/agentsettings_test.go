@@ -794,7 +794,9 @@ func TestAgentSettingsInClaimResponse(t *testing.T) {
 		t.Fatalf("прежний клиент: %v %+v", err, old)
 	}
 
-	// Карточка: у прогона SDLC-3 — 1, у прогона SDLC-1 (без настройки) — null.
+	// Карточка: у захваченного прогона SDLC-3 — 1, у прогона SDLC-1 (без
+	// настройки) — null; поле есть у каждого прогона, у прогонов без
+	// захвата (вход в начальный статус) — null.
 	versionOf := func(card map[string]any) []string {
 		var out []string
 		for _, raw := range card["stage_runs"].([]any) {
@@ -808,15 +810,22 @@ func TestAgentSettingsInClaimResponse(t *testing.T) {
 		}
 		return out
 	}
+	// Последний прогон — текущий, захваченный; прежние — без снимка.
+	check := func(name string, card map[string]any, last string) {
+		t.Helper()
+		got := versionOf(card)
+		if len(got) == 0 || got[len(got)-1] != last {
+			t.Fatalf("%s: %v, у текущего прогона ждали %s", name, got, last)
+		}
+		for _, v := range got[:len(got)-1] {
+			if v != "<nil>" {
+				t.Fatalf("%s: %v, у прежних прогонов ждали null", name, got)
+			}
+		}
+	}
 	_, card := f.json("GET", "/v1/tasks/SDLC-3", f.root, nil)
-	if got := versionOf(card); strings.Join(got, ",") != "1" {
-		t.Fatalf("карточка SDLC-3: %v", got)
-	}
+	check("карточка SDLC-3", card, "1")
 	_, card = f.json("GET", "/v1/tasks/SDLC-1", f.root, nil)
-	if got := versionOf(card); strings.Join(got, ",") != "<nil>" {
-		t.Fatalf("карточка SDLC-1: %v", got)
-	}
-	if got := versionOf(mcpTask); strings.Join(got, ",") != "1" {
-		t.Fatalf("stage_runs MCP: %v", got)
-	}
+	check("карточка SDLC-1", card, "<nil>")
+	check("stage_runs MCP", mcpTask, "1")
 }
