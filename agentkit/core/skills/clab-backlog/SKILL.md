@@ -1,7 +1,6 @@
 ---
 name: clab-backlog
 description: Create an epic or tasks in Cadence Lab with a breakdown and an order — from a plan, from a bug found along the way or on request. Use when asked "file a task", "break this into tasks", "add it to the backlog".
-argument-hint: what to create
 ---
 
 # Cadence Lab backlog

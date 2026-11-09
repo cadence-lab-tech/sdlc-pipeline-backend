@@ -1,7 +1,6 @@
 ---
 name: clab-rules
 description: Change the roles or the cycle of a Cadence Lab project — a role's documents, the artifact contract, statuses, transitions and gates — through a rules directory (export, edit, import) and draft activation. Use when asked to adjust a role, add a gate or a stage, or create a new role.
-argument-hint: what to change
 ---
 
 # Roles and cycle of a project

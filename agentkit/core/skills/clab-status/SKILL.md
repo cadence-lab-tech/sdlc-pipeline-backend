@@ -1,7 +1,6 @@
 ---
 name: clab-status
 description: Show the state of work in Cadence Lab — the queue, epics and tasks, what blocks a given task's transition — close an approval gate or move a task to a status when the human asks. Use for questions like "what is in the queue", "what is next in the backlog", "where is ABC-5 stuck", "approve the analysis of ABC-3", "send ABC-7 back to analysis".
-argument-hint: [ABC-12] [approve]
 ---
 
 # State of work in Cadence Lab

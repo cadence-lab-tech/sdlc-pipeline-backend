@@ -1,7 +1,6 @@
 ---
 name: clab-run
 description: Drive a Cadence Lab task through its cycle in one chat — the orchestrator starts a sub-agent for each stage with the role of the status, asks the human for approvals right in the chat and carries the task to a terminal status. Use when asked "take ABC-12 into work", "drive ABC-12 through the cycle", "finish ABC-12".
-argument-hint: ABC-12 [until <status>]
 ---
 
 # A task through the cycle in one chat

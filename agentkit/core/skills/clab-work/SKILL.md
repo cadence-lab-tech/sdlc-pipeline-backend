@@ -1,7 +1,6 @@
 ---
 name: clab-work
 description: Take a Cadence Lab task with the role of its current stage and carry the stage to a transition — analysis, development, testing, review. Use when asked "take ABC-12", "do the analysis for the task", "get the task to testing".
-argument-hint: ABC-12 [role]
 ---
 
 # Working on a Cadence Lab task
