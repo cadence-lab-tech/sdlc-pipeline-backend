@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -335,7 +336,51 @@ func cmdUsage(ctx context.Context, c *Client, args []string) error {
 	if err := c.do(ctx, "POST", path, body, &recorded); err != nil {
 		return err
 	}
-	return print(recorded)
+	if err := print(recorded); err != nil {
+		return err
+	}
+	// Пояснение — в stderr: JSON в stdout читают скрипты, он не меняется.
+	if line := costSourceLine(recorded); line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
+	return nil
+}
+
+// costSourceLine — по какому правилу сервер посчитал сумму (решение 0077
+// п. 4.11, CLAB-426). Ответ без ключа cost_source — сервер прежней версии:
+// строки нет. Поля ищутся в самом ответе и во вложенном recorded.
+func costSourceLine(recorded any) string {
+	obj, _ := recorded.(map[string]any)
+	if _, ok := obj["cost_source"]; !ok {
+		if inner, _ := obj["recorded"].(map[string]any); inner != nil {
+			if _, ok := inner["cost_source"]; ok {
+				obj = inner
+			}
+		}
+	}
+	source, ok := obj["cost_source"]
+	if !ok {
+		return ""
+	}
+	money := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) + " USD" }
+	cost, hasCost := obj["cost_usd"].(float64)
+	if !hasCost {
+		return "суммы нет"
+	}
+	switch source {
+	case "pricing":
+		line := "сумма " + money(cost) + " по прайсу"
+		if v, ok := obj["pricing_version"].(float64); ok {
+			line += " версии " + strconv.Itoa(int(v))
+		}
+		if reported, ok := obj["reported_cost_usd"].(float64); ok {
+			line += ", агент назвал " + money(reported)
+		}
+		return line
+	case "reported":
+		return "сумма " + money(cost) + " как сообщена"
+	}
+	return "суммы нет"
 }
 
 func setInt(body map[string]any, key string, v int64) {

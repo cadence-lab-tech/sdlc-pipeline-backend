@@ -140,6 +140,12 @@ func (l taskLevels) summaryLine() string {
 type executionView struct {
 	ModelLevel       *string `json:"model_level"`
 	ModelLevelSource string  `json:"model_level_source"`
+	// Настройка агентов проекта (решение 0077 п. 4.5): номер версии-снимка
+	// прогона — число или null; нет ключа вовсе — сервер прежней версии.
+	// Сырым, чтобы отличить null от отсутствия.
+	AgentSettingsVersion json.RawMessage `json:"agent_settings_version"`
+	// Модель уровня этапа по агентам этой версии.
+	Models map[string]modelChoice `json:"models"`
 }
 
 // recommendedLine — «Рекомендованный уровень: high (этап задачи)». На эту

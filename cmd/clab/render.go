@@ -157,6 +157,9 @@ type stateView struct {
 	// Право актора по ключу перехода: show берёт его вторым запросом
 	// /transitions (там его считает движок), claim — нет. Не из ответа.
 	rights map[string]transitionPreview
+	// Строки «Модель уровня …» под рекомендованным уровнем (CLAB-427): их
+	// готовит вызывающий, запрос набора агента сводке не принадлежит.
+	modelLines []string
 }
 
 // artifactRef — ссылка на артефакт в контексте этапа: входы и то, что
@@ -174,11 +177,18 @@ func renderState(raw json.RawMessage) error { return renderStateRights(raw, nil)
 
 // renderStateRights — renderState с правом актора у переходов (clab show).
 func renderStateRights(raw json.RawMessage, rights map[string]transitionPreview) error {
+	return renderStateModel(raw, rights, nil)
+}
+
+// renderStateModel — renderStateRights со строками модели уровня (CLAB-427):
+// запрос набора агента делает вызывающий, сводка клиента не знает.
+func renderStateModel(raw json.RawMessage, rights map[string]transitionPreview, modelLines []string) error {
 	var s stateView
 	if err := decode(raw, &s); err != nil {
 		return err
 	}
 	s.rights = rights
+	s.modelLines = modelLines
 	printSummary(s, true)
 	printAttachments(s.Context.Attachments)
 	return nil
@@ -258,7 +268,10 @@ func printSummary(s stateView, rejectionLine bool) {
 	}
 	if s.Execution != nil {
 		levelsAfter = min(levelsAfter, len(lines))
-		levels := []string{s.Execution.recommendedLine(), s.Task.taskLevels.summaryLine()}
+		// Модель уровня — сразу под «Рекомендованный уровень»: сама строка
+		// рекомендации не меняется.
+		levels := append([]string{s.Execution.recommendedLine()}, s.modelLines...)
+		levels = append(levels, s.Task.taskLevels.summaryLine())
 		lines = append(lines[:levelsAfter], append(levels, lines[levelsAfter:]...)...)
 	}
 	for _, line := range lines {
@@ -305,10 +318,16 @@ func (s stateView) printRights(transition string) {
 // в него, и только после того, как всё прочее напечатано: аренда уже
 // взята, и id прогона агенту нужен даже при ошибке.
 func renderClaim(raw json.RawMessage, instructionsFile, instructionsDir string) error {
+	return renderClaimModel(raw, nil, instructionsFile, instructionsDir)
+}
+
+// renderClaimModel — renderClaim со строками модели уровня (CLAB-427).
+func renderClaimModel(raw json.RawMessage, modelLines []string, instructionsFile, instructionsDir string) error {
 	var s stateView
 	if err := decode(raw, &s); err != nil {
 		return err
 	}
+	s.modelLines = modelLines
 	printSummary(s, false)
 
 	// Правила и данные — разными секциями (CLAB-209): агент без MCP видит
