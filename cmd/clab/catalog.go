@@ -120,6 +120,12 @@ func tokenTask(ctx context.Context, c *Client, args []string) error {
 	if key == "" {
 		return fmt.Errorf("clab token task <ключ задачи> [--config-dir <каталог>]")
 	}
+	// Без каталога конфига человека токен задачи не выпускается: ни сверить
+	// --config-dir с собственным конфигом, ни положить токен некуда, кроме
+	// текущего каталога (решение 0077, п. 6).
+	if _, err := configDir(); err != nil {
+		return err
+	}
 	var dir string
 	if configDirFlag != "" {
 		var err error
@@ -181,7 +187,11 @@ func taskConfigDir(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("--config-dir: %w", err)
 	}
-	own, err := filepath.Abs(configDir())
+	ownDir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	own, err := filepath.Abs(ownDir)
 	if err == nil && filepath.Clean(own) == filepath.Clean(dir) {
 		return "", fmt.Errorf("--config-dir %s — каталог вашего собственного конфига clab: токен задачи затёр бы вход; укажите отдельный каталог", dir)
 	}

@@ -88,7 +88,10 @@ type setupReport struct {
 	MCP           string       `json:"mcp"`
 	MCPPrevious   string       `json:"mcp_previous_url,omitempty"`
 	Files         []fileAction `json:"files"`
-	Docs          string       `json:"docs"`
+	// Marker — блок привязки в AGENTS.md / CLAUDE.md каталога запуска
+	// (решение 0077, п. 6); пустой список — --no-marker.
+	Marker []markerAction `json:"marker"`
+	Docs   string         `json:"docs"`
 	// Config — только у --agent other: конфигурация для ручного
 	// подключения, с тем же заголовком, что печатает clab mcp config.
 	Config map[string]any `json:"config,omitempty"`
@@ -96,7 +99,8 @@ type setupReport struct {
 
 func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	var projectFlag, scope, agent, name string
-	var dryRun, force, plugin bool
+	var dryRun, force, plugin, noMarker bool
+	var markerFiles repeated
 	fs, err := flags("setup", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта; иначе SDLC_PROJECT или проект по git remote")
 		fs.StringVar(&scope, "scope", "local", "local — набор в .claude/ корня проекта и MCP для этого каталога; user — набор в ~/.claude/ и MCP везде; project — MCP в .mcp.json (только без токена)")
@@ -104,6 +108,8 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 		fs.StringVar(&name, "name", "sdlc", "имя MCP-сервера у агента")
 		fs.BoolVar(&dryRun, "dry-run", false, "показать, что будет сделано, ничего не меняя и не вызывая claude")
 		fs.BoolVar(&force, "force", false, "перезаписать и файлы набора, изменённые после установки")
+		fs.Var(&markerFiles, "marker-file", "AGENTS.md или CLAUDE.md — писать блок привязки только в него; флаг можно повторять (по умолчанию — в каждый существующий, нет ни одного — создаётся AGENTS.md)")
+		fs.BoolVar(&noMarker, "no-marker", false, "не писать блок привязки каталога к проекту в AGENTS.md / CLAUDE.md")
 		fs.BoolVar(&plugin, "plugin", false, "только плагин Claude clab-plugin: вшит в clab, ставится в Claude в области user; без входа, проекта и сети, сочетается только с --dry-run")
 	})
 	if err != nil {
@@ -128,6 +134,9 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	if scope == "project" && c.token != "" {
 		return errProjectScopeToken
 	}
+	if noMarker && len(markerFiles) > 0 {
+		return fmt.Errorf("--no-marker и --marker-file вместе не задаются")
+	}
 	key, err := c.project(ctx, projectFlag)
 	if err != nil {
 		return err
@@ -135,17 +144,34 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 	mcpURL, headerName, headerValue := c.mcpEndpoint(key)
 	rep := &setupReport{
 		Project: key, URL: mcpURL, Name: name, Scope: scope, Agent: agent, DryRun: dryRun,
-		Files: []fileAction{}, Docs: c.origin + "/docs?project=" + url.QueryEscape(key),
+		Files: []fileAction{}, Marker: []markerAction{}, Docs: c.origin + "/docs?project=" + url.QueryEscape(key),
+	}
+	// Блок привязки — в каталог запуска, не в корень git (решение 0077,
+	// п. 6). План — до любой записи: неверное имя файла ничего не меняет.
+	if !noMarker {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if rep.Marker, err = planSetupMarker(wd, markerFiles, key, c.origin); err != nil {
+			return err
+		}
 	}
 
 	if agent == "other" {
 		// Другой агент: ни claude, ни файлов — конфигурация и страница.
 		rep.MCP = mcpSkipped
 		rep.Config = mcpConfig(name, mcpURL, headerName, headerValue)
+		if !dryRun {
+			if err := applySetupMarker(rep.Marker); err != nil {
+				return err
+			}
+		}
 		if jsonOut {
 			return print(rep)
 		}
 		raw, _ := json.MarshalIndent(rep.Config, "", "  ")
+		printSetupMarker(rep.Marker, dryRun)
 		fmt.Printf("Конфигурация MCP проекта %s для вашего агента:\n%s\n", key, raw)
 		fmt.Printf("Инструкция: %s\n", rep.Docs)
 		return nil
@@ -174,6 +200,11 @@ func cmdSetup(ctx context.Context, c *Client, args []string) error {
 
 	if !dryRun && kit != nil {
 		if err := applyKit(dir, plan, next); err != nil {
+			return err
+		}
+	}
+	if !dryRun {
+		if err := applySetupMarker(rep.Marker); err != nil {
 			return err
 		}
 	}
@@ -528,6 +559,12 @@ func printSetup(rep *setupReport, dir string) {
 		}
 		if !changed {
 			fmt.Println("  файлы набора актуальны")
+		}
+	}
+	printSetupMarker(rep.Marker, rep.DryRun)
+	for _, a := range rep.Marker {
+		if a.Action == markerCreate || a.Action == markerUpdate {
+			changed = true
 		}
 	}
 	if !rep.DryRun && rep.MCP == mcpUnchanged && rep.KitVersion != nil && !changed {

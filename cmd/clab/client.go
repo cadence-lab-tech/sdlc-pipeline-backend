@@ -32,6 +32,20 @@ type Client struct {
 	// умолчанию из конфига. Адреса у него может не быть — тогда подсказка
 	// «хост не настроен» называет его.
 	host string
+	// Откуда взят хост (hostFrom*) и маркер, если хост из него: для clab
+	// whoami.
+	hostSource string
+	hostMarker *dirMarker
+	// hostErr — хост выбран, но ходить на него нельзя: в маркере хост без
+	// записи в конфиге. requireHost отдаёт её до любого запроса.
+	hostErr error
+	// markerLoad — где искать маркер каталога (решение 0077, п. 6); nil —
+	// маркер не читается: задан CLAB_CONFIG_DIR, или клиент собран не
+	// NewClient. Читается один раз и только когда нужен.
+	markerLoad func() (*dirMarker, error)
+	markerOnce sync.Once
+	markerVal  *dirMarker
+	markerErr  error
 	// Версию сервера сверяем по первому ответу: одно предупреждение на
 	// команду, сколько бы запросов она ни сделала.
 	versionOnce sync.Once
@@ -53,23 +67,44 @@ func NewClient(g globals) (*Client, error) {
 		http:    &http.Client{Timeout: 60 * time.Second},
 		globals: g,
 	}
+	// С CLAB_CONFIG_DIR маркер не читается вовсе: граница исполнителя этапа
+	// — окружение его префикса (решение 0049).
+	if os.Getenv("CLAB_CONFIG_DIR") == "" {
+		c.markerLoad = loadDirMarker
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
-	host, origin, hc, found, err := resolveHost(cfg, g)
+	ch, err := chooseHost(cfg, g, c.marker, false)
 	if err != nil {
 		return nil, err
 	}
-	c.host = host
-	if origin != "" {
-		c.origin = origin
-		c.base = origin + "/v1"
+	c.host, c.hostSource = ch.host, ch.source
+	if ch.source == hostFromMarker {
+		c.hostMarker = ch.marker
+		if !ch.found {
+			c.hostErr = markerHostError(ch.marker)
+			return c, nil
+		}
 	}
-	if c.token == "" && found {
-		c.token = hc.Token
+	if ch.origin != "" {
+		c.origin = ch.origin
+		c.base = ch.origin + "/v1"
+	}
+	if c.token == "" && ch.found {
+		c.token = ch.hc.Token
 	}
 	return c, nil
+}
+
+// marker — маркер каталога: nil без маркера или без права его читать.
+func (c *Client) marker() (*dirMarker, error) {
+	if c.markerLoad == nil {
+		return nil, nil
+	}
+	c.markerOnce.Do(func() { c.markerVal, c.markerErr = c.markerLoad() })
+	return c.markerVal, c.markerErr
 }
 
 // requireHost — есть ли куда ходить. Без адреса — подсказка, как его
@@ -78,9 +113,12 @@ func (c *Client) requireHost() error {
 	if c.base != "" {
 		return nil
 	}
+	if c.hostErr != nil {
+		return c.hostErr
+	}
 	if c.host != "" {
 		// default_host остался в конфиге без записи в hosts — поправили руками.
-		return fmt.Errorf("хост не настроен: clab auth login --host %s (хоста по умолчанию %s нет в %s)", c.host, c.host, configPath())
+		return fmt.Errorf("хост не настроен: clab auth login --host %s (хоста по умолчанию %s нет в %s)", c.host, c.host, configPathLabel())
 	}
 	return fmt.Errorf("хост не настроен: clab auth login --host https://sdlc.example.com")
 }
@@ -239,23 +277,58 @@ func (c *Client) project(ctx context.Context, explicit string) (string, error) {
 	if key != "" {
 		return key, nil
 	}
-	return "", fmt.Errorf("не указан проект: --project, SDLC_PROJECT или каталог репозитория, привязанного к проекту")
+	return "", fmt.Errorf("не указан проект: --project, SDLC_PROJECT или каталог репозитория, привязанного к проекту; привязать каталог к проекту — clab setup --project <ключ>")
 }
 
 // optionalProject — тот же выбор проекта, но «не задан» здесь не ошибка, а
 // пустой ключ: clab whoami отвечает и без проекта, а ошибка сервера при
 // поиске по git remote остаётся ошибкой.
 func (c *Client) optionalProject(ctx context.Context, explicit string) (string, error) {
+	pc, err := c.resolveProject(ctx, explicit)
+	return pc.key, err
+}
+
+// Откуда взят проект: те же слова — в project_source у clab whoami --json.
+const (
+	projectFromFlag   = "flag"
+	projectFromEnv    = "env"
+	projectFromMarker = "marker"
+	projectFromRemote = "git_remote"
+)
+
+// projectChoice — выбранный проект и откуда он взят; marker — у источника
+// marker.
+type projectChoice struct {
+	key    string
+	source string
+	marker *dirMarker
+}
+
+// resolveProject — порядок выбора проекта (решение 0077, п. 6): --project,
+// SDLC_PROJECT, маркер каталога, git remote. Маркер сильнее git remote: это
+// слово человека, а remote — вывод. Ни одного — пустой ключ без ошибки.
+func (c *Client) resolveProject(ctx context.Context, explicit string) (projectChoice, error) {
 	if err := c.requireHost(); err != nil {
-		return "", err
+		return projectChoice{}, err
 	}
 	if explicit != "" {
-		return explicit, nil
+		return projectChoice{key: explicit, source: projectFromFlag}, nil
 	}
 	if key := os.Getenv("SDLC_PROJECT"); key != "" {
-		return key, nil
+		return projectChoice{key: key, source: projectFromEnv}, nil
 	}
-	return c.projectByRemote(ctx)
+	mk, err := c.marker()
+	if err != nil {
+		return projectChoice{}, err
+	}
+	if mk != nil {
+		return projectChoice{key: mk.Project, source: projectFromMarker, marker: mk}, nil
+	}
+	key, err := c.projectByRemote(ctx)
+	if err != nil || key == "" {
+		return projectChoice{}, err
+	}
+	return projectChoice{key: key, source: projectFromRemote}, nil
 }
 
 func query(pairs ...string) url.Values {

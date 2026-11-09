@@ -31,36 +31,65 @@ type HostConfig struct {
 	Handle string `json:"handle,omitempty"`
 }
 
+// errNoConfigDir — конфигу негде жить: ни CLAB_CONFIG_DIR, ни
+// XDG_CONFIG_HOME, ни домашнего каталога. Запасного «./.clab» нет (решение
+// 0077, п. 6): токен в текущем каталоге оказался бы в репозитории.
+var errNoConfigDir = errors.New("нет домашнего каталога: задайте CLAB_CONFIG_DIR")
+
 // configDir — $CLAB_CONFIG_DIR, иначе $XDG_CONFIG_HOME/clab, иначе
-// ~/.config/clab: та же договорённость, что у gh.
-func configDir() string {
+// ~/.config/clab: та же договорённость, что у gh. Без всех трёх — ошибка
+// errNoConfigDir.
+func configDir() (string, error) {
 	if dir := os.Getenv("CLAB_CONFIG_DIR"); dir != "" {
-		return dir
+		return dir, nil
 	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "clab")
+		return filepath.Join(xdg, "clab"), nil
 	}
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".clab")
+	if err != nil || home == "" {
+		return "", errNoConfigDir
 	}
-	return filepath.Join(home, ".config", "clab")
+	return filepath.Join(home, ".config", "clab"), nil
 }
 
-func configPath() string { return filepath.Join(configDir(), "config.json") }
+func configPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+// configPathLabel — путь конфига для сообщений: без каталога конфига вместо
+// пути говорится, почему его нет.
+func configPathLabel() string {
+	p, err := configPath()
+	if err != nil {
+		return err.Error()
+	}
+	return p
+}
 
 // loadConfig читает конфиг; отсутствие файла — не ошибка, а пустой конфиг.
+// Без каталога конфига — тоже пустой конфиг: clab с SDLC_API_URL и
+// SDLC_TOKEN и clab version работают и без домашнего каталога, а запись
+// (saveConfig) откажет.
 func loadConfig() (Config, error) {
 	cfg := Config{Hosts: map[string]HostConfig{}}
-	raw, err := os.ReadFile(configPath())
+	path, err := configPath()
+	if err != nil {
+		return cfg, nil
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return cfg, nil
 		}
-		return cfg, fmt.Errorf("конфиг %s: %w", configPath(), err)
+		return cfg, fmt.Errorf("конфиг %s: %w", path, err)
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return cfg, fmt.Errorf("конфиг %s не разбирается: %w", configPath(), err)
+		return cfg, fmt.Errorf("конфиг %s не разбирается: %w", path, err)
 	}
 	if cfg.Hosts == nil {
 		cfg.Hosts = map[string]HostConfig{}
@@ -69,7 +98,13 @@ func loadConfig() (Config, error) {
 }
 
 // saveConfig пишет конфиг с правами только для владельца: в нём токен.
-func saveConfig(cfg Config) error { return saveConfigAt(configDir(), cfg) }
+func saveConfig(cfg Config) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	return saveConfigAt(dir, cfg)
+}
 
 // saveConfigAt — то же в заданный каталог: так clab token task --config-dir
 // пишет конфиг исполнителя этапа, не трогая конфиг человека.
@@ -143,31 +178,100 @@ func splitGlobals(args []string) (globals, []string) {
 	return g, rest
 }
 
-// resolveHost — какой хост имеется в виду: --host, SDLC_API_URL, хост по
-// умолчанию из конфига. Возвращает ключ хоста, адрес интерфейса и запись
-// конфига, если она есть.
-func resolveHost(cfg Config, g globals) (host, origin string, hc HostConfig, found bool, err error) {
+// Откуда взят хост: те же слова — в host_source у clab whoami --json.
+const (
+	hostFromFlag    = "flag"
+	hostFromEnv     = "env"
+	hostFromMarker  = "marker"
+	hostFromDefault = "default_host"
+)
+
+// hostChoice — выбранный хост: ключ, адрес интерфейса, запись конфига и
+// источник. marker — маркер каталога, если он участвовал в выборе (хост из
+// него или маркер без хоста перед default_host).
+type hostChoice struct {
+	host, origin string
+	hc           HostConfig
+	found        bool
+	source       string
+	marker       *dirMarker
+}
+
+// chooseHost — порядок выбора хоста (решение 0077, п. 6): --host,
+// SDLC_API_URL, host маркера каталога, default_host. marker — источник
+// маркера; nil — маркер не читается (CLAB_CONFIG_DIR). Хост маркера
+// возвращается и без записи в конфиге (found=false): API-командам это
+// ошибка «войдите», auth login — адрес входа. Адрес хоста маркера с
+// записью — из записи: токен уходит только туда, куда входили.
+//
+// strict — битый маркер ошибка (auth login, logout, token без --host);
+// иначе он хоста не задаёт, а его ошибку скажет выбор проекта.
+func chooseHost(cfg Config, g globals, marker func() (*dirMarker, error), strict bool) (hostChoice, error) {
+	var ch hostChoice
+	var err error
 	switch {
 	case g.host != "":
-		host, origin, err = normalizeHost(g.host)
+		ch.source = hostFromFlag
+		ch.host, ch.origin, err = normalizeHost(g.host)
 	case os.Getenv("SDLC_API_URL") != "":
-		host, origin, err = normalizeHost(os.Getenv("SDLC_API_URL"))
-	case cfg.DefaultHost != "":
-		host = cfg.DefaultHost
-		if hc, found = cfg.Hosts[host]; found {
-			origin = hc.URL
-		}
+		ch.source = hostFromEnv
+		ch.host, ch.origin, err = normalizeHost(os.Getenv("SDLC_API_URL"))
 	default:
-		return "", "", HostConfig{}, false, nil
+		var mk *dirMarker
+		if marker != nil {
+			var mErr error
+			if mk, mErr = marker(); mErr != nil && strict {
+				return hostChoice{}, fmt.Errorf("%w; хост можно назвать явно: --host <адрес>", mErr)
+			}
+		}
+		ch.marker = mk
+		if mk != nil && mk.Host != "" {
+			ch.source, ch.host, ch.origin = hostFromMarker, mk.Host, mk.Origin
+			if hc, ok := cfg.Hosts[mk.Host]; ok {
+				ch.hc, ch.found = hc, true
+				if hc.URL != "" {
+					ch.origin = hc.URL
+				}
+			}
+			return ch, nil
+		}
+		if cfg.DefaultHost == "" {
+			return ch, nil
+		}
+		ch.source, ch.host = hostFromDefault, cfg.DefaultHost
+		if ch.hc, ch.found = cfg.Hosts[ch.host]; ch.found {
+			ch.origin = ch.hc.URL
+		}
+		return ch, nil
 	}
+	if err != nil {
+		return hostChoice{}, err
+	}
+	ch.hc, ch.found = cfg.Hosts[ch.host]
+	if ch.found && ch.origin == "" {
+		ch.origin = ch.hc.URL
+	}
+	return ch, nil
+}
+
+// resolveHost — какой хост имеется в виду без маркера каталога: --host,
+// SDLC_API_URL, хост по умолчанию из конфига. Возвращает ключ хоста, адрес
+// интерфейса и запись конфига, если она есть.
+func resolveHost(cfg Config, g globals) (host, origin string, hc HostConfig, found bool, err error) {
+	ch, err := chooseHost(cfg, g, nil, false)
 	if err != nil {
 		return "", "", HostConfig{}, false, err
 	}
-	if !found {
-		hc, found = cfg.Hosts[host]
-		if found && origin == "" {
-			origin = hc.URL
-		}
-	}
-	return host, origin, hc, found, nil
+	return ch.host, ch.origin, ch.hc, ch.found, nil
+}
+
+// loginHint — подсказка входа на хост.
+func loginHint(origin string) string {
+	return fmt.Sprintf("Войдите на %s: clab auth login --host %s", origin, origin)
+}
+
+// markerHostError — хост маркера без записи в конфиге: запрос не уходит, на
+// default_host clab молча не переключается.
+func markerHostError(mk *dirMarker) error {
+	return fmt.Errorf("в маркере %s хост %s, входа на него нет. %s", mk.Path, mk.Origin, loginHint(mk.Origin))
 }
