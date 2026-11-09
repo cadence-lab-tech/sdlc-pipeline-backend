@@ -84,6 +84,9 @@ func init() {
 		RESTAction("POST", "/v1/projects/:projectKey/search"),
 		RESTAction("GET", "/v1/tasks/:taskKey"),
 		RESTAction("GET", "/v1/tasks/:taskKey/state"),
+		// Стартовая инструкция — та же, что промпт work_on_task (решение
+		// 0077 п. 2); только своей задачи — проверяет ручка.
+		RESTAction("GET", "/v1/tasks/:taskKey/prompts/work"),
 		RESTAction("GET", "/v1/tasks/:taskKey/timeline"),
 		RESTAction("GET", "/v1/tasks/:taskKey/events"),
 		RESTAction("GET", "/v1/tasks/:taskKey/artifacts"),

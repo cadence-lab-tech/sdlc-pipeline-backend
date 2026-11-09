@@ -73,12 +73,15 @@ func (s *Server) registerCatalogTools() {
 		s.getDocument)
 }
 
-// registerPrompts объявляет промпт переноса правил: в Claude Code он
-// доступен как /mcp__sdlc__import_rules и запускает сценарий целиком.
+// registerPrompts объявляет промпт переноса правил: клиент MCP с промптами
+// запускает им сценарий целиком. Агенту без промптов тот же сценарий дают
+// clab import-guide (текст ImportGuide) и clab import --dry-run (решение 0077
+// п. 1: команды у этого промпта нет). Проект — тот, к которому привязан
+// сервер MCP, его ключ берётся из пути, а не вшивается в текст.
 func (s *Server) registerPrompts() {
 	s.addPrompt(&sdk.Prompt{
 		Name: "import_rules",
-		Description: "Перенести правила команды из локального репозитория в проект SDLC: " +
+		Description: "Перенести правила команды из локального репозитория в проект этого сервера MCP: " +
 			"роли, документы, репозитории.",
 		Arguments: []*sdk.PromptArgument{
 			{Name: "path", Description: "корень репозитория с правилами; по умолчанию текущий каталог"},
@@ -93,7 +96,11 @@ func (s *Server) registerPrompts() {
 			}
 			repo = req.Params.Arguments["repository"]
 		}
-		text := "Перенеси правила команды из репозитория " + path + " в проект SDLC.\n\n" +
+		target := "в проект этого сервера MCP"
+		if key, err := projectKey(ctx); err == nil {
+			target = "в проект " + key
+		}
+		text := "Перенеси правила команды из репозитория " + path + " " + target + ".\n\n" +
 			ImportGuide
 		if repo != "" {
 			text += "\n\nРепозиторий на GitHub: " + repo + " — добавь его в связку первым."

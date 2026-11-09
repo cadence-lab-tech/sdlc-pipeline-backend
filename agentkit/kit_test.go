@@ -141,8 +141,16 @@ func TestKitModelLevels(t *testing.T) {
 			"say nothing", "Do not change the model", "report to the orchestrator",
 			"full model id", "claude-opus-5-5",
 		},
+		// CLAB-416 (решение 0077 пп. 2, 6, 7): руководство нейтрально —
+		// модель уровня называет захват из настройки агентов проекта, id
+		// модели без примера провайдера; проект — с учётом строки привязки.
 		"skills/clab-guide/SKILL.md": {
-			"`execution: {model_level, model_level_source}`", "--model-level", "--model-level-for", "full model id", "claude-opus-5-5",
+			"`execution: {model_level, model_level_source}`", "--model-level", "--model-level-for", "full model id",
+			"the model of the level for your agent comes from the project's agent settings on the server",
+			"name the level and your model without judging whether they match",
+			"`--project`, then `SDLC_PROJECT`, then the binding line in `AGENTS.md` or `CLAUDE.md`",
+			"then the `git remote` of the current directory",
+			"clab prompt work", "clab guide", "--seen-artifact",
 		},
 		"agents/clab-stage.md": {"model: inherit"},
 	}
@@ -156,6 +164,9 @@ func TestKitModelLevels(t *testing.T) {
 				t.Errorf("%s: нет %q", path, s)
 			}
 		}
+	}
+	if strings.Contains(flat["skills/clab-guide/SKILL.md"], "claude-opus") {
+		t.Error("clab-guide: пример id модели провайдера в учёте")
 	}
 	// Таблица ровно из трёх строк: других уровней и моделей в ней нет.
 	rows := 0
