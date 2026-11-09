@@ -1,0 +1,12 @@
+{
+  "name": "generic",
+  "kit": null,
+  "mcp": null,
+  "run": null,
+  "executor": "process",
+  "hook": null,
+  "output": null,
+  "detect": null,
+  "levels": null,
+  "tool_policy": null
+}
