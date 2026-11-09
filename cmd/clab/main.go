@@ -56,8 +56,9 @@ func commands() []command {
 		{"edit", "поправить постановку задачи", "clab edit SDLC-42 [--title ...] [--description ... | --description - | --description-file d.md] [--priority high] [--labels bug,phase8] [--external-ref jira:PROJ-12=https://… | --external-ref \"\"] [--model-level low|medium|high | --model-level \"\"] [--model-level-for development=high ... | --model-level-for development=] (пустое значение снимает уровень) [--stage design=off|on ...]", cmdEdit},
 		{"relate", "связать задачи порядком или контекстом", "clab relate SDLC-5 --to SDLC-6 [--rel blocks] [--remove]", cmdRelate},
 		{"assign", "назначить задачу исполнителю", "clab assign SDLC-5 --to agent:runner [--clear]", cmdAssign},
-		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
+		{"usage", "отчитаться о стоимости прогона или показать её", "clab usage SDLC-5 --model <полный id модели из сессии> --input 1200 --output 800 --cost 0.42 | clab usage SDLC-4 --show", cmdUsage},
 		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md] [--instructions-dir dir]", cmdClaim},
+		{"prompt", "стартовая инструкция этапа — тот же текст, что промпт MCP work_on_task: вход в этап для агента без MCP-промптов", "clab prompt work SDLC-42 [--role developer] [--usage runner] [--json] — печатает инструкцию как есть, --json — {name, text}; токен задачи — только для своей задачи; нужен сервер v0.28.0 или новее", cmdPrompt},
 		{"heartbeat", "продлить аренду: один раз, по интервалу или пока работает долгая команда", "clab heartbeat SDLC-42 | clab heartbeat SDLC-42 --every 5m [--for 2h] | clab heartbeat SDLC-42 [--every 5m] [--with-credentials] -- <команда> [аргументы] (код выхода — код команды; без --every интервал из ответа сервера; команда идёт без учётных данных clab: SDLC_TOKEN, SDLC_API_URL, SDLC_PROJECT, SDLC_ACTOR вычищены, CLAB_CONFIG_DIR — пустой временный каталог; --with-credentials передаёт окружение как есть)", cmdHeartbeat},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
@@ -66,7 +67,7 @@ func commands() []command {
 		{"gates", "что мешает переходу", "clab gates SDLC-42 [--transition analysis_done]", cmdGates},
 		{"transition", "запросить переход", "clab transition SDLC-42 --to analysis_done [--summary ...] [--artifact kind=file] — --artifact только для текста, бинарный файл сдаётся до перехода: clab submit --file", cmdTransition},
 		{"move", "перевести задачу в любой статус её цикла мимо переходов и гейтов (человек: сотрудник уровня agent или maintainer и выше)", "clab move SDLC-42 --to analysis --reason \"требования неверны\" — --to и --reason обязательны; гейты не проверяются, текущий прогон закрывается (outcome moved, аренда снята, токен исполнителя гаснет), открывается новая попытка; в текущий статус — повторный проход этапа; выключенный этап — stage_disabled, сначала clab edit SDLC-42 --stage <статус>=on; агенту и токену задачи закрыто; нужен сервер с переводом в статус (CLAB-408)", cmdMove},
-		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed]", cmdDecide},
+		{"decide", "закрыть гейт решением", "clab decide SDLC-42 --transition analysis_done --gate human_approval [--status passed] [--seen-artifact <id> | --seen-artifact \"\"] — со сверкой решение пишется, только если последний артефакт этапа — этот (\"\" — артефактов не было), иначе 409", cmdDecide},
 		{"wait", "дождаться решения по гейту или смены статуса задачи", "clab wait SDLC-42 [--gate human_approval] [--transition <ключ>] [--timeout 8h] [--json] — ждёт долгим опросом, пока гейт (тип или ключ) на переходах из текущего статуса не решён или задача не сменила статус либо прогон; одна строка исхода в конце; коды: 0 passed, 3 returned (с причиной), 4 status_changed, 5 timeout, 1 ошибка, 2 ждать нечего; аренду не продлевает — clab heartbeat SDLC-42 --with-credentials -- clab wait SDLC-42 …; сервер без ручки событий — опрос раз в 15 с", cmdWait},
 		{"search", "поиск по коду, артефактам и документам проекта", "clab search \"ротация токенов\" [--scope code] [--repo acme/api] [--top 10]", cmdSearch},
 		{"index", "состояние индекса репозиториев", "clab index [--project SDLC]", cmdIndex},
@@ -85,6 +86,7 @@ func commands() []command {
 		{"export", "выгрузить проект связкой: репозитории, роли, документы, цикл", "clab export [--project SDLC] > bundle.json | clab export --dir rules/ [--force] (каталог связки: bundle.json и roles/<ключ роли>/ с role.json и документами <имя>.md; --force заменяет bundle.json и roles/ в непустом каталоге)", cmdExport},
 		{"import", "применить связку к проекту или раздать её нескольким", "clab import --file bundle.json [--dry-run] | clab import --dir rules/ [--dry-run] (каталог связки из export --dir) | clab import --from SDLC --to ACME,WEB", cmdImport},
 		{"import-guide", "инструкция агенту по переносу правил команды: роли документами, каталог связки", "clab import-guide", cmdImportGuide},
+		{"guide", "руководство агента по Cadence Lab: команды clab, путь задачи, артефакты, апрувы, токены задачи", "clab guide [--json] — тело скила clab-guide из набора агента инстанса, вход не нужен; --json — {version, name, text}; нужен сервер v0.28.0 или новее", cmdGuide},
 		{"repo", "привязать репозиторий к проекту или отвязать", "clab repo add acme/api [--hint backend] [--branch main] [--installation 42]\n  clab repo remove acme/api", cmdRepo},
 		{"role", "показать роль, завести версию инструкции или предложить её", "clab role show analyst | clab role put --key analyst --name Аналитик --file instructions.md [--contract contract.json] [--model-level medium] | clab role put --dir roles/analyst (каталог роли: role.json и документы <имя>.md; версия собирается целиком: без --model-level у неё уровня нет) | clab role propose developer --dir roles/developer|--file main.md --changelog \"…\" [--contract …] [--inputs …] [--model-level …] (предложение версии своей роли, участник уровня agent; версию заводит утверждение) | clab role proposals developer [--state pending] [<id>] | clab role approve <id> | clab role reject <id> --note \"…\" | clab role withdraw <id> [--note \"…\"] (approve и reject — сопровождающий; --role, если роль известна)", cmdRole},
 		{"instruction", "библиотека инструкций: общие правила ролей версиями, «обновить в ролях»", "clab instruction list | clab instruction show git [--version N] | clab instruction put --key git --file git.md [--name ...] [--summary ...] [--kind instructions] [--changelog ...] (ключ есть — новая версия, нет — инструкция с версией 1) | clab instruction apply git --role developer [--role integrator] [--version N] [--changelog ...] (каждой роли — новая версия с git.md, закреплённым за версией инструкции; роль уже на ней — без изменений)", cmdInstruction},
@@ -919,13 +921,14 @@ func blockedTransition(task, to string, err error) error {
 // cmdDecide закрывает гейт решением. Нужен CI: чек-лист и внешнюю проверку
 // закрывает не агент, а тот, кто её выполнил.
 func cmdDecide(ctx context.Context, c *Client, args []string) error {
-	var transition, gate, status, details string
+	var transition, gate, status, details, seen string
 	task, rest := popTask(args)
 	fs, err := flags("decide", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&transition, "transition", "", "переход, на котором висит гейт")
 		fs.StringVar(&gate, "gate", "", "ключ гейта")
 		fs.StringVar(&status, "status", "passed", "passed | failed | waived")
 		fs.StringVar(&details, "details", "", "подробности решения в JSON")
+		fs.StringVar(&seen, "seen-artifact", "", "id последнего артефакта этапа, который вы видели; \"\" — артефактов не было; появился новый — 409, решение не пишется")
 	})
 	if err != nil {
 		return err
@@ -945,6 +948,13 @@ func cmdDecide(ctx context.Context, c *Client, args []string) error {
 		}
 		body["details"] = parsed
 	}
+	// Сверка (CLAB-326, решение 0077 п. 1): пустая строка значима —
+	// «артефактов не было», поэтому смотрим, задан ли флаг, а не его значение.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "seen-artifact" {
+			body["seen_artifact_id"] = seen
+		}
+	})
 
 	var out json.RawMessage
 	if err := c.post(ctx,

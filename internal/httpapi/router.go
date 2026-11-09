@@ -291,6 +291,9 @@ func (s *Server) Handler() http.Handler {
 		// кэш состояния приложения и счётчик из базы.
 		v1.GET("/projects/:projectKey/health", viewer, s.projectHealth)
 		v1.GET("/tasks/:taskKey/state", viewer, s.getTaskState)
+		// Стартовая инструкция этапа для агента без MCP-промптов (решение
+		// 0077 п. 2): тот же текст, что у промпта work_on_task.
+		v1.GET("/tasks/:taskKey/prompts/work", viewer, s.workPrompt)
 		v1.POST("/tasks/:taskKey/claim", agent, s.claimTask)
 		v1.POST("/tasks/:taskKey/heartbeat", agent, s.heartbeat)
 		v1.POST("/tasks/:taskKey/release", agent, s.releaseTask)

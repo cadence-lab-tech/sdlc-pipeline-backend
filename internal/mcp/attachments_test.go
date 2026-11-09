@@ -393,8 +393,9 @@ func TestToolDescriptionsNameFilePath(t *testing.T) {
 	flat := strings.Join(strings.Fields(promptText(t, cs, "work_on_task", map[string]string{"task": "SDLC-42"})), " ")
 	for _, want := range []string{
 		"clab artifact <id> -o <каталог>/", "/v1/artifacts/<id>/content",
-		"инструментом чтения файлов", "clab attach <ключ> <файл>",
-		"clab submit <ключ> --kind <kind> --file <файл>",
+		// Ключ задачи подставлен в команды (CLAB-416).
+		"инструментом чтения файлов", "clab attach SDLC-42 <файл>",
+		`clab submit SDLC-42 --kind <kind> --title "…" --file <файл>`,
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("work_on_task: в промпте нет %q", want)
