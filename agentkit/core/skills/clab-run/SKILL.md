@@ -1,6 +1,6 @@
 ---
 name: clab-run
-description: Drive a Cadence Lab task through its cycle in one chat — the orchestrator starts a sub-agent for each stage with the role of the status, asks the human for approvals right in the chat and carries the task to a terminal status. Use when asked "take ABC-12 into work", "drive ABC-12 through the cycle", "finish ABC-12".
+description: Drive a Cadence Lab task through its cycle in one chat — the orchestrator starts a stage executor for each stage with the role of the status, asks the human for approvals right in the chat and carries the task to a terminal status. Use when asked "take ABC-12 into work", "drive ABC-12 through the cycle", "finish ABC-12".
 ---
 
 # A task through the cycle in one chat
@@ -141,7 +141,9 @@ else. Answer: the output and the exit code as they are, and whether there
 was a message of the command check.
 ```
 
-The probe carries neither a task key nor a token directory (the project is
+This probe is for an executor started as a sub-agent; an executor started
+as a process is checked with `clab exec --dry-run` instead (section
+"Executor as a process"). The probe carries neither a task key nor a token directory (the project is
 named so that `whoami` reaches the credentials instead of stopping at "no
 project"); on the fallback path (below) the probe is not needed. By the
 answer:
@@ -239,11 +241,24 @@ The model of the level, in this order:
   executor without a model; the lease and the task token stay the same.
 - The level is a recommendation, not a gate: transitions do not depend on
   it, and the executor does not change models on its own.
+- An executor started as a process gets its model from `clab exec`: it
+  resolves the same order from the task state (the explicit `--model`
+  first) and prints a line "model …" with the source; that line, from the
+  dry run, is the line in the chat. Pass `--model` only to override it.
 
 ## Stage executor
 
-One executor is one run of a role on a stage. Start it the way your agent
-starts a stage executor (the notes), with the model by the section
+One executor is one run of a role on a stage. There are two ways to start
+it, and the `executor` field of your agent's binding chooses (the notes
+name yours):
+
+- **sub-agent** (`executor: subagent`) — a sub-agent of this chat, started
+  the way the notes describe, with the prompt below;
+- **process** (`executor: process`, or when a sub-agent cannot be started)
+  — a separate process of an agent started by `clab exec`, with the prompt
+  below in a note file (section "Executor as a process").
+
+Start it the way your agent starts a stage executor (the notes), with the model by the section
 "Executor model" — not in the background when the next step depends on the
 report, in the background when other tasks run in parallel — and a short
 description like `<key>: <role>`. Prompt:
@@ -320,6 +335,60 @@ The role comes from the `role.key` field of the `clab claim` answer. The
 human holds the lease and the executor works in it with the task token; a
 lease left from a previous run does not matter — the orchestrator's new
 claim confirms it.
+
+### Executor as a process
+
+`clab exec` starts the executor as a child process with the task-token
+boundary: it reads only `<run directory>/clab` (neither the human's own
+config nor the orchestrator's `SDLC_API_URL` and `SDLC_TOKEN`), removes the
+`SDLC_*` and `CLAB_*` variables of the orchestrator from the process
+environment and sets the task-token directory and the project instead,
+renews the lease while the process runs and exits with its code. The token
+goes neither into the command line nor into files: an MCP server, if the
+start connects one, reads it from a variable. Steps 1–4 of "Executor
+credentials" stay the same (run directory, claim, task token, background
+renewal); then:
+
+1. **Write the note** `<run directory>/note.md`: the executor prompt above
+   with the role, the stage, the working copies and the run directory
+   filled in, and with one change in the report item — "write the report
+   into `<run directory>/report.md`; your last message is not read".
+   `clab exec` appends the note to the starting instruction of the stage
+   (the text of `clab prompt work`).
+2. **Check the start** without starting anything: `clab exec <key> --dir
+   <run directory> --note-file <run directory>/note.md --dry-run [--
+   <command>]`. It names the agent and why it was chosen, the model with
+   its source, the environment (names only; the token is "task token"),
+   the command, whether a command check is attached to the start, and
+   warnings (a model that does not reach the command, a role tool policy
+   the agent cannot take). This is the probe of the process path, instead
+   of a `clab` call without the directory: the executor's environment
+   already points at the task-token directory. A refusal — exit code 125
+   and a line `clab exec: …` — means the start is not possible as asked,
+   for example the directory holds no task token of this task: issue it
+   again (step 3 of "Executor credentials").
+3. **Start** with the same command without `--dry-run` — in the
+   foreground when the next step depends on the report, in the background
+   when other tasks run in parallel. Without a command after `--` the run
+   template of your agent's binding is used; a binding without one
+   (`generic`) needs the command: `clab exec <key> --dir <run directory>
+   --note-file <run directory>/note.md --agent generic -- <the agent's
+   non-interactive command>`. The instruction goes as the `{prompt}`
+   argument of the command, or on standard input when the command has
+   none. `--agent` overrides the binding chosen by the program name,
+   `--model` the model.
+4. **Take the report** from `<run directory>/report.md` after `clab exec`
+   exits. Exit code 125 — `clab exec` refused before starting the agent;
+   any other code is the agent's own (128+n — killed by a signal). The
+   output of the process is the agent's event stream, not the report: with
+   no `report.md`, tell the human, show the tail of the output and ask, as
+   with a report that changed nothing.
+
+Everything else is the same for both ways: the executor keeps the prefix
+in every `clab` command (a check attached to the start refuses `clab`
+without it), writes temporary files only into the run directory, and the
+orchestrator stops the renewal and deletes the run directory after the
+report.
 
 ## Approval
 

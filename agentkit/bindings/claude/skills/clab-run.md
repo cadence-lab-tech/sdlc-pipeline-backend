@@ -46,6 +46,12 @@ executor on the chat's model. The line in the chat reads, for example,
 model is refused — say so in the chat and start the executor without
 `model`.
 
+- **Process path.** When a sub-agent cannot be started, the executor can
+  be a process (section "Executor as a process"): `clab exec <key> --dir
+  <run directory> --note-file <run directory>/note.md --agent claude`. The
+  hook of `clab-stage` lives in the agent definition and is not attached
+  to a process: the boundary is the environment `clab exec` builds, and its
+  dry run says "no command check".
 - **Fallback path.** The old-way executor is a sub-agent of type
   `general-purpose` that claims the stage itself through `/clab-work`; its
   model is chosen by the same table: the `model` parameter of this

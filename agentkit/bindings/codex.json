@@ -13,8 +13,12 @@
   },
   "run": [
     "codex", "exec", "--json", "--sandbox", "workspace-write",
-    "--add-dir", "{config_dir}",
+    "--skip-git-repo-check", "--ignore-user-config",
+    "--add-dir", "{run_dir}",
     "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "shell_environment_policy.exclude=[\"SDLC_TOKEN\"]",
+    "-c", "hooks.PreToolUse=[{matcher=\"Bash\",hooks=[{type=\"command\",command={hook_script}}]}]",
+    "--dangerously-bypass-hook-trust",
     "-m", "{model}",
     "-c", "model_reasoning_effort=\"{effort}\"",
     "-c", "mcp_servers.sdlc.url=\"{mcp_url}\"",
@@ -24,6 +28,7 @@
   "executor": "process",
   "hook": {
     "placement": "launch",
+    "agent": "clab-stage",
     "event": "PreToolUse",
     "matcher": "Bash"
   },

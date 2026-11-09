@@ -125,6 +125,18 @@ type heartbeater struct {
 	// withCredentials — команда обёртки получает окружение clab как есть;
 	// иначе без учётных данных (isolatedEnv).
 	withCredentials bool
+	// env — окружение команды целиком, собранное вызывающим (clab exec:
+	// каталог токена задачи, CLAB-419); nil — по withCredentials.
+	env []string
+	// name — чьи это строки: «clab heartbeat» или «clab exec».
+	name string
+}
+
+func (h *heartbeater) label() string {
+	if h.name == "" {
+		return "clab heartbeat"
+	}
+	return h.name
 }
 
 // credentialVars — переменные, которыми clab берёт хост, токен, проект и
@@ -181,8 +193,8 @@ func (h *heartbeater) first(ctx context.Context) error {
 		return fmt.Errorf("интервал продления %s не меньше оставшегося срока аренды %s (до %s): аренда истечёт между продлениями — задайте --every меньше",
 			h.every, remaining, when(&l.ExpiresAt))
 	}
-	fmt.Fprintf(h.out, "clab heartbeat: аренда прогона %s продлена до %s, дальше — каждые %s\n",
-		short(h.runID), when(&l.ExpiresAt), h.every)
+	fmt.Fprintf(h.out, "%s: аренда прогона %s продлена до %s, дальше — каждые %s\n",
+		h.label(), short(h.runID), when(&l.ExpiresAt), h.every)
 	return nil
 }
 
@@ -207,7 +219,7 @@ func (h *heartbeater) keep(ctx context.Context) string {
 		case leaseGone(err):
 			return err.Error()
 		default:
-			fmt.Fprintf(h.warn, "clab heartbeat: продление не удалось, повтор через %s: %v\n", h.every, err)
+			fmt.Fprintf(h.warn, "%s: продление не удалось, повтор через %s: %v\n", h.label(), h.every, err)
 		}
 	}
 }
@@ -261,7 +273,10 @@ func (h *heartbeater) wrap(ctx context.Context, argv []string, stdin io.Reader, 
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	if !h.withCredentials {
+	switch {
+	case h.env != nil:
+		cmd.Env = h.env
+	case !h.withCredentials:
 		// Изолируется только дочерний процесс: клиент обёртки собран
 		// до разбора и продлевает аренду прежними учётными данными.
 		dir, err := os.MkdirTemp("", "clab-heartbeat-")
@@ -282,8 +297,8 @@ func (h *heartbeater) wrap(ctx context.Context, argv []string, stdin io.Reader, 
 	go func() {
 		defer close(kept)
 		if reason := h.keep(lctx); reason != "" {
-			fmt.Fprintf(h.warn, "clab heartbeat: аренда прогона %s потеряна, команда продолжает работу (%s); сдать работу токеном задачи уже не выйдет — сохраните несданное\n",
-				short(h.runID), reason)
+			fmt.Fprintf(h.warn, "%s: аренда прогона %s потеряна, команда продолжает работу (%s); сдать работу токеном задачи уже не выйдет — сохраните несданное\n",
+				h.label(), short(h.runID), reason)
 		}
 	}()
 	waited := make(chan error, 1)

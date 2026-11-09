@@ -60,6 +60,7 @@ func commands() []command {
 		{"claim", "забрать задачу и получить контекст этапа: инструкцию роли, что сдать, входы", "clab claim SDLC-42 [--session ref] [--instructions-file role.md] [--instructions-dir dir]", cmdClaim},
 		{"prompt", "стартовая инструкция этапа — тот же текст, что промпт MCP work_on_task: вход в этап для агента без MCP-промптов", "clab prompt work SDLC-42 [--role developer] [--usage runner] [--json] — печатает инструкцию как есть, --json — {name, text}; токен задачи — только для своей задачи; нужен сервер v0.28.0 или новее", cmdPrompt},
 		{"heartbeat", "продлить аренду: один раз, по интервалу или пока работает долгая команда", "clab heartbeat SDLC-42 | clab heartbeat SDLC-42 --every 5m [--for 2h] | clab heartbeat SDLC-42 [--every 5m] [--with-credentials] -- <команда> [аргументы] (код выхода — код команды; без --every интервал из ответа сервера; команда идёт без учётных данных clab: SDLC_TOKEN, SDLC_API_URL, SDLC_PROJECT, SDLC_ACTOR вычищены, CLAB_CONFIG_DIR — пустой временный каталог; --with-credentials передаёт окружение как есть)", cmdHeartbeat},
+		{"exec", "запустить исполнителя этапа процессом: агент с токеном задачи из каталога захода, аренда продлевается, пока он работает", "clab exec SDLC-42 --dir <каталог захода> [--agent claude|codex|generic] [--model <id>] [--effort <усилие>] [--note-file note.md] [--dry-run] [-- <команда агента> [аргументы]] — каталог захода: родитель clab/ с конфигом токена задачи (clab token task SDLC-42 --config-dir <каталог>/clab), личный конфиг человека не читается; без команды — шаблон run привязки (агент по признаку окружения), с командой — агент по имени программы (claude, codex, иначе generic), --agent сильнее; подстановки {model} {effort} {mcp_config} {mcp_url} {config_dir} {run_dir} {allowed_tools} {disallowed_tools} {task} {role} {workdir} {hook_script} {prompt} (пустая снимает слово и флаг перед ним); инструкция — clab prompt work и заметка, аргументом {prompt} или на stdin; окружение агента — без SDLC_* и CLAB_* запустившего, с CLAB_CONFIG_DIR=<каталог>/clab и SDLC_PROJECT, SDLC_TOKEN — только для MCP по ссылке на переменную; код выхода — код агента, отказ до запуска — 125 и строка «clab exec: …»; нужен сервер v0.28.0 или новее", cmdExec},
 		{"release", "отпустить задачу, не завершив этап", "clab release SDLC-42 [--note ...]", cmdRelease},
 		{"submit", "сдать артефакт", "clab submit SDLC-42 --kind analysis.brief --title ... --file brief.md | clab submit SDLC-42 --kind test.screenshot --title ... --file shot.png — бинарный файл (по расширению и первым 8 КиБ) уходит multipart с format: binary, текст — строкой как раньше; --file - читает только текст", cmdSubmit},
 		{"link", "привязать PR, ветку или коммит", "clab link SDLC-42 --repo acme/api --ref 128 [--url ...] [--state open]", cmdLink},
@@ -99,10 +100,11 @@ func commands() []command {
 	}
 }
 
-// localCommand — команда работает с этой машиной, а не с API: клиент не
-// строится, и вход не нужен (clab server управляет установкой, на которой
-// API может ещё не быть или уже не работать).
-func localCommand(name string) bool { return name == "server" }
+// localCommand — клиент из окружения и конфига человека не строится:
+// clab server работает с этой машиной, а не с API (API может ещё не быть
+// или уже не работать); clab exec строит клиент сам из каталога захода с
+// токеном задачи, и личный конфиг человека ему не нужен вовсе (CLAB-419).
+func localCommand(name string) bool { return name == "server" || name == "exec" }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

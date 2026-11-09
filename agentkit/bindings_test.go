@@ -173,13 +173,15 @@ func TestCoreIsNeutral(t *testing.T) {
 }
 
 // Фронтматтер файлов files на main 023d018 — sha256 блока между «---»:
-// ключи и значения не меняются ни на символ (AC-3).
+// ключи и значения не меняются ни на символ (AC-3). Исключение —
+// description у clab-run и clab-stage (CLAB-419, R13): «sub-agent» и
+// «/clab-run» стали нейтральными, ключи и остальные значения те же.
 var legacyFrontmatter = map[string]string{
-	"agents/clab-stage.md":         "6cf68d3d28ed407c9ce4dc300bf9fe96a325f78d1f88ddafe0cc320108b5a4de",
+	"agents/clab-stage.md":         "06fc8d08edb777c529b7ba6ac52df55c4f4f1d13c0314bbd7049e2418db12746",
 	"skills/clab-backlog/SKILL.md": "2513a7c331953b4f537bef7a2d6711db26aad7452e43d3a7146dcddc6f06a62f",
 	"skills/clab-guide/SKILL.md":   "0c025381435fee7ec88755b7b1570985ad41e6c427e07020b023ff41ab3f6a32",
 	"skills/clab-rules/SKILL.md":   "0574ecc95ac9828f9e0a5e5cfa69a3e6d13e4e211499c63b6988157fae50e3fe",
-	"skills/clab-run/SKILL.md":     "e3e96479be0ac89cc3a17390c6eb0e3b9c9d6bfba4fd7723a7fa9db09b167f80",
+	"skills/clab-run/SKILL.md":     "93e6c5c2e4030847cb5c5b01998e6a378d9eac5ea06a87b72cede3574138f2a1",
 	"skills/clab-status/SKILL.md":  "3b6b4a49de0bd8117ed164ad0e6892821f314a47aa075d1154feef4c2afdbc6a",
 	"skills/clab-work/SKILL.md":    "0d15d03c346aba480f2e14be48e71e0d1d9010be6fd44407a011cf03b38838fd",
 }
@@ -282,7 +284,14 @@ func TestCodexBinding(t *testing.T) {
 		if d.front != coreDoc.front || len(meta) != 2 || meta["name"] != name || meta["description"] == "" {
 			t.Errorf("%s: фронтматтер не name и description ядра:\n%s", f.Path, d.front)
 		}
-		if f.Content != core["skills/"+name+"/SKILL.md"].Content {
+		// Заметки Codex (CLAB-419) — только у clab-run, дописаны в конец
+		// тела ядра; остальные скилы — ядро байт в байт.
+		coreContent := core["skills/"+name+"/SKILL.md"].Content
+		if name == "clab-run" {
+			if !strings.HasPrefix(f.Content, coreContent) || !strings.Contains(f.Content[len(coreContent):], "## Notes for Codex") {
+				t.Errorf("%s: не ядро с заметками Codex в конце", f.Path)
+			}
+		} else if f.Content != coreContent {
 			t.Errorf("%s: не ядро", f.Path)
 		}
 		for _, s := range []string{"argument-hint", "$ARGUMENTS", "\nmodel:", "\neffort:", "/mcp__"} {
@@ -295,7 +304,12 @@ func TestCodexBinding(t *testing.T) {
 		if f.SHA256 != sumOf(f.Content) {
 			t.Errorf("%s: sha256 не сходится", f.Path)
 		}
-		if v := neutralViolations(f.Content); len(v) > 0 {
+		// Нейтральна часть ядра; заметки привязки называют своего агента.
+		content := f.Content
+		if c, ok := core[strings.TrimPrefix(f.Path, ".agents/")]; ok && strings.HasPrefix(content, c.Content) {
+			content = c.Content
+		}
+		if v := neutralViolations(content); len(v) > 0 {
 			t.Errorf("%s: %q", f.Path, v)
 		}
 	}

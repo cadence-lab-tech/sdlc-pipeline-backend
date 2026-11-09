@@ -82,11 +82,22 @@ func (c agentCondition) holds(getenv func(string) string) bool {
 	}
 }
 
-// agentBinding — то, что clab берёт из привязки набора агента: признак и
-// таблицу уровней по умолчанию. Остальные поля привязки ему не нужны.
+// agentBinding — то, что clab берёт из привязки набора агента: признак,
+// таблицу уровней по умолчанию и, для clab exec (CLAB-419), шаблон запуска,
+// способ исполнителя, хук и перевод tool_policy. Поле непонятной формы —
+// как пустое: разбор терпимый, как у всего набора.
 type agentBinding struct {
 	Name   string
 	Levels map[string]string
+	// Run — шаблон команды запуска; nil — у привязки его нет (generic).
+	Run []string
+	// Executor — subagent или process (0077 п. 3).
+	Executor string
+	// Hook — хук как записан в наборе; у placement launch сервер кладёт
+	// сценарий в command.
+	Hook *bindingHook
+	// ToolPolicy — привязка переводит tool_policy роли во флаги агента.
+	ToolPolicy bool
 	// detect пуст, если признака нет или его форма непонятна: такая
 	// привязка не узнаёт агента, как привязка без признака.
 	detect []agentCondition
@@ -146,9 +157,13 @@ func detectAgent(getenv func(string) string, bindings []agentBinding) []string {
 // без привязок (форма — CLAB-417, AC-12 его аналитики).
 func parseBindings(raw json.RawMessage) []agentBinding {
 	type entry struct {
-		Name   string            `json:"name"`
-		Detect json.RawMessage   `json:"detect"`
-		Levels map[string]string `json:"levels"`
+		Name       string            `json:"name"`
+		Detect     json.RawMessage   `json:"detect"`
+		Levels     map[string]string `json:"levels"`
+		Run        json.RawMessage   `json:"run"`
+		Executor   json.RawMessage   `json:"executor"`
+		Hook       json.RawMessage   `json:"hook"`
+		ToolPolicy json.RawMessage   `json:"tool_policy"`
 	}
 	var entries []entry
 	if json.Unmarshal(raw, &entries) != nil {
@@ -167,10 +182,31 @@ func parseBindings(raw json.RawMessage) []agentBinding {
 			continue
 		}
 		b := agentBinding{Name: e.Name, Levels: e.Levels, detect: parseDetect(e.Detect)}
+		var run []string
+		if json.Unmarshal(e.Run, &run) == nil && len(run) > 0 {
+			b.Run = run
+		}
+		_ = json.Unmarshal(e.Executor, &b.Executor)
+		var hook bindingHook
+		if json.Unmarshal(e.Hook, &hook) == nil && hook.Placement != "" {
+			b.Hook = &hook
+		}
+		var policy map[string]any
+		b.ToolPolicy = json.Unmarshal(e.ToolPolicy, &policy) == nil && len(policy) > 0
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// bindingHook — поле hook привязки: где крепится хук, к какому событию и
+// тулу, и сценарий (command) у хука запуска.
+type bindingHook struct {
+	Placement string `json:"placement"`
+	Agent     string `json:"agent"`
+	Event     string `json:"event"`
+	Matcher   string `json:"matcher"`
+	Command   string `json:"command"`
 }
 
 // parseDetect — массив условий «или»; хоть одно непонятное — признака нет.
