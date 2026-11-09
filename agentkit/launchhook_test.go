@@ -89,3 +89,35 @@ func TestLaunchHookNeedsAgentScript(t *testing.T) {
 		}
 	}
 }
+
+// AC-11: ядро описывает оба способа запуска исполнителя и шаги процесса,
+// описания clab-run и clab-stage нейтральны.
+func TestCoreDescribesProcessExecutor(t *testing.T) {
+	k := loadKit(t)
+	core := filesByPath(append(append([]File{}, k.Core.Skills...), k.Core.Agents...))
+	run := strings.Join(strings.Fields(core["skills/clab-run/SKILL.md"].Content), " ")
+	for _, s := range []string{
+		"`executor: subagent`", "`executor: process`", "### Executor as a process", "`clab exec <key> --dir",
+		"--note-file <run directory>/note.md", "--dry-run", "<run directory>/report.md", "Exit code 125",
+	} {
+		if !strings.Contains(run, s) {
+			t.Errorf("ядро clab-run: нет %q", s)
+		}
+	}
+	work := strings.Join(strings.Fields(core["skills/clab-work/SKILL.md"].Content), " ")
+	for _, s := range []string{"started by `clab exec`", "report.md"} {
+		if !strings.Contains(work, s) {
+			t.Errorf("ядро clab-work: нет %q", s)
+		}
+	}
+	if d := Frontmatter(core["skills/clab-run/SKILL.md"].Content)["description"]; strings.Contains(d, "sub-agent") {
+		t.Errorf("description clab-run: %q", d)
+	}
+	if d := Frontmatter(core["agents/clab-stage.md"].Content)["description"]; strings.Contains(d, "/clab-run") {
+		t.Errorf("description clab-stage: %q", d)
+	}
+	codex := filesByPath(binding(t, k, "codex").Files)[".agents/skills/clab-run/SKILL.md"].Content
+	if !strings.Contains(codex, "## Notes for Codex") || !strings.Contains(codex, "`executor: process`") {
+		t.Error("у codex нет заметок clab-run")
+	}
+}
