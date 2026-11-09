@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"sort"
@@ -345,4 +346,56 @@ func TestClosedCostEmptyPeriod(t *testing.T) {
 	if _, err := w.engine.ProjectMetrics(w.ctx, "SDLC", 6*365*24*60*60*1e9); err == nil {
 		t.Error("период больше пяти лет должен отбиваться")
 	}
+}
+
+// CLAB-426, AC-12: закрытая стоимость и метрики читают cost_usd как прежде —
+// значит, видят сумму по прайсу, а не оценку агента: оценка 1 при цене 18
+// даёт в api_cost_usd 18, подписка по прайсу — условную стоимость.
+func TestClosedCostCountsPricingSum(t *testing.T) {
+	ctx := context.Background()
+	w := newPricingWorld(t)
+	w.activate(t, priceDoc("15"))
+	baseline, err := w.engine.ProjectMetrics(ctx, "SDLC", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, _ := w.task(t, "Закрытая по прайсу", "")
+	api := tokens(1_000_000, 1_000_000)
+	api.cost = fl(1) // оценка агента 1, по прайсу 18
+	w.report(t, task.Key, api)
+	sub := tokens(1_000_000, 0) // 3 по прайсу
+	sub.billing = "subscription"
+	w.report(t, task.Key, sub)
+	w.report(t, task.Key, usageIn{model: "other", cost: fl(2)}) // как сообщена, без признака
+	if _, err := w.store.DB().Exec(ctx, `
+		UPDATE tasks SET closed_at = now() - interval '1 hour',
+		       status_id = (SELECT ws.id FROM workflow_statuses ws JOIN workflows wf ON wf.id = ws.workflow_id
+		                    JOIN projects p ON p.id = wf.project_id
+		                    WHERE p.key = 'SDLC' AND wf.state = 'active' AND ws.category = 'done' LIMIT 1)
+		WHERE id = $1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := w.engine.ProjectMetrics(ctx, "SDLC", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base postgres.ClosedTaskCostMetric
+	for _, r := range baseline.ClosedCost {
+		if r.TaskType == "task" {
+			base = r
+		}
+	}
+	got := closedRow(t, m.ClosedCost, "task")
+	wantF(t, "api Σ (18 по прайсу + 2 как сообщена, не оценка 1)", got.APICostUSD-base.APICostUSD, 20)
+	wantF(t, "без признака Σ", got.UnspecifiedCostUSD-base.UnspecifiedCostUSD, 20)
+	wantF(t, "условно Σ (подписка по прайсу)", got.SubscriptionCostUSD-base.SubscriptionCostUSD, 3)
+	usage, err := w.engine.TaskUsage(ctx, task.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantF(t, "TaskUsage.cost_usd", usage.CostUSD, 23)
+	wantF(t, "TaskUsage.api_cost_usd", usage.APICostUSD, 20)
+	wantF(t, "TaskUsage.subscription_cost_usd", usage.SubscriptionCostUSD, 3)
 }

@@ -105,6 +105,8 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		"reported": false, "reports": float64(0), "models": []any{},
 		"input_tokens": nil, "output_tokens": nil, "cache_read_tokens": nil,
 		"cache_write_tokens": nil, "cost_usd": nil, "duration_ms": nil,
+		// CLAB-426: источник суммы прогона; пока суммы нет — null и пустой массив.
+		"cost_source": nil, "pricing_versions": []any{}, "reported_cost_usd": nil,
 	}
 	with := func(over map[string]any) map[string]any {
 		out := map[string]any{}
@@ -168,6 +170,7 @@ func TestRunUsageInTaskCard(t *testing.T) {
 	check("одна строка", usageOf(runs, runA), with(map[string]any{
 		"reported": true, "reports": float64(1), "models": []any{"m1"},
 		"input_tokens": float64(100), "output_tokens": float64(20), "cost_usd": 0.5,
+		"cost_source": "reported", "reported_cost_usd": 0.5,
 	}))
 
 	// AC-3, AC-5: вторая модель, затем повтор первой без стоимости.
@@ -178,12 +181,14 @@ func TestRunUsageInTaskCard(t *testing.T) {
 	check("две строки", usageOf(runs, runA), with(map[string]any{
 		"reported": true, "reports": float64(2), "models": []any{"m1", "m2"},
 		"input_tokens": float64(150), "output_tokens": float64(20), "cost_usd": 0.75,
+		"cost_source": "reported", "reported_cost_usd": 0.75,
 	}))
 	report(map[string]any{"model": "m1", "output_tokens": 5})
 	runs, _, _ = card()
 	wantA := with(map[string]any{
 		"reported": true, "reports": float64(3), "models": []any{"m1", "m2"},
 		"input_tokens": float64(150), "output_tokens": float64(25), "cost_usd": 0.75,
+		"cost_source": "reported", "reported_cost_usd": 0.75,
 	})
 	check("строка без стоимости", usageOf(runs, runA), wantA)
 
@@ -274,6 +279,7 @@ func TestRunUsageInTaskCard(t *testing.T) {
 	check("перепроверка", usageOf(runs, runR), with(map[string]any{
 		"reported": true, "reports": float64(2), "models": []any{"opus", "claude-opus-5-5"},
 		"input_tokens": float64(10), "cost_usd": 0.1, "duration_ms": float64(1000),
+		"cost_source": "reported", "reported_cost_usd": 0.1,
 	}))
 	check("строка без стоимости и токенов вывода", usageOf(runs, runN), with(map[string]any{
 		"reported": true, "reports": float64(1), "models": []any{"m3"}, "input_tokens": float64(7),

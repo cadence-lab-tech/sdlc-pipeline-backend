@@ -1,12 +1,16 @@
 // Стоимость работы агента (решение 0026). Сервер её не измеряет: он видит
 // только вызовы MCP, а токены и деньги тратятся у агента. Единственный
 // источник цифр — сам агент или раннер, который его запускал, поэтому здесь
-// самоотчёт, а «неизвестно» честно отличается от нуля.
+// самоотчёт, а «неизвестно» честно отличается от нуля. Токены остаются
+// самоотчётом; а сумму, когда в прайсе версии настройки агентов, снятой на
+// прогон, есть модель строки, считает сервер (решение 0077 п. 4.11,
+// usagepricing.go), и названная агентом сумма ложится рядом как оценка.
 package workflow
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -93,20 +97,39 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 				"о прогоне %s отчитывается тот, кто его забирал", run.ID)
 		}
 
-		out, err = e.store.RecordUsage(ctx, tx, postgres.UsageInput{
+		rec := postgres.UsageInput{
 			RunID: run.ID, Model: in.Model,
 			InputTokens: in.InputTokens, OutputTokens: in.OutputTokens,
 			CacheReadTokens: in.CacheReadTokens, CacheWriteTokens: in.CacheWriteTokens,
 			CostUSD: in.CostUSD, DurationMS: in.DurationMS,
 			Billing: billing, ReportedBy: actor, Details: in.Details,
-		})
+		}
+		warnings, err := e.priceUsage(ctx, tx, run, in, &rec)
 		if err != nil {
 			return err
 		}
+		out, err = e.store.RecordUsage(ctx, tx, rec)
+		if err != nil {
+			return err
+		}
+		if warnings != nil {
+			out.Warnings = warnings
+		}
 
+		// В ленту — итоговая сумма строки, та же, что в карточке; названная
+		// агентом и версия прайса — рядом (CLAB-426).
 		payload := map[string]any{"model": in.Model, "stage_run_id": run.ID.String()}
-		if in.CostUSD != nil {
-			payload["cost_usd"] = *in.CostUSD
+		if out.CostUSD != nil {
+			payload["cost_usd"] = *out.CostUSD
+		}
+		if out.CostSource != nil {
+			payload["cost_source"] = *out.CostSource
+		}
+		if out.PricingVersion != nil {
+			payload["pricing_version"] = *out.PricingVersion
+		}
+		if out.ReportedCostUSD != nil {
+			payload["reported_cost_usd"] = *out.ReportedCostUSD
 		}
 		if billing != nil {
 			payload["billing"] = *billing
@@ -115,6 +138,41 @@ func (e *Engine) ReportUsage(ctx context.Context, taskKey string, actor uuid.UUI
 	})
 
 	return out, err
+}
+
+// priceUsage решает, откуда сумма строки: по прайсу версии-снимка прогона
+// или как сообщена. Цена берётся из версии, снятой на прогон при захвате
+// (stage_runs.agent_settings_version_id), а не из текущей активной:
+// активация новой версии идущий прогон не трогает, а прогон без снимка
+// (взятый до настройки) считается как раньше. Заполняет CostMicroUSD и
+// PricingVersionID у rec; предупреждения — в ответ.
+func (e *Engine) priceUsage(ctx context.Context, q postgres.Querier, run domain.StageRun, in ReportUsageInput, rec *postgres.UsageInput) ([]string, error) {
+	// Одно правило диапазона на оба источника суммы.
+	if in.CostUSD != nil && !reportedCostInRange(*in.CostUSD) {
+		return nil, errCostOutOfRange(fmt.Sprintf("названа агентом: %v USD", *in.CostUSD))
+	}
+	if run.AgentSettingsVersionID == nil {
+		return nil, nil
+	}
+	version, err := e.store.AgentSettingsByID(ctx, q, *run.AgentSettingsVersionID)
+	if err != nil {
+		return nil, err
+	}
+	price, ok := modelPriceIn(version.Document, in.Model)
+	if !ok {
+		return nil, nil
+	}
+	tokens := usageTokens{in.InputTokens, in.OutputTokens, in.CacheReadTokens, in.CacheWriteTokens}
+	if warnings := pricingWarnings(version.Version, in.Model, tokens); warnings != nil {
+		return warnings, nil
+	}
+	micro, err := costMicroUSD(price, tokens)
+	if err != nil {
+		return nil, err
+	}
+	rec.CostMicroUSD = &micro
+	rec.PricingVersionID = &version.ID
+	return nil, nil
 }
 
 // claimedRun — забирал ли актор этот прогон. Текущий держатель — да; иначе
