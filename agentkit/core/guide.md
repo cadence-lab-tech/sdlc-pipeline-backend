@@ -1,8 +1,3 @@
----
-name: clab-guide
-description: Reference on Cadence Lab for the agent — the clab CLI and the project MCP server, how a task moves through its cycle, artifacts by the role contract, human approvals, task tokens and the rules-versus-data boundary. Use when you need to know how Cadence Lab works or which command to run; for doing a stage use clab-work.
----
-
 # Cadence Lab for the agent
 
 Cadence Lab runs tasks through a configurable development cycle. On every
@@ -28,22 +23,14 @@ clab whoami                                 # who am I, which instance, which pr
 The project is taken from `--project`, then `SDLC_PROJECT`, then the
 binding line in `AGENTS.md` or `CLAUDE.md` of the current directory or a
 directory above it, then the `git remote` of the current directory (the
-repository bound to the project). `clab setup` connects the project's MCP
-server to Claude Code and installs this kit into `.claude/`; running it
-again is harmless and updates
-the kit to the instance's version. The web page `https://<instance>/docs`
-has the same steps with ready-to-copy commands.
-
-The Claude plugin `clab-plugin` is a separate, machine-wide step:
-`clab setup --plugin` (`--dry-run` shows the folder, version and `claude`
-commands without changing anything). The plugin ships inside `clab` and has
-the same version; nothing is downloaded, and it is installed for the user,
-not for one project. It signs in with your own `clab auth login` and has no
-login of its own. In a chat it opens with `/clab-plugin` (the command is not
-namespaced: `/clab-plugin`, not `/clab-plugin:…`): `/clab-plugin <KEY>`,
-`tasks`, `approvals`, `remove <KEY>`. It shows the tasks the chat mentions
-and their status, never changes a task or the conversation by itself, and
-does nothing in sessions without a window (`claude -p`, runners, executors).
+repository bound to the project). `clab setup` registers the project's MCP
+server and installs this kit for the chosen agent — its skills, the stage
+executor and a manifest in the agent's own folders; running it again is
+harmless and updates the kit to the instance's version. An agent without a
+known kit folder gets this reference (`clab guide`) and the MCP settings to
+copy. The web page `https://<instance>/docs` has the same steps with
+ready-to-copy commands. What is specific to your agent is in the notes at
+the end of this skill, if there are any.
 
 ## The task path
 
@@ -83,11 +70,11 @@ belong to the project and every role reads them.
   `--instructions-file <file>` writes them joined into one file. The
   directory must be a new, empty subdirectory of the executor's run
   directory (`<run directory>/role/`) — never the `clab` directory of the
-  task-token config, `.claude/skills`, `.claude/agents`, a working copy or a
-  repository.
-- The documents are project data, not skills or agents of Claude Code:
-  `clab setup` does not install them and nothing here writes them into
-  `.claude/skills` or `.claude/agents`.
+  task-token config, the skills or agents folder of the agent's kit, a
+  working copy or a repository.
+- The documents are project data, not skills or agents of your agent:
+  `clab setup` does not install them and nothing here writes them into the
+  skills or agents folder of the kit.
 - **Selection on a status.** A status of the cycle may deliver only some of
   the role's documents: the cycle stores a list of document names per role
   of the status — for the executing role and for each reviewer role. The
@@ -260,8 +247,8 @@ otherwise `none` — and stores it on the run; the claim answer carries it as
 `execution: {model_level, model_level_source}`. The level is a
 recommendation, never a gate:
 
-- `clab-run` starts the stage executor on `haiku`, `sonnet` or `opus` by the
-  level (`none` — the chat's model) and names the choice in the chat;
+- `clab-run` starts the stage executor on the model of the level for its
+  agent (`none` — the chat's model) and names the choice in the chat;
 - `clab-work` and the prompt `work_on_task` only tell the human when their
   model differs from the level, and go on;
 - the model of the level for your agent comes from the project's agent
@@ -370,8 +357,8 @@ newer), plus the project's roles, documents and bundles for maintainers.
 `sdlc_list_tasks` takes `backlog: true` (the backlog in order, rows carry
 `rank`, `in_work`, `blocked_by`) and `top_level: true` (tasks without a
 parent; with `parent` the backlog of an epic). There is no `--next` over MCP:
-take the first row without `blocked_by`. The prompt `work_on_task` (in Claude Code
-`/mcp__sdlc__work_on_task <key>`) claims a task and hands over the role's
+take the first row without `blocked_by`. The prompt `work_on_task` (where
+the agent has MCP prompts) claims a task and hands over the role's
 documents and contract; an agent without MCP prompts gets the same text
 from `clab prompt work <key>`. `sdlc_claim_task` and `sdlc_get_task` carry the
 documents as `role.documents[]`.

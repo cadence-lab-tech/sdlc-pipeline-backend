@@ -1,0 +1,35 @@
+{
+  "name": "claude",
+  "kit": {
+    "manifest": ".claude/clab-kit.json",
+    "skills_dir": ".claude/skills",
+    "agents_dir": ".claude/agents"
+  },
+  "mcp": {
+    "method": "claude-mcp-add",
+    "transport": "http",
+    "scopes": ["local", "user"],
+    "header": "Authorization: Bearer <token>"
+  },
+  "run": [
+    "claude", "-p", "--output-format", "json",
+    "--strict-mcp-config", "--mcp-config", "{mcp_config}",
+    "--model", "{model}", "--effort", "{effort}",
+    "--allowedTools", "{allowed_tools}",
+    "{prompt}"
+  ],
+  "executor": "subagent",
+  "hook": {
+    "placement": "agent-frontmatter",
+    "agent": "clab-stage",
+    "event": "PreToolUse",
+    "matcher": "Bash"
+  },
+  "output": "claude-json",
+  "detect": [
+    {"env": "AI_AGENT", "prefix": "claude-code_"},
+    {"env": "CLAUDECODE", "equals": "1"}
+  ],
+  "levels": {"low": "haiku", "medium": "sonnet", "high": "opus"},
+  "tool_policy": {"allow": "--allowedTools", "deny": "--disallowedTools"}
+}

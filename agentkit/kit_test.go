@@ -91,7 +91,12 @@ func TestKitIsGeneric(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range k.Files {
+	// CLAB-417: обходит и ядро, и файлы каждой привязки, не только files.
+	all := append(append([]File{}, k.Files...), coreFiles(k)...)
+	for _, b := range k.Bindings {
+		all = append(all, b.Files...)
+	}
+	for _, f := range all {
 		for _, s := range forbidden {
 			if strings.Contains(f.Content, s) {
 				t.Errorf("%s содержит %q", f.Path, s)
