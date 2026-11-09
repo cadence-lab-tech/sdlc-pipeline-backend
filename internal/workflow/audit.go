@@ -271,6 +271,11 @@ func init() {
 		RESTAction("POST", "/v1/projects/:projectKey/agent-settings/draft"),
 		RESTAction("PUT", "/v1/projects/:projectKey/agent-settings/draft"),
 		"sdlc_put_agent_settings_draft",
+		// Связка несёт тот же документ под agent_settings.document (CLAB-428);
+		// других ключей document в связке нет: документы проекта и роли —
+		// documents.
+		RESTAction("POST", "/v1/projects/:projectKey/import"),
+		"sdlc_import_bundle",
 	} {
 		auditDigestActions[a] = doc
 	}

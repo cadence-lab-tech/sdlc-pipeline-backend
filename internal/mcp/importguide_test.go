@@ -31,6 +31,9 @@ func TestImportGuideDescribesDocuments(t *testing.T) {
 		"документы проекта", "документы роли", "Правило выбора",
 		"по темам", "clab export --dir", "clab import --dir", "--dry-run", "--force",
 		"форматы связки (1 и 2)", "instructions и documents вместе не бывают",
+		// Настройка агентов в связке (CLAB-428, AC-18).
+		"agent_settings", "agent-settings.json", "draft_created", "updated", "unchanged",
+		"human_action", "строки agent_settings нет", "ничего не активирует",
 	} {
 		if !strings.Contains(importguide.Text, want) {
 			t.Errorf("в справке нет %q", want)
@@ -54,6 +57,9 @@ func TestImportGuideDescribesDocuments(t *testing.T) {
 		case "sdlc_export_bundle", "sdlc_import_bundle":
 			if !strings.Contains(tool.Description, "роли с документами") && !strings.Contains(tool.Description, "Роли — с документами") {
 				t.Errorf("%s: описание не про документы ролей: %s", tool.Name, tool.Description)
+			}
+			if !strings.Contains(tool.Description, "agent_settings") {
+				t.Errorf("%s: описание не называет настройку агентов: %s", tool.Name, tool.Description)
 			}
 			if strings.Contains(tool.Description, "с инструкциями") || strings.Contains(tool.Description, "с другой инструкцией") {
 				t.Errorf("%s: описание про инструкцию строкой: %s", tool.Name, tool.Description)

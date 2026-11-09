@@ -349,10 +349,20 @@ func (s *Server) importBundle(c *gin.Context) {
 		return
 	}
 	dryRun := c.Query("dry_run") == "true"
-	report, err := s.authoring.Import(c.Request.Context(), c.Param("projectKey"), actor(c).ID, bundle, dryRun)
+	// Право на настройку агентов в связке решает вид принципала, поэтому
+	// актор — тот же, что у ручек настройки (CLAB-428).
+	who, err := s.stageActor(c)
 	if err != nil {
 		fail(c, s.log, err)
 		return
+	}
+	report, err := s.authoring.ImportAs(c.Request.Context(), c.Param("projectKey"), who, bundle, dryRun)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	if report.AgentSettingsChange != nil {
+		c.Set(ctxAuditChange, report.AgentSettingsChange)
 	}
 	c.JSON(http.StatusOK, report)
 }

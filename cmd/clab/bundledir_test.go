@@ -33,6 +33,9 @@ type bundleStub struct {
 	calls    int
 	imports  []stubImport
 	exported int
+	// reply — ответ импорта вместо стандартного отчёта без agent_settings
+	// (сервер прежней версии); пусто — стандартный.
+	reply string
 }
 
 type stubImport struct {
@@ -69,7 +72,11 @@ func newBundleStub(t *testing.T, export string) (*Client, *bundleStub) {
 				t.Errorf("тело импорта не JSON: %s", raw)
 			}
 			st.imports = append(st.imports, stubImport{path: r.URL.Path, query: r.URL.RawQuery, body: body})
-			_, _ = w.Write([]byte(`{"dry_run":true,"roles":[],"documents":[],"repositories":[]}`))
+			reply := st.reply
+			if reply == "" {
+				reply = `{"dry_run":true,"roles":[],"documents":[],"repositories":[]}`
+			}
+			_, _ = w.Write([]byte(reply))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
