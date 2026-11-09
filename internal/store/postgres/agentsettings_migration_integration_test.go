@@ -44,8 +44,19 @@ func TestAgentSettingsMigration(t *testing.T) {
 	}
 
 	// База «как на 000046»: снимаем 000047 и кладём данные прежнего релиза —
-	// закрытый и идущий прогоны и строку учёта.
+	// закрытый и идущий прогоны и строку учёта. Откат не теряет остального:
+	// проекты, задачи, прогоны и артефакты демо-данных на месте.
+	kept := []string{"projects", "tasks", "stage_runs", "artifacts"}
+	seeded := map[string]int{}
+	for _, table := range kept {
+		seeded[table] = scalar(`SELECT count(*) FROM ` + table)
+	}
 	execAgentSettingsMigration(t, pool, ".down.sql")
+	for _, table := range kept {
+		if got := scalar(`SELECT count(*) FROM ` + table); got != seeded[table] {
+			t.Fatalf("откат 000047 потерял строки %s: %d, было %d", table, got, seeded[table])
+		}
+	}
 	if n := scalar(`SELECT count(*) FROM information_schema.columns WHERE table_name = 'stage_runs' AND column_name = 'agent_settings_version_id'`); n != 0 {
 		t.Fatalf("после down колонка осталась")
 	}
