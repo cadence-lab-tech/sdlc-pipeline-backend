@@ -18,6 +18,9 @@ import (
 //
 //	D/bundle.json                  связка без ролей: version, project,
 //	                               repositories, documents, workflows
+//	D/agent-settings.json          настройка агентов (CLAB-428, решение
+//	                               0077): {document, changelog}; файла нет,
+//	                               если у проекта нет активной версии
 //	D/roles/<ключ роли>/role.json  поля роли без содержимого документов
 //	D/roles/<ключ роли>/<имя>.md   содержимое документа, байт в байт
 //
@@ -29,6 +32,10 @@ import (
 const (
 	bundleDirManifest = "bundle.json"
 	bundleDirRoles    = "roles"
+	// bundleDirAgentSettings — настройка агентов: поле agent_settings связки
+	// лежит отдельным файлом рядом с ролями и циклами, а не внутри
+	// bundle.json (решение 0077, п. 4.10).
+	bundleDirAgentSettings = "agent-settings.json"
 	// bundleDirFormat — формат связки, с которого роль несёт documents:
 	// каталог роли без них не выражается.
 	bundleDirFormat = 3
@@ -50,6 +57,8 @@ type bundleDirPlan struct {
 	roles        int
 	documents    int
 	instructions int
+	// agentSettings — каталог несёт agent-settings.json.
+	agentSettings bool
 }
 
 // planBundleDir раскладывает ответ экспорта по файлам. Всё проверяется
@@ -75,6 +84,16 @@ func planBundleDir(raw []byte) (bundleDirPlan, error) {
 		return plan, err
 	}
 	delete(top, "instructions")
+
+	var settingsFile *bundleDirEntry
+	if raw, ok := top["agent_settings"]; ok {
+		body, err := planAgentSettings(raw)
+		if err != nil {
+			return plan, err
+		}
+		settingsFile = &bundleDirEntry{path: bundleDirAgentSettings, body: body}
+		delete(top, "agent_settings")
+	}
 
 	rawRoles, ok := top["roles"].([]any)
 	if !ok && top["roles"] != nil {
@@ -128,6 +147,10 @@ func planBundleDir(raw []byte) (bundleDirPlan, error) {
 		return plan, err
 	}
 	plan.files = append(plan.files, bundleDirEntry{path: bundleDirManifest, body: body})
+	if settingsFile != nil {
+		plan.files = append(plan.files, *settingsFile)
+		plan.agentSettings = true
+	}
 	plan.files = append(plan.files, instFiles...)
 	plan.instructions = instCount
 	for _, r := range roles {
@@ -141,6 +164,20 @@ func planBundleDir(raw []byte) (bundleDirPlan, error) {
 	}
 	plan.roles = len(roles)
 	return plan, nil
+}
+
+// planAgentSettings — тело agent-settings.json из поля agent_settings
+// ответа экспорта: объект как есть (document и changelog; прочее, что сервер
+// добавит, проходит нетронутым, как в bundle.json), отступ два пробела.
+func planAgentSettings(raw any) ([]byte, error) {
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("ответ экспорта: agent_settings — не объект")
+	}
+	if _, ok := obj["document"].(map[string]any); !ok {
+		return nil, fmt.Errorf("ответ экспорта: у agent_settings нет document-объекта")
+	}
+	return encodeIndented(obj)
 }
 
 // planRole делит роль экспорта на role.json и файлы документов.
@@ -325,7 +362,8 @@ func encodeBundleTop(top map[string]any) ([]byte, error) {
 }
 
 // writeBundleDir кладёт план на диск. Каталог должен не существовать или
-// быть пустым; с force в непустом заменяются bundle.json и roles/ целиком
+// быть пустым; с force в непустом заменяются bundle.json, roles/, instructions/
+// и agent-settings.json целиком
 // (устаревшие роли и документы исчезают, иначе строгий импорт споткнулся бы
 // о них), остальные файлы каталога не трогаются. Новое сначала пишется во
 // временный подкаталог и встаёт на место переименованием: сбой записи не
@@ -347,7 +385,7 @@ func writeBundleDir(dir string, plan bundleDirPlan, force bool) error {
 			return fmt.Errorf("каталог связки: %w", err)
 		}
 		if len(entries) > 0 && !force {
-			return fmt.Errorf("каталог %s не пуст: --force заменит в нём bundle.json, roles/ и instructions/ целиком, "+
+			return fmt.Errorf("каталог %s не пуст: --force заменит в нём bundle.json, roles/, instructions/ и agent-settings.json целиком, "+
 				"остальные файлы не тронет", dir)
 		}
 	}
@@ -376,6 +414,18 @@ func writeBundleDir(dir string, plan bundleDirPlan, force bool) error {
 			return fmt.Errorf("каталог связки: %w", err)
 		}
 	}
+	// Файл настройки заменяется или, если у проекта её уже нет, удаляется:
+	// устаревший файл вернул бы импорт настройки, которой в проекте больше
+	// нет.
+	settingsPath := filepath.Join(dir, bundleDirAgentSettings)
+	if err := os.RemoveAll(settingsPath); err != nil {
+		return fmt.Errorf("каталог связки: прежний %s: %w", settingsPath, err)
+	}
+	if plan.agentSettings {
+		if err := os.Rename(filepath.Join(staging, bundleDirAgentSettings), settingsPath); err != nil {
+			return fmt.Errorf("каталог связки: %w", err)
+		}
+	}
 	if err := os.Rename(filepath.Join(staging, bundleDirManifest), filepath.Join(dir, bundleDirManifest)); err != nil {
 		return fmt.Errorf("каталог связки: %w", err)
 	}
@@ -396,6 +446,7 @@ func readBundleDir(dir string) (map[string]any, error) {
 
 	bundle := map[string]any{}
 	version := 0
+	settingsInManifest := false
 	manifestPath := filepath.Join(dir, bundleDirManifest)
 	_, statErr := os.Lstat(manifestPath)
 	hasManifest := statErr == nil
@@ -417,6 +468,12 @@ func readBundleDir(dir string) (map[string]any, error) {
 			return nil, fmt.Errorf("%s: поля instructions в каталоге связки не бывает — инструкции лежат в %s/<ключ>/ (%s и v<N>.md)",
 				manifestPath, bundleDirInstructions, instructionDirManifest)
 		}
+		if _, ok := top["agent_settings"]; ok {
+			// Поле в bundle.json — каталог прежнего clab: принимается, если
+			// файла рядом нет (проверка ниже); оба сразу — какой из них
+			// правда, решает человек.
+			settingsInManifest = true
+		}
 		if v, ok := top["version"]; ok {
 			if err := json.Unmarshal(v, &version); err != nil {
 				return nil, fmt.Errorf("%s: version — не целое число: %s", manifestPath, v)
@@ -432,6 +489,27 @@ func readBundleDir(dir string) (map[string]any, error) {
 	// есть: сервер, который его не знает, откажет своим текстом.
 	bundle["version"] = max(version, bundleDirFormat)
 
+	settingsPath := filepath.Join(dir, bundleDirAgentSettings)
+	_, settingsErr := os.Lstat(settingsPath)
+	hasSettings := settingsErr == nil
+	switch {
+	case hasSettings:
+		if settingsInManifest {
+			return nil, fmt.Errorf("agent_settings есть и в %s, и в %s: оставьте одно — файл %s, поле в bundle.json "+
+				"оставил прежний clab", manifestPath, settingsPath, bundleDirAgentSettings)
+		}
+		raw, err := readRegularFile(settingsPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkAgentSettingsFile(settingsPath, raw); err != nil {
+			return nil, err
+		}
+		bundle["agent_settings"] = json.RawMessage(raw)
+	case !errors.Is(settingsErr, fs.ErrNotExist):
+		return nil, fmt.Errorf("каталог связки: %w", settingsErr)
+	}
+
 	instructions, err := readInstructionsDir(filepath.Join(dir, bundleDirInstructions))
 	if err != nil {
 		return nil, err
@@ -444,7 +522,7 @@ func readBundleDir(dir string) (map[string]any, error) {
 	rolesInfo, err := os.Lstat(rolesPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if !hasManifest && len(instructions) == 0 {
+		if !hasManifest && len(instructions) == 0 && !hasSettings {
 			return nil, fmt.Errorf("%s не похоже на каталог связки: нет ни %s, ни %s/", dir, bundleDirManifest, bundleDirRoles)
 		}
 		return bundle, nil
@@ -486,4 +564,30 @@ func readBundleDir(dir string) (map[string]any, error) {
 		bundle["roles"] = roles
 	}
 	return bundle, nil
+}
+
+// checkAgentSettingsFile — agent-settings.json разбирается как объект с
+// document-объектом: ошибка файла не доходит до сервера. Содержимое
+// документа проверяет сервер (ValidateAgentSettings), клиент его не
+// разбирает.
+func checkAgentSettingsFile(path string, raw []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("%s не разбирается как объект JSON: %w", path, err)
+	}
+	doc, ok := top["document"]
+	if !ok {
+		return fmt.Errorf("%s: нет поля document — файл настройки агентов это {\"document\": {…}, \"changelog\": \"…\"}", path)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &obj); err != nil || obj == nil {
+		return fmt.Errorf("%s: document — не JSON-объект", path)
+	}
+	if c, ok := top["changelog"]; ok {
+		var text string
+		if err := json.Unmarshal(c, &text); err != nil {
+			return fmt.Errorf("%s: changelog — не строка", path)
+		}
+	}
+	return nil
 }

@@ -438,9 +438,10 @@ func checkPrice(v any, path string) error {
 }
 
 // CanonicalAgentSettings — канонический JSON документа: ключи по порядку,
-// без пробелов, числа как записаны. По нему считается sha256 и сравнение
-// «то же самое» у импорта связки (CLAB-428): порядок ключей и пробелы
-// документа не меняют.
+// без пробелов, числа в кратчайшей десятичной записи. По нему считается
+// sha256 и сравнение «то же самое» у импорта связки (CLAB-428): порядок
+// ключей, пробелы и запись числа (1.0, 1, 1e0; jsonb Postgres пишет 1e2 как
+// 100, а MCP-вход отдаёт 1.0 как 1) документ не меняют.
 func CanonicalAgentSettings(raw json.RawMessage) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -451,10 +452,44 @@ func CanonicalAgentSettings(raw json.RawMessage) ([]byte, error) {
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := enc.Encode(canonicalNumbers(v)); err != nil {
 		return nil, apperr.Internal(err, "документ настройки агентов не кодируется")
 	}
 	return bytes.TrimRight(out.Bytes(), "\n"), nil
+}
+
+// canonicalNumbers приводит каждое число документа к одной записи. В
+// проверенном документе чисел только цены — конечные и не больше
+// 1 000 000, float64 их не искажает; что не разобралось (документ, записанный
+// в обход сервиса), остаётся как записано.
+func canonicalNumbers(v any) any {
+	switch x := v.(type) {
+	case json.Number:
+		return canonicalNumber(x)
+	case map[string]any:
+		for k, val := range x {
+			x[k] = canonicalNumbers(val)
+		}
+	case []any:
+		for i, val := range x {
+			x[i] = canonicalNumbers(val)
+		}
+	}
+	return v
+}
+
+func canonicalNumber(n json.Number) json.Number {
+	if i, err := strconv.ParseInt(n.String(), 10, 64); err == nil {
+		return json.Number(strconv.FormatInt(i, 10))
+	}
+	f, err := strconv.ParseFloat(n.String(), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return n
+	}
+	if f == 0 {
+		return json.Number("0")
+	}
+	return json.Number(strconv.FormatFloat(f, 'f', -1, 64))
 }
 
 // AgentSettingsSHA256 — sha256 канонического JSON документа.

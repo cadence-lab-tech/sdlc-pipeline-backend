@@ -211,6 +211,44 @@ func TestAgentSettingsSHA256Canonical(t *testing.T) {
 	}
 }
 
+// AC-9 CLAB-428: запись числа каналу не принадлежит — 1.0, 1, 1e0 и 0.10/0.1
+// дают один канонический JSON и один sha256; экранирование <>& и пробелы
+// документ не меняют.
+func TestCanonicalAgentSettingsNumbers(t *testing.T) {
+	for _, group := range [][]string{
+		{`{"pricing":{"models":{"m":{"input":1}}}}`, `{"pricing": {"models": {"m": {"input": 1.0}}}}`,
+			`{"pricing":{"models":{"m":{"input":1e0}}}}`, `{"pricing":{"models":{"m":{"input":10e-1}}}}`},
+		{`{"pricing":{"models":{"m":{"input":0.1}}}}`, `{"pricing":{"models":{"m":{"input":0.10}}}}`,
+			`{"pricing":{"models":{"m":{"input":1e-1}}}}`},
+		{`{"pricing":{"models":{"m":{"input":100}}}}`, `{"pricing":{"models":{"m":{"input":1e2}}}}`,
+			`{"pricing":{"models":{"m":{"input":100.0}}}}`},
+		{`{"pricing":{"models":{"m":{"input":0}}}}`, `{"pricing":{"models":{"m":{"input":-0}}}}`,
+			`{"pricing":{"models":{"m":{"input":0.0}}}}`},
+		{`{"agents":{"claude":{"low":{"model":"a<b>&c"}}}}`, `{"agents": {"claude": {"low": {"model": "a\u003cb\u003e\u0026c"}}}}`},
+	} {
+		want, _, err := AgentSettingsSHA256(json.RawMessage(group[0]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range group[1:] {
+			got, _, err := AgentSettingsSHA256(json.RawMessage(raw))
+			if err != nil || got != want {
+				t.Errorf("%s: sha256 %s, ждали %s (%v)", raw, got, want, err)
+			}
+		}
+	}
+	// Разные значения остаются разными.
+	a, _, _ := AgentSettingsSHA256(json.RawMessage(`{"pricing":{"models":{"m":{"input":0.1}}}}`))
+	b, _, _ := AgentSettingsSHA256(json.RawMessage(`{"pricing":{"models":{"m":{"input":0.2}}}}`))
+	if a == b {
+		t.Fatal("0.1 и 0.2 дали один sha256")
+	}
+	canon, _ := CanonicalAgentSettings(json.RawMessage(`{"b": 1.50, "a": "<&>"}`))
+	if string(canon) != `{"a":"<&>","b":1.5}` {
+		t.Fatalf("каноническая запись: %s", canon)
+	}
+}
+
 // AC-11 без базы: право записи по классу актора и причины отказа.
 func TestAgentSettingsWriteRight(t *testing.T) {
 	user := domain.Principal{ID: uuid.New(), Kind: domain.PrincipalUser}

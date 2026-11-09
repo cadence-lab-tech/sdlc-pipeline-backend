@@ -27,7 +27,8 @@ func (s *Server) registerCatalogTools() {
 		s.importGuide)
 	add(s, "sdlc_export_bundle",
 		"Выгрузить проект связкой: репозитории, роли с документами (roles[].documents — "+
-			"части инструкции по порядку), документы проекта, активные циклы. "+
+			"части инструкции по порядку), документы проекта, активные циклы, активная настройка "+
+			"агентов (agent_settings; поля нет, если активной версии нет). "+
 			"Связка годится для sdlc_import_bundle в другой проект.",
 		s.exportBundle)
 	add(s, "sdlc_import_bundle",
@@ -35,6 +36,9 @@ func (s *Server) registerCatalogTools() {
 			"форма связки — sdlc_import_guide. Идемпотентно: роль получает новую версию при изменении "+
 			"любого документа, их состава, порядка или полей роли, тот же набор — unchanged; "+
 			"документ проекта с тем же kind и title обновляется, цикл приходит черновиком. "+
+			"agent_settings (настройка агентов {document, changelog}) тоже приходит черновиком "+
+			"(draft_created, updated, unchanged), активирует его человек; настройку в связке "+
+			"принимает только человек уровня maintainer и выше, агент-принципал получает 403. "+
 			"dry_run=true отдаёт отчёт, ничего не меняя.",
 		s.importBundle)
 	add(s, "sdlc_add_repository",
@@ -141,7 +145,7 @@ func (s *Server) exportBundle(ctx context.Context, _ exportInput) (*sdk.CallTool
 }
 
 type importInput struct {
-	Bundle workflow.Bundle `json:"bundle" jsonschema:"связка: repositories, roles, documents, workflow"`
+	Bundle workflow.Bundle `json:"bundle" jsonschema:"связка: repositories, roles, documents, workflow; agent_settings — настройка агентов {document, changelog} (необязательно, только человек уровня maintainer и выше, придёт черновиком)"`
 	DryRun bool            `json:"dry_run,omitempty" jsonschema:"только отчёт, без изменений"`
 }
 
@@ -150,9 +154,16 @@ func (s *Server) importBundle(ctx context.Context, in importInput) (*sdk.CallToo
 		return fail(err)
 	}
 	key, _ := projectKey(ctx)
-	report, err := s.authoring.Import(ctx, key, actor(ctx).ID, in.Bundle, in.DryRun)
+	who, err := s.stageActor(ctx)
 	if err != nil {
 		return fail(err)
+	}
+	report, err := s.authoring.ImportAs(ctx, key, who, in.Bundle, in.DryRun)
+	if err != nil {
+		return fail(err)
+	}
+	if report.AgentSettingsChange != nil {
+		setAuditChange(ctx, report.AgentSettingsChange)
 	}
 	return ok(report)
 }
