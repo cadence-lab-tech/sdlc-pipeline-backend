@@ -183,7 +183,14 @@ type markerLine struct {
 // ~~~): пример блока в документации маркером не считается. Прочие строки не
 // возвращаются.
 func scanMarkerLines(lines []string) []markerLine {
-	var out []markerLine
+	out, _ := scanMarkerLinesFence(lines)
+	return out
+}
+
+// scanMarkerLinesFence — то же, плюс признак: файл кончается внутри
+// незакрытого блока кода. Блок, дописанный в такой файл, попал бы в код и
+// clab его не увидел бы.
+func scanMarkerLinesFence(lines []string) (out []markerLine, openFence bool) {
 	fence := ""
 	for i, line := range lines {
 		t := strings.TrimSpace(line)
@@ -205,7 +212,7 @@ func scanMarkerLines(lines []string) []markerLine {
 			out = append(out, markerLine{index: i, kind: kind, body: body})
 		}
 	}
-	return out
+	return out, fence != ""
 }
 
 // parseMarkerFile — маркер файла: nil, если его нет; ошибка, если маркер

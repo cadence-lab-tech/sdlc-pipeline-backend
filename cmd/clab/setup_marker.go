@@ -141,7 +141,8 @@ func mergeMarkerBlock(raw []byte, block []string) (next []byte, diff, reason str
 	lines := strings.Split(text, "\n")
 	begin, end := -1, -1
 	var markers []int
-	for _, l := range scanMarkerLines(lines) {
+	scanned, openFence := scanMarkerLinesFence(lines)
+	for _, l := range scanned {
 		switch l.kind {
 		case markerLineBegin:
 			if begin >= 0 {
@@ -164,6 +165,9 @@ func mergeMarkerBlock(raw []byte, block []string) (next []byte, diff, reason str
 		if begin < 0 || m < begin || m > end {
 			return nil, "", "маркер вне блока cadence-lab:begin…end (записан руками): блок не дописан"
 		}
+	}
+	if begin < 0 && openFence {
+		return nil, "", "файл кончается внутри незакрытого блока кода: блок не дописан — закройте его руками"
 	}
 	crlf := strings.Contains(text, "\r\n")
 	nl := "\n"

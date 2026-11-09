@@ -164,6 +164,7 @@ func TestSetupMarkerSkipsHandWritten(t *testing.T) {
 		"нет end":       "# A\n<!-- cadence-lab:begin -->\n<!-- cadence-lab: project=OWN -->\n",
 		"end без begin": "# A\n<!-- cadence-lab:end -->\n",
 		"маркер за end": "<!-- cadence-lab:begin -->\n<!-- cadence-lab:end -->\n<!-- cadence-lab: project=OWN -->\n",
+		"код не закрыт": "# A\n```\nпример\n",
 		"два блока":     "<!-- cadence-lab:begin -->\n<!-- cadence-lab:end -->\n<!-- cadence-lab:begin -->\n<!-- cadence-lab:end -->\n",
 	} {
 		root := withRoot(t)
