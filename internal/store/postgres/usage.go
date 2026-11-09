@@ -22,7 +22,14 @@ type UsageInput struct {
 	OutputTokens     *int64
 	CacheReadTokens  *int64
 	CacheWriteTokens *int64
-	CostUSD          *float64
+	// CostUSD — сумма, которую назвал агент. Попадает в reported_cost_usd, а
+	// при CostMicroUSD == nil и в cost_usd (источник reported).
+	CostUSD *float64
+	// CostMicroUSD — сумма, посчитанная по прайсу, в миллионных долях доллара
+	// (целое: сумма точная и без float64) вместе с версией прайса. Задана —
+	// cost_usd берётся из неё, источник pricing (CLAB-426).
+	CostMicroUSD     *int64
+	PricingVersionID *uuid.UUID
 	DurationMS       *int64
 	ReportedBy       uuid.UUID
 	Details          json.RawMessage
@@ -69,14 +76,20 @@ func usageStateSQL(run string) string {
 		ELSE '` + domain.UsageStateNotApplicable + `' END`
 }
 
+// Номер версии прайса — подзапросом по самой строке: тот же текст годится и
+// для SELECT, и для RETURNING.
 const usageCols = `id, run_id, model, input_tokens, output_tokens, cache_read_tokens,
-	cache_write_tokens, cost_usd, duration_ms, billing, reported_by, reported_at, details`
+	cache_write_tokens, cost_usd, duration_ms, billing, reported_by, reported_at, details,
+	cost_source, (SELECT asv.version FROM agent_settings_versions asv
+	              WHERE asv.id = stage_run_usage.pricing_version_id), reported_cost_usd`
 
 func scanUsage(row interface{ Scan(...any) error }) (domain.StageRunUsage, error) {
 	var u domain.StageRunUsage
 	err := row.Scan(&u.ID, &u.RunID, &u.Model, &u.InputTokens, &u.OutputTokens,
 		&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS,
-		&u.Billing, &u.ReportedBy, &u.ReportedAt, &u.Details)
+		&u.Billing, &u.ReportedBy, &u.ReportedAt, &u.Details,
+		&u.CostSource, &u.PricingVersion, &u.ReportedCostUSD)
+	u.Warnings = []string{}
 	return u, err
 }
 
@@ -90,11 +103,20 @@ func (s *Store) RecordUsage(ctx context.Context, q Querier, in UsageInput) (doma
 	u, err := scanUsage(q.QueryRow(ctx, `
 		INSERT INTO stage_run_usage (run_id, model, input_tokens, output_tokens,
 		                             cache_read_tokens, cache_write_tokens, cost_usd,
-		                             duration_ms, reported_by, details, billing)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                             duration_ms, reported_by, details, billing,
+		                             cost_source, pricing_version_id, reported_cost_usd)
+		VALUES ($1, $2, $3, $4, $5, $6,
+		        CASE WHEN $12::bigint IS NOT NULL THEN $12::bigint::numeric / 1000000
+		             ELSE $7::numeric END,
+		        $8, $9, $10, $11,
+		        CASE WHEN $12::bigint IS NOT NULL THEN 'pricing'
+		             WHEN $7::numeric IS NOT NULL THEN 'reported' END,
+		        CASE WHEN $12::bigint IS NOT NULL THEN $13::uuid END,
+		        $7::numeric)
 		RETURNING `+usageCols,
 		in.RunID, in.Model, in.InputTokens, in.OutputTokens, in.CacheReadTokens,
-		in.CacheWriteTokens, in.CostUSD, in.DurationMS, in.ReportedBy, details, in.Billing))
+		in.CacheWriteTokens, in.CostUSD, in.DurationMS, in.ReportedBy, details, in.Billing,
+		in.CostMicroUSD, in.PricingVersionID))
 	if err != nil {
 		return u, translate(err)
 	}
@@ -185,9 +207,11 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 			SELECT u.*,
 			       CASE WHEN `+moneyPredicate+` THEN u.cost_usd END AS api_cost,
 			       CASE WHEN u.billing IS NULL THEN u.cost_usd END AS unspecified_cost,
-			       CASE WHEN `+subscriptionPredicate+` THEN u.cost_usd END AS subscription_cost
+			       CASE WHEN `+subscriptionPredicate+` THEN u.cost_usd END AS subscription_cost,
+			       asv.version AS pricing_version
 			FROM stage_run_usage u
 			JOIN stage_runs sr ON sr.id = u.run_id
+			LEFT JOIN agent_settings_versions asv ON asv.id = u.pricing_version_id
 			WHERE sr.task_id = $1
 		),
 		models AS (
@@ -201,7 +225,14 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 		       sum(o.cache_read_tokens)::bigint, sum(o.cache_write_tokens)::bigint,
 		       sum(o.cost_usd)::float8, sum(o.duration_ms)::bigint,
 		       sum(o.api_cost)::float8, sum(o.unspecified_cost)::float8,
-		       sum(o.subscription_cost)::float8
+		       sum(o.subscription_cost)::float8,
+		       CASE WHEN count(*) FILTER (WHERE o.cost_source = 'pricing') > 0
+		                 AND count(*) FILTER (WHERE o.cost_source = 'reported') > 0 THEN 'mixed'
+		            WHEN count(*) FILTER (WHERE o.cost_source = 'pricing') > 0 THEN 'pricing'
+		            WHEN count(*) FILTER (WHERE o.cost_source = 'reported') > 0 THEN 'reported' END,
+		       coalesce(array_agg(DISTINCT o.pricing_version ORDER BY o.pricing_version)
+		                FILTER (WHERE o.pricing_version IS NOT NULL), '{}')::int[],
+		       sum(o.reported_cost_usd)::float8
 		FROM own o JOIN models m ON m.run_id = o.run_id
 		GROUP BY o.run_id, m.models`, taskID)
 	if err != nil {
@@ -217,7 +248,8 @@ func (s *Store) RunUsageByTask(ctx context.Context, q Querier, taskID uuid.UUID)
 		)
 		if err := rows.Scan(&runID, &u.Reports, &u.Models, &u.InputTokens, &u.OutputTokens,
 			&u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD, &u.DurationMS,
-			&u.APICostUSD, &u.UnspecifiedCostUSD, &u.SubscriptionCostUSD); err != nil {
+			&u.APICostUSD, &u.UnspecifiedCostUSD, &u.SubscriptionCostUSD,
+			&u.CostSource, &u.PricingVersions, &u.ReportedCostUSD); err != nil {
 			return nil, translate(err)
 		}
 		u.Reported = u.Reports > 0
