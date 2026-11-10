@@ -37,8 +37,8 @@ const (
 const (
 	promptSlash      = "mcp_slash"
 	promptText       = "text"
-	outputClaudeJSON = "claude-json"
-	outputCodexJSONL = "codex-jsonl"
+	outputClaudeJSON = launch.OutputClaudeJSON
+	outputCodexJSONL = launch.OutputCodexJSONL
 )
 
 // agentKitTimeout — предел запроса набора на старте: открытая ручка без
