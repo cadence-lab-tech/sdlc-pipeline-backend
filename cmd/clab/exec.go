@@ -352,7 +352,6 @@ type execState struct {
 	role       string
 	allow      []string
 	deny       []string
-	policySet  bool
 	execution  *executionView
 	hasExecKey bool
 }
@@ -381,7 +380,6 @@ func readExecState(ctx context.Context, c *Client, task string) (execState, erro
 		}
 		if json.Unmarshal(s.Role.ToolPolicy, &p) == nil {
 			out.allow, out.deny = p.Allow, p.Deny
-			out.policySet = len(p.Allow)+len(p.Deny) > 0
 		}
 	}
 	return out, nil
@@ -540,13 +538,10 @@ func planLaunch(in planInput) (*launchPlan, error) {
 	if p.model.Model != "" && !launch.Uses(template, launch.SlotModel) {
 		p.warnings = append(p.warnings, "модель не передана: в команде нет "+launch.SlotModel+" — агент возьмёт свою модель по умолчанию")
 	}
-	if in.state.policySet {
-		translated := binding != nil && binding.ToolPolicy &&
-			(launch.Uses(template, launch.SlotAllowedTools) || launch.Uses(template, launch.SlotDisallowedTools))
-		if !translated {
-			p.warnings = append(p.warnings, "tool_policy роли не переведён для привязки "+agent+": агент запущен без ограничений по тулам")
-		}
-	}
+	// allow и deny проверяются порознь (CLAB-420): шаблон с одной
+	// подстановкой из двух молча терял бы вторую часть политики.
+	p.warnings = append(p.warnings, launch.PolicyWarnings(agent, binding != nil && binding.ToolPolicy,
+		template, in.state.allow, in.state.deny)...)
 
 	p.env, p.setVars, p.removed = execEnv(in.environ, in.bindings, in.dir, in.project, usesMCP)
 	p.tokenInEnv = usesMCP
@@ -577,7 +572,7 @@ func chooseAgent(flagAgent string, command []string, bindings []agentBinding) (a
 		return flagAgent, "флаг --agent", nil
 	}
 	if len(command) > 0 {
-		prog := strings.ToLower(strings.TrimSuffix(filepath.Base(command[0]), ".exe"))
+		prog := launch.Program(command[0])
 		for _, name := range []string{agentClaude, agentCodex} {
 			if prog == name && slices.Contains(names, name) {
 				return name, "имя программы " + prog, nil

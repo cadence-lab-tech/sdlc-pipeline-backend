@@ -9,7 +9,8 @@
 //
 // Привязка — файл bindings/<имя>.json: как ядро ложится в конкретного
 // агента. Девять полей формата 0077 (kit, mcp, run, executor, hook, output,
-// detect, levels, tool_policy) плюс name; пустое значение — явный null.
+// detect, levels, tool_policy), два поля запуска раннером (prompt, env —
+// CLAB-420) плюс name; пустое значение — явный null.
 // Рядом, при надобности, каталог bindings/<имя>/ с фрагментами:
 // skills/<скил>.md и agents/<агент>.md дописывают к файлу ядра свои ключи
 // фронтматтера и заметки в конец тела, agents/<агент>.toml делает файл
@@ -119,7 +120,16 @@ type Binding struct {
 	Detect     []DetectRule    `json:"detect"`
 	Levels     *Levels         `json:"levels"`
 	ToolPolicy *ToolPolicy     `json:"tool_policy"`
-	Files      []File          `json:"files"`
+	// Prompt — в какой форме агент принимает стартовую инструкцию в
+	// {prompt}: mcp_slash — слэш-командой промпта MCP-сервера, text —
+	// текстом (CLAB-420). Текстом можно любому агенту: clab exec так и
+	// делает, к инструкции у него дописывается заметка.
+	Prompt string `json:"prompt"`
+	// Env — имена и префиксы со звёздочкой, которые раннер передаёт агенту
+	// из своего окружения сверх базового списка (учётные данные и
+	// настройки самого агента); null — ничего сверх списка.
+	Env   []string `json:"env"`
+	Files []File   `json:"files"`
 }
 
 // Kit — ответ GET /v1/agent-kit. Объект, а не массив: новые сведения ложатся
@@ -142,18 +152,21 @@ const (
 	guideSkill    = "clab-guide"
 )
 
-// Поля файла привязки (решение 0077, п. 3) — все обязательны.
-var bindingFields = []string{"kit", "mcp", "run", "executor", "hook", "output", "detect", "levels", "tool_policy"}
+// Поля файла привязки (решение 0077, п. 3; prompt и env — CLAB-420) — все
+// обязательны.
+var bindingFields = []string{"kit", "mcp", "run", "executor", "hook", "output", "detect", "levels", "tool_policy", "prompt", "env"}
 
 // Известные значения: новый формат вывода, способ MCP или место хука — это
 // код клиента и раннера, отдельная задача, а не файл набора.
 var (
 	knownExecutors  = []string{"subagent", "process"}
 	knownOutputs    = []string{"claude-json", "codex-jsonl"}
+	knownPrompts    = []string{"mcp_slash", "text"}
 	knownMCPMethods = []string{"claude-mcp-add", "codex-config-toml"}
 	knownPlacements = []string{"agent-frontmatter", "launch"}
 	knownRunSlots   = launch.Slots
 	runSlot         = regexp.MustCompile(`\{[a-z_]+\}`)
+	envName         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\*?$`)
 )
 
 var (
@@ -466,6 +479,20 @@ func decodeFields(fields map[string]json.RawMessage, b *Binding) error {
 	}
 	if b.ToolPolicy != nil && (b.ToolPolicy.Allow == "" || b.ToolPolicy.Deny == "") {
 		return errors.New("поле tool_policy: нужны флаги allow и deny")
+	}
+	if err := strict(fields["prompt"], &b.Prompt); err != nil || !contains(knownPrompts, b.Prompt) {
+		return fmt.Errorf("поле prompt: %s — известны %s", fields["prompt"], strings.Join(knownPrompts, ", "))
+	}
+	if err := strict(fields["env"], &b.Env); err != nil || b.Env != nil && len(b.Env) == 0 {
+		return fmt.Errorf("поле env: нужен null или непустой массив имён")
+	}
+	for _, name := range b.Env {
+		// SDLC_* и CLAB_* раннер не передаёт никогда: в них его токен и
+		// настройки, нужное агенту он задаёт сам (решение 0049).
+		up := strings.ToUpper(name)
+		if !envName.MatchString(name) || strings.HasPrefix(up, "SDLC_") || strings.HasPrefix(up, "CLAB_") {
+			return fmt.Errorf("поле env: %q — нужно имя переменной или префикс со * на конце, не SDLC_* и не CLAB_*", name)
+		}
 	}
 	var err error
 	if b.MCP, err = keyedObject(fields["mcp"], "method", knownMCPMethods); err != nil {

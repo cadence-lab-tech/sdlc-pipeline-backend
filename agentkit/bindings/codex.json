@@ -25,6 +25,7 @@
     "-c", "mcp_servers.sdlc.bearer_token_env_var=\"SDLC_TOKEN\"",
     "{prompt}"
   ],
+  "prompt": "text",
   "executor": "process",
   "hook": {
     "placement": "launch",
@@ -37,5 +38,6 @@
     {"env": "CODEX_THREAD_ID", "non_empty": true}
   ],
   "levels": null,
-  "tool_policy": null
+  "tool_policy": null,
+  "env": ["OPENAI_*", "CODEX_*"]
 }

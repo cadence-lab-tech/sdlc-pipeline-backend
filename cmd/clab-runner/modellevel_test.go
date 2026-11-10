@@ -87,37 +87,44 @@ func TestChooseModel(t *testing.T) {
 		claim claimResult
 		want  modelChoice
 		flag  string // "" — флага --model в argv нет
+		// Фикстура CLAB-420: привязка claude без таблицы уровней — иначе
+		// уровень без записи в SDLC_RUNNER_MODEL_LEVELS взял бы модель из
+		// таблицы привязки (шаг binding), а случай про model_hint и none.
+		noLevels bool
 	}{
 		{"таблица", table, levelClaim(&high, "stage", "sonnet"),
-			modelChoice{level: "high", source: "stage", model: "opus", from: modelFromTable}, "--model opus"},
+			modelChoice{level: "high", source: "stage", model: "opus", from: modelFromTable}, "--model opus", false},
 		{"уровня нет в таблице", table, levelClaim(&low, "task", "sonnet"),
-			modelChoice{level: "low", source: "task", model: "sonnet", from: modelFromHint, hintDeprecated: true}, "--model sonnet"},
+			modelChoice{level: "low", source: "task", model: "sonnet", from: modelFromHint, hintDeprecated: true}, "--model sonnet", true},
 		{"none без model_hint", table, levelClaim(nil, "none", ""),
-			modelChoice{level: "none", source: "none", from: modelFromNone}, ""},
+			modelChoice{level: "none", source: "none", from: modelFromNone}, "", false},
 		{"none с model_hint", table, levelClaim(nil, "none", "sonnet"),
-			modelChoice{level: "none", source: "none", model: "sonnet", from: modelFromHint, hintDeprecated: true}, "--model sonnet"},
+			modelChoice{level: "none", source: "none", model: "sonnet", from: modelFromHint, hintDeprecated: true}, "--model sonnet", false},
 		{"без таблицы", nil, levelClaim(&high, "role", ""),
-			modelChoice{level: "high", source: "role", from: modelFromNone}, ""},
+			modelChoice{level: "high", source: "role", from: modelFromNone}, "", true},
 		// Сервер прежней версии: model_hint без предупреждения, таблица не при чём.
 		{"старый сервер", table, levelClaim(nil, "", "opus"),
-			modelChoice{level: "none", source: "absent", model: "opus", from: modelFromHint}, "--model opus"},
+			modelChoice{level: "none", source: "absent", model: "opus", from: modelFromHint}, "--model opus", false},
 		{"старый сервер без model_hint", table, levelClaim(nil, "", ""),
-			modelChoice{level: "none", source: "absent", from: modelFromNone}, ""},
+			modelChoice{level: "none", source: "absent", from: modelFromNone}, "", false},
 	}
 	item := queueItem{RoleKey: "developer"}
 	item.Task.Key = "CLAB-1"
 	for _, tc := range cases {
-		r := newRunner(Config{Project: "CLAB", Command: defaultCommand, ModelLevels: tc.table}, slog.Default())
+		r := newRunner(Config{Project: "CLAB", ModelLevels: tc.table}, slog.Default())
+		if tc.noLevels {
+			r.agent.Levels = nil
+		}
 		if got := r.chooseModel(tc.claim); got != tc.want {
 			t.Errorf("%s: %+v, ждали %+v", tc.name, got, tc.want)
 		}
-		argv := strings.Join(r.argv(item, tc.claim, "/tmp/mcp.json", ""), " ")
+		argv := strings.Join(r.argv(item, tc.claim, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
 		if tc.flag == "" && strings.Contains(argv, "--model") || tc.flag != "" && !strings.Contains(argv, tc.flag+" ") {
 			t.Errorf("%s: argv %s, ждали %q", tc.name, argv, tc.flag)
 		}
 		// Своя команда получает в {model} то же значение.
 		r.cfg.Command = "agent --use {model} {prompt}"
-		custom := strings.Join(r.argv(item, tc.claim, "/tmp/mcp.json", ""), " ")
+		custom := strings.Join(r.argv(item, tc.claim, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
 		if tc.want.model != "" && !strings.Contains(custom, "--use "+tc.want.model+" ") ||
 			tc.want.model == "" && strings.Contains(custom, "--use") {
 			t.Errorf("%s: своя команда %s", tc.name, custom)
@@ -129,10 +136,10 @@ func TestChooseModel(t *testing.T) {
 	// (CLAB-214) раннер ставит всегда: сервер прежней версии лишний
 	// аргумент промпта пропускает.
 	old := levelClaim(nil, "", "opus")
-	withTable := newRunner(Config{Project: "CLAB", Command: defaultCommand, ModelLevels: table}, slog.Default())
-	without := newRunner(Config{Project: "CLAB", Command: defaultCommand}, slog.Default())
-	a := strings.Join(withTable.argv(item, old, "/tmp/mcp.json", ""), " ")
-	b := strings.Join(without.argv(item, old, "/tmp/mcp.json", ""), " ")
+	withTable := newRunner(Config{Project: "CLAB", ModelLevels: table}, slog.Default())
+	without := newRunner(Config{Project: "CLAB"}, slog.Default())
+	a := strings.Join(withTable.argv(item, old, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
+	b := strings.Join(without.argv(item, old, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
 	want := "claude -p --output-format json --mcp-config /tmp/mcp.json --strict-mcp-config --model opus " +
 		"/mcp__sdlc__work_on_task CLAB-1 developer runner"
 	if a != b || a != want {
@@ -199,6 +206,7 @@ func TestDryRunAndLaunchLogModelLevel(t *testing.T) {
 	command, _ = stubAgent(t, agentOK)
 	logs.Reset()
 	r = testRunner(t, api, command+" --model {model}", &logs)
+	r.agent.Levels = nil // фикстура CLAB-420: случай про model_hint, а не таблицу привязки
 	r.cfg.ModelLevels = map[string]string{"high": "opus"}
 	r.cfg.DryRun = true
 	if err := r.run(context.Background()); err != nil {

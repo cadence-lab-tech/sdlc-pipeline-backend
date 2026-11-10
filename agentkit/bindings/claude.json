@@ -13,11 +13,13 @@
   },
   "run": [
     "claude", "-p", "--output-format", "json",
-    "--strict-mcp-config", "--mcp-config", "{mcp_config}",
+    "--mcp-config", "{mcp_config}", "--strict-mcp-config",
     "--model", "{model}", "--effort", "{effort}",
     "--allowedTools", "{allowed_tools}",
+    "--disallowedTools", "{disallowed_tools}",
     "{prompt}"
   ],
+  "prompt": "mcp_slash",
   "executor": "subagent",
   "hook": {
     "placement": "agent-frontmatter",
@@ -31,5 +33,6 @@
     {"env": "CLAUDECODE", "equals": "1"}
   ],
   "levels": {"low": "haiku", "medium": "sonnet", "high": "opus"},
-  "tool_policy": {"allow": "--allowedTools", "deny": "--disallowedTools"}
+  "tool_policy": {"allow": "--allowedTools", "deny": "--disallowedTools"},
+  "env": ["ANTHROPIC_*", "CLAUDE_*"]
 }

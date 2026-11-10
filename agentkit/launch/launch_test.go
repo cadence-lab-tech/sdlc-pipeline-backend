@@ -58,23 +58,24 @@ func TestExpandClaude(t *testing.T) {
 	run := runOf(t, "claude")
 	argv := Expand(run, full())
 	for _, seq := range [][]string{
-		{"--strict-mcp-config", "--mcp-config", "/r/mcp.json"},
+		// Порядок команды раннера до CLAB-420: argv с одним claude не меняется.
+		{"claude", "-p", "--output-format", "json", "--mcp-config", "/r/mcp.json", "--strict-mcp-config"},
 		{"--model", "m1", "--effort", "high"},
-		{"--allowedTools", "Bash,Read", "do {model} it"},
+		{"--allowedTools", "Bash,Read", "--disallowedTools", "Write", "do {model} it"},
 	} {
 		if !has(argv, seq...) {
 			t.Errorf("нет %q в %q", seq, argv)
 		}
 	}
-	argv = Expand(run, without(full(), SlotModel, SlotEffort, SlotAllowedTools))
-	for _, w := range []string{"--model", "--effort", "--allowedTools", ""} {
+	argv = Expand(run, without(full(), SlotModel, SlotEffort, SlotAllowedTools, SlotDisallowedTools))
+	for _, w := range []string{"--model", "--effort", "--allowedTools", "--disallowedTools", ""} {
 		for _, a := range argv {
 			if a == w {
 				t.Errorf("пустая подстановка оставила %q: %q", w, argv)
 			}
 		}
 	}
-	if argv[len(argv)-1] != "do {model} it" || !has(argv, "--mcp-config", "/r/mcp.json", "do {model} it") {
+	if argv[len(argv)-1] != "do {model} it" || !has(argv, "--mcp-config", "/r/mcp.json", "--strict-mcp-config", "do {model} it") {
 		t.Errorf("инструкция не на месте: %q", argv)
 	}
 }

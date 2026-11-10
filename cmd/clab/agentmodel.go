@@ -17,43 +17,33 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit/launch"
 )
 
-// Источники модели уровня; имена печатаются как есть (0077 п. 7).
+// Источники модели уровня, модель уровня и её выбор — общие с раннером
+// (agentkit/launch, CLAB-420): одна функция pickModel на clab и раннер.
 const (
-	sourceAgentSettings = "agent_settings"
-	sourceBinding       = "binding"
-	sourceAgentDefault  = "agent_default"
+	sourceAgentSettings = launch.SourceAgentSettings
+	sourceBinding       = launch.SourceBinding
+	sourceAgentDefault  = launch.SourceAgentDefault
 )
 
 // modelChoice — модель и усилие уровня: запись execution.models.<агент>.
-type modelChoice struct {
-	Model  string `json:"model"`
-	Effort string `json:"effort"`
-}
+type modelChoice = launch.ModelChoice
 
 // modelPick — результат выбора. Model пуста при источнике agent_default:
 // флаг модели агенту не передаётся.
-type modelPick struct {
-	Agent  string
-	Model  string
-	Effort string
-	Source string
-}
+type modelPick = launch.Pick
 
-// pickModel — шаги 2, 3 и 5 порядка 0077 п. 7: запись версии-снимка прогона
-// для своего агента, затем таблица уровней привязки (nil — привязки или
-// таблицы нет), иначе модель агента по умолчанию.
+// pickModel — шаги 2, 3 и 5 порядка 0077 п. 7 (launch.PickModel) по
+// таблице уровней привязки; nil — привязки нет.
 func pickModel(level, agent string, snapshot map[string]modelChoice, binding *agentBinding) modelPick {
-	if m, ok := snapshot[agent]; ok && m.Model != "" {
-		return modelPick{Agent: agent, Model: m.Model, Effort: m.Effort, Source: sourceAgentSettings}
-	}
+	var levels map[string]string
 	if binding != nil {
-		if model := binding.Levels[level]; model != "" {
-			return modelPick{Agent: agent, Model: model, Source: sourceBinding}
-		}
+		levels = binding.Levels
 	}
-	return modelPick{Agent: agent, Source: sourceAgentDefault}
+	return launch.PickModel(level, agent, snapshot, levels)
 }
 
 // agentEnv — окружение, по которому узнаётся агент; в тестах подменяется.

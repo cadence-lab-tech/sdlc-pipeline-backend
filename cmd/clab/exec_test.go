@@ -376,6 +376,40 @@ func TestExecGenericEnvironmentAndStdin(t *testing.T) {
 	}
 }
 
+// CLAB-420, решение человека после проверки CLAB-419: deny из tool_policy
+// роли уходит в --disallowedTools шаблона claude, а своя команда без
+// {disallowed_tools} получает явное предупреждение, а не молчание.
+func TestExecToolPolicyDeny(t *testing.T) {
+	policy := `{"allow":["Bash","Read"],"deny":["Write","Edit"]}`
+	execution := `{"model_level":null,"model_level_source":"none","agent_settings_version":null,"models":{}}`
+	f := newExecFixture(t)
+	f.srv.state = stateJSON(execution, policy)
+	r := f.run(t, f.env(), execTask, "--dir", f.runDir, "--agent", "claude")
+	if r.code != 0 {
+		t.Fatalf("код %d\n%s", r.code, r.stderr)
+	}
+	argv := f.argv(t)
+	if !hasSeq(argv, "--allowedTools", "Bash,Read", "--disallowedTools", "Write,Edit") {
+		t.Errorf("политика роли не в argv: %q", argv)
+	}
+	if strings.Contains(r.stderr, "tool_policy") {
+		t.Errorf("политика переведена, а предупреждение есть:\n%s", r.stderr)
+	}
+
+	f = newExecFixture(t)
+	f.srv.state = stateJSON(execution, policy)
+	r = f.run(t, f.env(), execTask, "--dir", f.runDir, "--", "claude", "-p", "--allowedTools", "{allowed_tools}", "{prompt}")
+	if r.code != 0 {
+		t.Fatalf("код %d\n%s", r.code, r.stderr)
+	}
+	if argv := f.argv(t); !hasSeq(argv, "--allowedTools", "Bash,Read") || slices.Contains(argv, "--disallowedTools") {
+		t.Errorf("своя команда: %q", argv)
+	}
+	if !strings.Contains(r.stderr, "предупреждение: tool_policy роли: deny не передан привязке claude — в команде нет {disallowed_tools} (deny=Write,Edit)") {
+		t.Errorf("deny потерян молча:\n%s", r.stderr)
+	}
+}
+
 // AC-8: привязка claude без команды — шаблон run, один сервер sdlc в
 // mcp.json со ссылкой на переменную, SDLC_TOKEN — только агенту.
 func TestExecClaudeTemplateMCP(t *testing.T) {
@@ -387,7 +421,7 @@ func TestExecClaudeTemplateMCP(t *testing.T) {
 	}
 	argv := f.argv(t)
 	mcp := filepath.Join(f.runDir, "mcp.json")
-	for _, seq := range [][]string{{"--strict-mcp-config", "--mcp-config", mcp}, {"--model", "opus"}, {"--allowedTools", "Bash,Read"}} {
+	for _, seq := range [][]string{{"--mcp-config", mcp, "--strict-mcp-config"}, {"--model", "opus"}, {"--allowedTools", "Bash,Read"}} {
 		if !hasSeq(argv, seq...) {
 			t.Errorf("нет %q в %q", seq, argv)
 		}
