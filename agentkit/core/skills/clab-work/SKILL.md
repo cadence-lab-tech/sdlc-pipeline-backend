@@ -44,6 +44,15 @@ end of this skill, if there are any.
   workaround: write it in the submitted artifact and in the report; if the
   role's work cannot go on without a human decision, submit a problem
   report and return the task or release it.
+  The executor runs either as a sub-agent of the orchestrator or as a
+  separate process started by `clab exec`. As a process its environment
+  already points at the task-token directory and the project, and its
+  instruction is the starting instruction of the stage followed by the
+  orchestrator's note: keep the prefix the note gives in every `clab`
+  command anyway (a check attached to the start refuses `clab` without
+  it), and write the report where the note says — usually `<run
+  directory>/report.md`, because the output of a process is not read as
+  the report.
 
 The steps are the same in both modes.
 

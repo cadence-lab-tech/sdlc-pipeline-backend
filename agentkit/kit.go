@@ -43,6 +43,8 @@ import (
 	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit/launch"
 )
 
 //go:embed core bindings
@@ -150,7 +152,7 @@ var (
 	knownOutputs    = []string{"claude-json", "codex-jsonl"}
 	knownMCPMethods = []string{"claude-mcp-add", "codex-config-toml"}
 	knownPlacements = []string{"agent-frontmatter", "launch"}
-	knownRunSlots   = []string{"{model}", "{effort}", "{mcp_config}", "{mcp_url}", "{config_dir}", "{allowed_tools}", "{prompt}"}
+	knownRunSlots   = launch.Slots
 	runSlot         = regexp.MustCompile(`\{[a-z_]+\}`)
 )
 
@@ -260,6 +262,9 @@ func buildKit(fsys fs.FS) (Kit, error) {
 	}
 	if legacy == nil {
 		return Kit{}, fmt.Errorf("нет привязки %s — из неё собирается поле files для clab прежних версий", legacyBinding)
+	}
+	if err := launchHooks(k.Bindings); err != nil {
+		return Kit{}, err
 	}
 	if k.Files, err = legacyFiles(*legacy); err != nil {
 		return Kit{}, fmt.Errorf("привязка %s: %w", legacyBinding, err)
@@ -602,6 +607,75 @@ func checkHook(b Binding, f fragments) error {
 		return fmt.Errorf("поле hook: во фронтматтере bindings/%s/agents/%s.md нет события %q", b.Name, h.Agent, h.Event)
 	}
 	return nil
+}
+
+// launchHooks дописывает хуку, который крепится к запуску (placement
+// launch), сценарий: поле command — тело хука того же агента из
+// фронтматтера привязки с placement agent-frontmatter (CLAB-419, решение
+// 0077 п. 10). Сценарий один на всех агентов, и корпус hook_test.go
+// проверяет его один раз; вторая копия в файле привязки разошлась бы с ним.
+// Шаблон run с {hook_script} без сценария — ошибка сборки.
+func launchHooks(bindings []Binding) error {
+	scripts := map[string]string{}
+	for _, b := range bindings {
+		h, ok := hookOf(b)
+		if !ok || h.Placement != "agent-frontmatter" || b.Kit == nil {
+			continue
+		}
+		for _, f := range b.Files {
+			if f.Path == path.Join(b.Kit.AgentsDir, h.Agent+".md") {
+				script, err := launch.HookCommand(f.Content)
+				if err != nil {
+					return fmt.Errorf("привязка %s: агент %s: %w", b.Name, h.Agent, err)
+				}
+				scripts[h.Agent] = script
+			}
+		}
+	}
+	for i := range bindings {
+		b := &bindings[i]
+		h, ok := hookOf(*b)
+		usesScript := launch.Uses(b.Run, launch.SlotHookScript)
+		if !ok || h.Placement != "launch" || h.Agent == "" {
+			if usesScript {
+				return fmt.Errorf("привязка %s: в run есть %s, а хука с placement launch и agent нет", b.Name, launch.SlotHookScript)
+			}
+			continue
+		}
+		script, found := scripts[h.Agent]
+		if !found {
+			return fmt.Errorf("привязка %s: хук агента %s при запуске, а сценария хука этого агента во фронтматтере ни одной привязки нет", b.Name, h.Agent)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(b.Hook, &obj); err != nil {
+			return fmt.Errorf("привязка %s: поле hook: %w", b.Name, err)
+		}
+		if _, set := obj["command"]; set {
+			return fmt.Errorf("привязка %s: поле hook.command собирается из фронтматтера агента %s — в файле его не пишут", b.Name, h.Agent)
+		}
+		obj["command"] = script
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(obj); err != nil {
+			return err
+		}
+		b.Hook = bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	}
+	return nil
+}
+
+type hookFields struct {
+	Placement string `json:"placement"`
+	Agent     string `json:"agent"`
+}
+
+func hookOf(b Binding) (hookFields, bool) {
+	var h hookFields
+	if b.Hook == nil || json.Unmarshal(b.Hook, &h) != nil {
+		return hookFields{}, false
+	}
+	return h, true
 }
 
 // bindingFiles собирает файлы привязки: скилы и агенты ядра с фрагментами,

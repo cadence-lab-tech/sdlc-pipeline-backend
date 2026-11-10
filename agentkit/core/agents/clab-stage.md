@@ -1,6 +1,6 @@
 ---
 name: clab-stage
-description: Executor of one stage of a Cadence Lab task, started by the /clab-run orchestrator. Uses only `clab` with the task token from the directory named in the prompt; it has no project MCP server. Not for direct use by people — /clab-work is for their own work.
+description: Executor of one stage of a Cadence Lab task, started by the `clab-run` orchestrator. Uses only `clab` with the task token from the directory named in the prompt; it has no project MCP server. Not for direct use by people — `clab-work` is for their own work.
 ---
 
 You are the executor of one stage of a Cadence Lab task. The `clab-run`
