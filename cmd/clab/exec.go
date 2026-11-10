@@ -8,8 +8,11 @@ package main
 //	          [--note-file note.md] [--dry-run] [-- <команда агента>]
 //
 // Граница — окружение и каталог токена, а не дисциплина промпта: клиент
-// строится только из <каталог>/clab/config.json, личный конфиг человека,
-// SDLC_API_URL и SDLC_TOKEN оркестратора не читаются вовсе. Процесс агента
+// запуска строится только из <каталог>/clab/config.json, личный конфиг
+// человека, SDLC_API_URL и SDLC_TOKEN оркестратора до выхода агента не
+// читаются. Единственное исключение — строка учёта по выводу агента
+// (CLAB-470, exec_usage.go): её шлёт клиент запустившего, построенный
+// после выхода процесса агента и только на хост токена задачи. Процесс агента
 // получает CLAB_CONFIG_DIR=<каталог>/clab и SDLC_PROJECT, а SDLC_TOKEN —
 // только когда MCP sdlc подключается ссылкой на переменную (0077 п. 10):
 // токен не попадает ни в argv, ни в файлы, ни в вывод.
@@ -159,21 +162,30 @@ func execute(ctx context.Context, args []string, sys execIO) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	prompt, err := workPrompt(ctx, c, task)
+	bindings := fetchBindings(ctx, c)
+
+	// Кто отчитается о стоимости, решает план (привязка, модель, флаг
+	// формата), а от этого зависит текст инструкции (usage=runner): сначала
+	// план без инструкции, потом инструкция, потом план с ней. planLaunch
+	// чистая, второй вызов даёт то же решение.
+	in := planInput{
+		task: task, project: project, flags: f, command: command, wrapped: wrapped,
+		bindings: bindings, state: st, dir: td, origin: c.origin,
+		environ: sys.environ, workdir: sys.workdir,
+	}
+	plan, err := planLaunch(in)
+	if err != nil {
+		return 0, err
+	}
+	prompt, err := workPrompt(ctx, c, task, plan.usage.reports)
 	if err != nil {
 		return 0, err
 	}
 	if strings.TrimSpace(note) != "" {
 		prompt = strings.TrimRight(prompt, "\n") + "\n\n" + note
 	}
-	bindings := fetchBindings(ctx, c)
-
-	plan, err := planLaunch(planInput{
-		task: task, project: project, flags: f, command: command, wrapped: wrapped,
-		bindings: bindings, state: st, prompt: prompt, dir: td, origin: c.origin,
-		environ: sys.environ, workdir: sys.workdir,
-	})
-	if err != nil {
+	in.prompt = prompt
+	if plan, err = planLaunch(in); err != nil {
 		return 0, err
 	}
 
@@ -196,14 +208,28 @@ func execute(ctx context.Context, args []string, sys execIO) (int, error) {
 	if argv[0], err = lookPathIn(argv[0], plan.env); err != nil {
 		return 0, err
 	}
-	h := &heartbeater{c: c, task: task, out: sys.stderr, warn: sys.stderr, env: plan.env, name: "clab exec"}
+	h := &heartbeater{c: c, task: task, out: sys.stderr, warn: sys.stderr, env: plan.env, name: "clab exec", waitDelay: execWaitDelay}
 	var stdin io.Reader
 	if plan.promptOnStdin {
 		stdin = strings.NewReader(prompt)
 	}
-	code, err := h.wrap(ctx, argv, stdin, sys.stdout, sys.stderr, sys.sigs)
+	// Вывод агента уходит запустившему как есть; копия для разбора — только
+	// когда отчитывается clab exec, и не больше предела.
+	stdout := sys.stdout
+	var capture *capturedOutput
+	if plan.usage.reports {
+		capture = &capturedOutput{w: sys.stdout, limit: execCaptureLimit}
+		stdout = capture
+	}
+	code, err := h.wrap(ctx, argv, stdin, stdout, sys.stderr, sys.sigs)
 	if err != nil {
 		return 0, err
+	}
+	if capture != nil {
+		// Учёт — после выхода агента и при любом его коде: Claude Code
+		// печатает JSON и при сбое, Codex — события до сбоя. Код выхода
+		// clab exec от учёта не зависит.
+		reportExecUsage(ctx, sys.stderr, td, task, h.runID, plan, capture)
 	}
 	return code, nil
 }
@@ -388,8 +414,16 @@ func readExecState(ctx context.Context, c *Client, task string) (execState, erro
 // workPrompt — стартовая инструкция этапа: ответ GET …/prompts/work как
 // есть (тот же текст печатает clab prompt work). Сервер без ручки — отказ с
 // версией сервера.
-func workPrompt(ctx context.Context, c *Client, task string) (string, error) {
-	raw, _, err := c.getContent(ctx, "/tasks/"+url.PathEscape(task)+"/prompts/work")
+//
+// launcherReports — о стоимости отчитается clab exec: инструкция
+// запрашивается с usage=runner, и шаг отчёта в ней заменён запретом (тот же
+// параметр, что у раннера и clab prompt work --usage runner).
+func workPrompt(ctx context.Context, c *Client, task string, launcherReports bool) (string, error) {
+	path := "/tasks/" + url.PathEscape(task) + "/prompts/work"
+	if launcherReports {
+		path += "?usage=runner"
+	}
+	raw, _, err := c.getContent(ctx, path)
 	if routeMissing(err) {
 		return "", refuse("%v", c.oldServerRefusal(ctx, "clab exec", "стартовую инструкцию этапа", task))
 	}
@@ -441,6 +475,7 @@ type launchPlan struct {
 	promptBytes      int
 	hookScript       string
 	hookLine         string
+	usage            usagePlan
 	warnings         []string
 }
 
@@ -537,6 +572,10 @@ func planLaunch(in planInput) (*launchPlan, error) {
 
 	if p.model.Model != "" && !launch.Uses(template, launch.SlotModel) {
 		p.warnings = append(p.warnings, "модель не передана: в команде нет "+launch.SlotModel+" — агент возьмёт свою модель по умолчанию")
+	}
+	p.usage = planUsage(agent, binding, p.noBindings, template, in.wrapped, p.model.Model)
+	if p.usage.warning != "" {
+		p.warnings = append(p.warnings, p.usage.warning)
 	}
 	// allow и deny проверяются порознь (CLAB-420): шаблон с одной
 	// подстановкой из двух молча терял бы вторую часть политики.
@@ -688,6 +727,7 @@ func (p *launchPlan) print(w io.Writer, token string) {
 	}
 	line("инструкция: %s, %d байт (clab prompt work и заметка --note-file, если задана)", how, p.promptBytes)
 	line("команда: %s", p.displayArgv())
+	line("%s", p.usage.line)
 	for _, warn := range p.warnings {
 		line("предупреждение: %s", warn)
 	}

@@ -40,7 +40,14 @@ type execServer struct {
 	prompt string // "" — ручки нет
 	// heartbeat — ответ на n-е продление (с нуля).
 	heartbeat func(n int) (int, string)
-	srv       *httptest.Server
+	// promptQueries — строки запроса ручки инструкции (CLAB-470: usage=runner).
+	promptQueries []string
+	// usage — ответ на строку учёта запустившего; usages — принятые тела и
+	// заголовки Authorization.
+	usage      func() (int, string)
+	usages     []map[string]any
+	usageAuths []string
+	srv        *httptest.Server
 }
 
 func newExecServer(t *testing.T) *execServer {
@@ -53,6 +60,7 @@ func newExecServer(t *testing.T) *execServer {
 	s := &execServer{t: t, kit: string(kit), prompt: execText,
 		state:     stateJSON(`{"model_level":"high","model_level_source":"stage","agent_settings_version":3,"models":{"codex":{"model":"gpt-x","effort":"high"}}}`, `null`),
 		heartbeat: func(int) (int, string) { return leaseOK(time.Hour, 300) },
+		usage:     func() (int, string) { return http.StatusCreated, `{"id":"u-1","cost_source":"reported"}` },
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
@@ -67,6 +75,22 @@ func stateJSON(execution, toolPolicy string) string {
 func (s *execServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/usage") {
+		// Строку учёта шлёт запустивший своими учётными данными (CLAB-470).
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		s.usages = append(s.usages, body)
+		s.usageAuths = append(s.usageAuths, r.Header.Get("Authorization"))
+		s.mu.Unlock()
+		code, reply := s.usage()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(reply))
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/prompts/work") {
+		s.promptQueries = append(s.promptQueries, r.URL.RawQuery)
+	}
 	if got := r.Header.Get("Authorization"); got != "Bearer "+execToken {
 		s.t.Errorf("%s %s: заголовок %q — ждали токен задачи", r.Method, r.URL.Path, got)
 	}
@@ -118,7 +142,10 @@ cat > "$out/stdin"
 if command -v ps >/dev/null 2>&1; then ps -o args= -p $$ > "$out/ps" 2>/dev/null; fi
 touch "$out/ran"
 if [ -n "$STUB_SLEEP" ]; then sleep "$STUB_SLEEP"; fi
+if [ -n "$STUB_BG" ]; then (sleep "$STUB_BG"; echo late) & fi
+if [ -n "$STUB_PRINT" ]; then cat "$STUB_PRINT"; fi
 if [ -n "$STUB_KILL" ]; then kill -TERM $$; fi
+touch "$out/finished"
 exit "${STUB_CODE:-0}"
 `
 
@@ -168,6 +195,11 @@ func newExecFixture(t *testing.T) *execFixture {
 	old := agentEnv
 	agentEnv = func(string) string { return "" }
 	t.Cleanup(func() { agentEnv = old })
+	// Учётные данные запустившего (строка учёта, CLAB-470) — личный конфиг
+	// фикстуры, а не конфиг машины, на которой идут тесты.
+	t.Setenv("CLAB_CONFIG_DIR", filepath.Join(f.home, ".config", "clab"))
+	t.Setenv("SDLC_TOKEN", "")
+	t.Setenv("SDLC_API_URL", "")
 	return f
 }
 

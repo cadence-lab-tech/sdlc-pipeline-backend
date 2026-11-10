@@ -88,6 +88,10 @@ type agentBinding struct {
 	Hook *bindingHook
 	// ToolPolicy — привязка переводит tool_policy роли во флаги агента.
 	ToolPolicy bool
+	// Output — формат вывода, который разбирает запускающий (поле output:
+	// launch.OutputClaudeJSON, launch.OutputCodexJSONL); пусто — разбора
+	// нет, и о стоимости отчитывается агент сам (CLAB-470).
+	Output string
 	// detect пуст, если признака нет или его форма непонятна: такая
 	// привязка не узнаёт агента, как привязка без признака.
 	detect []agentCondition
@@ -154,6 +158,7 @@ func parseBindings(raw json.RawMessage) []agentBinding {
 		Executor   json.RawMessage   `json:"executor"`
 		Hook       json.RawMessage   `json:"hook"`
 		ToolPolicy json.RawMessage   `json:"tool_policy"`
+		Output     json.RawMessage   `json:"output"`
 	}
 	var entries []entry
 	if json.Unmarshal(raw, &entries) != nil {
@@ -183,6 +188,12 @@ func parseBindings(raw json.RawMessage) []agentBinding {
 		}
 		var policy map[string]any
 		b.ToolPolicy = json.Unmarshal(e.ToolPolicy, &policy) == nil && len(policy) > 0
+		// Неизвестный формат или другая форма — как null: разобрать такой
+		// вывод нечем, и обещать отчёт по нему нельзя.
+		var output string
+		if json.Unmarshal(e.Output, &output) == nil && launch.Parses(output) {
+			b.Output = output
+		}
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
