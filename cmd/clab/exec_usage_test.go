@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // CLAB-470: учёт clab exec по выводу привязки. Привязки — с произвольными
@@ -197,13 +199,23 @@ func TestExecUsageAgentFailed(t *testing.T) {
 
 // AC-7: нечего разбирать — ни строки, ни нуля, ни usage.json.
 func TestExecUsageNothingToParse(t *testing.T) {
+	const unparsed = "предупреждение: учёт не отправлен — вывод агента не разобран"
+	const noTokens = "нет ни одного ненулевого счётчика токенов; стоимость неизвестна, строки нет"
 	for _, c := range []struct {
-		name, agent, out string
+		name, agent, out, warn string
 	}{
-		{"пустой вывод", "relay", ""},
-		{"мусор", "relay", "готово, всё сделал\n"},
-		{"JSON без модели", "relay", `{"total_cost_usd":0.5}`},
-		{"codex без turn.completed", "relay-x", `{"type":"turn.started"}` + "\n" + `{"type":"turn.failed","error":{"message":"x"}}` + "\n"},
+		{"пустой вывод", "relay", "", unparsed},
+		{"мусор", "relay", "готово, всё сделал\n", unparsed},
+		{"JSON без модели", "relay", `{"total_cost_usd":0.5}`, unparsed},
+		{"codex без turn.completed", "relay-x", `{"type":"turn.started"}` + "\n" + `{"type":"turn.failed","error":{"message":"x"}}` + "\n", unparsed},
+		// Разбор отдаёт отчёт и здесь (раннеру он такой и нужен), а строки
+		// без единого токена clab exec не шлёт: ноль — не стоимость.
+		{"codex с нулями", "relay-x", `{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0}}` + "\n",
+			"предупреждение: учёт не отправлен — в выводе агента (codex-jsonl) " + noTokens},
+		{"claude с нулевым usage", "relay", `{"type":"result","model":"m-claude","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`,
+			"предупреждение: учёт не отправлен — в выводе агента (claude-json) " + noTokens},
+		{"claude без usage", "relay", `{"type":"result","model":"m-claude","total_cost_usd":0.2,"duration_ms":10}`,
+			"предупреждение: учёт не отправлен — в выводе агента (claude-json) " + noTokens},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newUsageFixture(t)
@@ -211,10 +223,65 @@ func TestExecUsageNothingToParse(t *testing.T) {
 			if bodies, _ := f.usageBodies(); r.code != 2 || len(bodies) != 0 {
 				t.Fatalf("код %d, строк %d", r.code, len(bodies))
 			}
-			if !strings.Contains(r.stderr, "предупреждение: учёт не отправлен — вывод агента не разобран") {
-				t.Errorf("нет предупреждения:\n%s", r.stderr)
+			if !strings.Contains(r.stderr, c.warn) {
+				t.Errorf("нет предупреждения %q:\n%s", c.warn, r.stderr)
+			}
+			if strings.Contains(r.stderr, "строка записана") || strings.Contains(r.stderr, "сдать вручную") {
+				t.Errorf("строка учёта всё же собрана:\n%s", r.stderr)
 			}
 			f.noUsageFile(t)
+		})
+	}
+}
+
+func TestHasTokens(t *testing.T) {
+	for _, c := range []struct {
+		r    map[string]any
+		want bool
+	}{
+		{map[string]any{"model": "m"}, false},
+		{map[string]any{"model": "m", "input_tokens": int64(0), "output_tokens": int64(0), "cache_read_tokens": int64(0), "cache_write_tokens": int64(0), "cost_usd": 1.5}, false},
+		{map[string]any{"input_tokens": int64(-3)}, false},
+		{map[string]any{"cache_write_tokens": int64(1)}, true},
+		{map[string]any{"output_tokens": 2}, true},
+		{map[string]any{"cache_read_tokens": 7.0}, true},
+	} {
+		if got := hasTokens(c.r); got != c.want {
+			t.Errorf("hasTokens(%v) = %v, ожидалось %v", c.r, got, c.want)
+		}
+	}
+}
+
+// Фоновый процесс агента с унаследованным stdout не держит clab exec: после
+// выхода агента перехват закрывается через execWaitDelay, код — агента,
+// пришедшее до выхода — запустившему и в разбор.
+func TestExecBackgroundHoldsStdout(t *testing.T) {
+	old := execWaitDelay
+	execWaitDelay = 200 * time.Millisecond
+	t.Cleanup(func() { execWaitDelay = old })
+	for _, c := range []struct {
+		code int
+		warn bool
+	}{{0, true}, {3, false}} {
+		t.Run(fmt.Sprint("код ", c.code), func(t *testing.T) {
+			f := newUsageFixture(t)
+			start := time.Now()
+			r := f.run(t, f.env(f.print(t, claudeResult), "STUB_BG=5", fmt.Sprint("STUB_CODE=", c.code)), execTask, "--dir", f.runDir, "--agent", "relay")
+			if d := time.Since(start); d > 3*time.Second {
+				t.Fatalf("clab exec ждал фоновый процесс агента %s", d)
+			}
+			if r.code != c.code {
+				t.Fatalf("код %d, ожидался %d\n%s", r.code, c.code, r.stderr)
+			}
+			if r.stdout != claudeResult {
+				t.Errorf("stdout запустившего не тот:\n%q", r.stdout)
+			}
+			if bodies, _ := f.usageBodies(); len(bodies) != 1 || bodies[0]["model"] != "model-main" {
+				t.Errorf("строки учёта: %v\n%s", bodies, r.stderr)
+			}
+			if got := strings.Contains(r.stderr, "вывод держал фоновый процесс"); got != c.warn {
+				t.Errorf("предупреждение о фоновом процессе: %v, ожидалось %v\n%s", got, c.warn, r.stderr)
+			}
 		})
 	}
 }

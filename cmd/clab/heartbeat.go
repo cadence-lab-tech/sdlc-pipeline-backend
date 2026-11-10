@@ -130,6 +130,11 @@ type heartbeater struct {
 	env []string
 	// name — чьи это строки: «clab heartbeat» или «clab exec».
 	name string
+	// waitDelay — сколько ждать закрытия вывода команды после её выхода
+	// (exec.Cmd.WaitDelay); 0 — пока не закроется. Нужен, когда вывод
+	// перехватывается не файлом: фоновый процесс команды с унаследованным
+	// stdout держал бы обёртку до своего конца.
+	waitDelay time.Duration
 }
 
 func (h *heartbeater) label() string {
@@ -273,6 +278,7 @@ func (h *heartbeater) wrap(ctx context.Context, argv []string, stdin io.Reader, 
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
+	cmd.WaitDelay = h.waitDelay
 	switch {
 	case h.env != nil:
 		cmd.Env = h.env
@@ -310,6 +316,14 @@ func (h *heartbeater) wrap(ctx context.Context, argv []string, stdin io.Reader, 
 		case err := <-waited:
 			cancel()
 			<-kept
+			if errors.Is(err, exec.ErrWaitDelay) {
+				// Команда вышла с кодом 0, а вывод держал её фоновый
+				// процесс: перехват закрыт, код — команды. С ненулевым
+				// кодом Wait отдаёт ExitError, и закрытие не видно —
+				// предупреждения тогда нет, код тот же.
+				fmt.Fprintf(h.warn, "%s: команда вышла, а её вывод держал фоновый процесс; перехват вывода закрыт через %s после выхода\n", h.label(), h.waitDelay)
+				err = nil
+			}
 			return exitStatus(argv[0], err)
 		}
 	}

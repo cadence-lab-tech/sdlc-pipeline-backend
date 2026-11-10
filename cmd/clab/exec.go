@@ -208,7 +208,7 @@ func execute(ctx context.Context, args []string, sys execIO) (int, error) {
 	if argv[0], err = lookPathIn(argv[0], plan.env); err != nil {
 		return 0, err
 	}
-	h := &heartbeater{c: c, task: task, out: sys.stderr, warn: sys.stderr, env: plan.env, name: "clab exec"}
+	h := &heartbeater{c: c, task: task, out: sys.stderr, warn: sys.stderr, env: plan.env, name: "clab exec", waitDelay: execWaitDelay}
 	var stdin io.Reader
 	if plan.promptOnStdin {
 		stdin = strings.NewReader(prompt)

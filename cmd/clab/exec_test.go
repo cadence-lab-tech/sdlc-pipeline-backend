@@ -142,6 +142,7 @@ cat > "$out/stdin"
 if command -v ps >/dev/null 2>&1; then ps -o args= -p $$ > "$out/ps" 2>/dev/null; fi
 touch "$out/ran"
 if [ -n "$STUB_SLEEP" ]; then sleep "$STUB_SLEEP"; fi
+if [ -n "$STUB_BG" ]; then (sleep "$STUB_BG"; echo late) & fi
 if [ -n "$STUB_PRINT" ]; then cat "$STUB_PRINT"; fi
 if [ -n "$STUB_KILL" ]; then kill -TERM $$; fi
 touch "$out/finished"

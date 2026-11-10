@@ -36,6 +36,12 @@ const execReportedBy = "clab exec"
 // обрывается и stdout идёт целиком, но учёт не отправляется.
 var execCaptureLimit = 64 << 20
 
+// execWaitDelay — сколько после выхода агента ждать конца его вывода.
+// Перехваченный stdout — канал, и фоновый процесс агента, унаследовавший
+// его, держал бы clab exec до своего конца; что пришло до закрытия, уходит
+// запустившему и в разбор.
+var execWaitDelay = 5 * time.Second
+
 // execUsageTimeout — предел отправки строки: агент уже отработал, и ждать
 // сервер дольше незачем.
 var execUsageTimeout = 30 * time.Second
@@ -141,6 +147,13 @@ func reportExecUsage(ctx context.Context, stderr io.Writer, td taskDir, task, ru
 		say("предупреждение: учёт не отправлен — вывод агента не разобран как %s; стоимость неизвестна, строки нет", u.format)
 		return
 	}
+	// Разбор отдаёт отчёт и по ходу с нулями, и по результату без счётчиков
+	// (так он нужен раннеру). Строка без единого токена числилась бы
+	// отчитавшимся прогоном, а стоимость его неизвестна, а не ноль.
+	if !hasTokens(report) {
+		say("предупреждение: учёт не отправлен — в выводе агента (%s) нет ни одного ненулевого счётчика токенов; стоимость неизвестна, строки нет", u.format)
+		return
+	}
 	// Какой привязкой разобран вывод — рядом с reported_by, как у раннера.
 	if details, ok := report["details"].(map[string]any); ok {
 		details["agent"] = u.agent
@@ -163,6 +176,32 @@ func reportExecUsage(ctx context.Context, stderr io.Writer, td taskDir, task, ru
 		say("предупреждение: учёт не отправлен — %s; строка сохранена в %s", reason, path)
 	}
 	say("сдать вручную: %s", usageCommand(td.origin, task, runID, report))
+}
+
+// tokenKeys — счётчики токенов строки учёта.
+var tokenKeys = []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}
+
+// hasTokens — есть ли в отчёте хоть один положительный счётчик токенов.
+// Сумма агента и длительность токенов не заменяют: сравнение по моделям
+// идёт по токенам.
+func hasTokens(r map[string]any) bool {
+	for _, k := range tokenKeys {
+		switch v := r[k].(type) {
+		case int64:
+			if v > 0 {
+				return true
+			}
+		case int:
+			if v > 0 {
+				return true
+			}
+		case float64:
+			if v > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sendExecUsage — POST строки клиентом запустившего. reason пуст при
