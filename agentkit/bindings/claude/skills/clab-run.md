@@ -50,8 +50,9 @@ model is refused — say so in the chat and start the executor without
   be a process (section "Executor as a process"): `clab exec <key> --dir
   <run directory> --note-file <run directory>/note.md --agent claude`. The
   hook of `clab-stage` lives in the agent definition and is not attached
-  to a process: the boundary is the environment `clab exec` builds, and its
-  dry run says "no command check".
+  to a process: the boundary is the environment `clab exec` builds. Its dry
+  run says so in the hook line: the guard hook is not attached, isolation
+  is by the environment.
 - **Fallback path.** The old-way executor is a sub-agent of type
   `general-purpose` that claims the stage itself through `/clab-work`; its
   model is chosen by the same table: the `model` parameter of this

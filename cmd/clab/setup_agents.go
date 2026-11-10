@@ -18,13 +18,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit/launch"
 )
 
-// Имена привязок, которые знает clab.
+// Имена привязок, которые знает clab; те же имена у раннера (agentkit/launch).
 const (
-	agentClaude  = "claude"
-	agentCodex   = "codex"
-	agentGeneric = "generic"
+	agentClaude  = launch.AgentClaude
+	agentCodex   = launch.AgentCodex
+	agentGeneric = launch.AgentGeneric
 )
 
 // agentPrograms — программа привязки в PATH; у generic её нет.

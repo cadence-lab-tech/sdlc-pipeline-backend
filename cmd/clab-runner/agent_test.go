@@ -41,6 +41,9 @@ type fakeAPI struct {
 	// claim — ответ захвата; nil — прогон роли developer без уровня и
 	// без execution, как у сервера прежней версии.
 	claim map[string]any
+	// routes — свои ответы по пути (CLAB-420: набор агента, инструкция
+	// текстом); проверяются раньше остальных.
+	routes map[string]http.HandlerFunc
 
 	mu    sync.Mutex
 	calls []apiCall
@@ -72,6 +75,10 @@ func (f *fakeAPI) serve(w http.ResponseWriter, req *http.Request) {
 	f.calls = append(f.calls, call)
 	f.mu.Unlock()
 
+	if h, ok := f.routes[call.Path]; ok {
+		h(w, req)
+		return
+	}
 	if call.Auth == "Bearer "+taskTokenV {
 		domainError(w, http.StatusUnauthorized, "unauthenticated")
 		return
@@ -567,7 +574,9 @@ func TestAgentEnvAllowlist(t *testing.T) {
 		"SSH_AUTH_SOCK=/tmp/ssh", "CLAUDE_CODE_USE_BEDROCK=1", "AWS_REGION=eu-west-1", "CLAB_X=1")
 
 	got := map[string]string{}
-	for _, kv := range agentEnv(parent, nil, set) {
+	// Фикстура CLAB-420: ANTHROPIC_* и CLAUDE_* приходят из env привязки
+	// claude, а не из базового списка.
+	for _, kv := range agentEnv(parent, defaultAgent().Env, set) {
 		k, v, _ := strings.Cut(kv, "=")
 		got[k] = v
 	}
@@ -627,10 +636,10 @@ func TestLoadConfigAgentEnv(t *testing.T) {
 
 // Команда по умолчанию изолирует MCP агента (критерий 4).
 func TestDefaultCommandStrictMCP(t *testing.T) {
-	r := newRunner(Config{Project: "CLAB", Command: defaultCommand}, slog.Default())
+	r := newRunner(Config{Project: "CLAB"}, slog.Default())
 	item := queueItem{RoleKey: "developer"}
 	item.Task.Key = "CLAB-1"
-	argv := strings.Join(r.argv(item, claimResult{}, "/tmp/x/mcp.json", ""), " ")
+	argv := strings.Join(r.argv(item, claimResult{}, runSlots{mcpConfig: "/tmp/x/mcp.json"}), " ")
 	if !strings.Contains(argv, "--mcp-config /tmp/x/mcp.json --strict-mcp-config") {
 		t.Fatalf("команда по умолчанию без --strict-mcp-config: %s", argv)
 	}

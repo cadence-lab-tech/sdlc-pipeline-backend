@@ -10,10 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit/launch"
 )
 
-// Клиент REST: раннеру нужны семь ручек, и клиентская библиотека ради них не
+// Клиент REST: раннеру нужны восемь ручек, и клиентская библиотека ради них не
 // окупается. Ошибки домена приезжают кодом — по нему раннер отличает «занято
 // другим» от «нет прав».
 type client struct {
@@ -178,10 +181,26 @@ type claimResult struct {
 }
 
 // claimExecution — рекомендация прогона: уровень и откуда он (этап задачи,
-// задача, роль или none).
+// задача, роль или none), а с настройкой агентов проекта (решение 0077
+// п. 4.5) — модель уровня по агентам версии-снимка прогона и номер версии.
+// Сервер прежней версии последних двух не отдаёт: шаг пропускается.
 type claimExecution struct {
 	ModelLevel       *string `json:"model_level"`
 	ModelLevelSource string  `json:"model_level_source"`
+	// Номер версии — число или null; сырым, чтобы null не стал нулём.
+	AgentSettingsVersion json.RawMessage               `json:"agent_settings_version"`
+	Models               map[string]launch.ModelChoice `json:"models"`
+}
+
+// settingsVersion — номер версии настройки агентов строкой; пусто — версии
+// нет или сервер прежней версии.
+func (e *claimExecution) settingsVersion() string {
+	var n int
+	if e == nil || len(e.AgentSettingsVersion) == 0 || json.Unmarshal(e.AgentSettingsVersion, &n) != nil ||
+		string(e.AgentSettingsVersion) == "null" {
+		return ""
+	}
+	return strconv.Itoa(n)
 }
 
 // claimContext — область задачи из ответа захвата. Рабочие копии заводятся
@@ -204,6 +223,34 @@ func (c *client) claim(ctx context.Context, task, session string) (claimResult, 
 	err := c.do(ctx, http.MethodPost, "/tasks/"+task+"/claim",
 		map[string]any{"session_ref": session}, &out)
 	return out, err
+}
+
+// workPrompt — стартовая инструкция этапа текстом (GET
+// /tasks/{key}/prompts/work, сервер v0.28.0+): тот же текст, что промпт MCP
+// work_on_task. byRunner — о стоимости отчитается раннер, агенту это
+// запрещено (usage=runner, CLAB-214).
+func (c *client) workPrompt(ctx context.Context, task, role string, byRunner bool) (string, error) {
+	q := url.Values{}
+	if role != "" {
+		q.Set("role", role)
+	}
+	if byRunner {
+		q.Set("usage", usageByRunner)
+	}
+	path := "/tasks/" + url.PathEscape(task) + "/prompts/work"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Text == "" {
+		return "", errors.New("сервер отдал пустую стартовую инструкцию")
+	}
+	return out.Text, nil
 }
 
 func (c *client) heartbeat(ctx context.Context, task string) error {

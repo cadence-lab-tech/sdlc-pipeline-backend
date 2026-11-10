@@ -376,7 +376,7 @@ func rawBindings(t *testing.T) map[string]map[string]json.RawMessage {
 	return out
 }
 
-// AC-6: все девять полей в каждой привязке, пустое — явный null; generic
+// AC-6: все поля формата в каждой привязке, пустое — явный null; generic
 // без набора.
 func TestBindingFieldsExplicit(t *testing.T) {
 	raw := rawBindings(t)
@@ -390,7 +390,7 @@ func TestBindingFieldsExplicit(t *testing.T) {
 			}
 		}
 	}
-	for _, f := range []string{"kit", "mcp", "run", "output", "detect", "levels", "tool_policy", "hook"} {
+	for _, f := range []string{"kit", "mcp", "run", "output", "detect", "levels", "tool_policy", "hook", "env"} {
 		if string(raw["generic"][f]) != "null" {
 			t.Errorf("generic.%s = %s, ждали null", f, raw["generic"][f])
 		}
@@ -446,6 +446,8 @@ func TestBindingShapes(t *testing.T) {
 			"executor":    `"subagent"`,
 			"output":      `"claude-json"`,
 			"tool_policy": `{"allow":"--allowedTools","deny":"--disallowedTools"}`,
+			"prompt":      `"mcp_slash"`,
+			"env":         `["ANTHROPIC_*","CLAUDE_*"]`,
 		},
 		"codex": {
 			"detect":      `[{"env":"CODEX_THREAD_ID","non_empty":true}]`,
@@ -454,7 +456,10 @@ func TestBindingShapes(t *testing.T) {
 			"executor":    `"process"`,
 			"output":      `"codex-jsonl"`,
 			"tool_policy": `null`,
+			"prompt":      `"text"`,
+			"env":         `["OPENAI_*","CODEX_*"]`,
 		},
+		"generic": {"prompt": `"text"`, "env": `null`},
 	}
 	for name, fields := range exact {
 		for f, want := range fields {
@@ -537,7 +542,9 @@ const fakeBinding = `{
   "output": "codex-jsonl",
   "detect": [{"env": "FAKE_AGENT", "equals": "1"}],
   "levels": {"low": "f-1", "medium": "f-2", "high": "f-3"},
-  "tool_policy": null
+  "tool_policy": null,
+  "prompt": "text",
+  "env": ["FAKE_*"]
 }`
 
 // AC-8: новая привязка на известных форматах — только файлом набора: сборка
@@ -600,6 +607,12 @@ func TestBuildRejectsBadBinding(t *testing.T) {
 		{"hook", map[string]string{"bindings/fake.json": edit("hook", `{"placement":"elsewhere"}`)}, []string{"fake", "hook"}},
 		{"detect", map[string]string{"bindings/fake.json": edit("detect", `[{"env":"X"}]`)}, []string{"fake", "detect"}},
 		{"levels", map[string]string{"bindings/fake.json": edit("levels", `{"low":"a","high":"b"}`)}, []string{"fake", "levels"}},
+		{"prompt", map[string]string{"bindings/fake.json": edit("prompt", `"slash"`)}, []string{"fake", "prompt"}},
+		{"prompt null", map[string]string{"bindings/fake.json": edit("prompt", `null`)}, []string{"fake", "prompt"}},
+		{"env пустой", map[string]string{"bindings/fake.json": edit("env", `[]`)}, []string{"fake", "env"}},
+		{"env SDLC_", map[string]string{"bindings/fake.json": edit("env", `["SDLC_TOKEN"]`)}, []string{"fake", "env"}},
+		{"env CLAB_", map[string]string{"bindings/fake.json": edit("env", `["clab_*"]`)}, []string{"fake", "env"}},
+		{"env не имя", map[string]string{"bindings/fake.json": edit("env", `["A B"]`)}, []string{"fake", "env"}},
 		{"подстановка run", map[string]string{"bindings/fake.json": edit("run", `["fake","{secret}"]`)}, []string{"fake", "run"}},
 		{"kit вне проекта", map[string]string{"bindings/fake.json": edit("kit", `{"manifest":"../x","skills_dir":"s","agents_dir":"a"}`)}, []string{"fake", "kit"}},
 		{"имя файла", map[string]string{"bindings/fake.json": edit("name", `"other"`)}, []string{"fake", "name"}},

@@ -17,7 +17,12 @@
 //	SDLC_RUNNER_ROLES     роли через запятую; пусто — любые, какие даёт токен
 //	SDLC_RUNNER_SLOTS     сколько агентов держать одновременно (по умолчанию 1)
 //	SDLC_RUNNER_INTERVAL  как часто опрашивать очередь (по умолчанию 15s)
-//	SDLC_RUNNER_COMMAND   чем запускать агента (по умолчанию Claude Code)
+//	SDLC_RUNNER_COMMAND   чем запускать агента; по имени программы раннер
+//	                      выбирает привязку набора (claude, codex, иначе
+//	                      generic). Без неё — шаблон run привязки агента из
+//	                      PATH: claude, если он есть, иначе единственный
+//	                      найденный; несколько без claude или ни одного —
+//	                      отказ старта
 //	SDLC_RUNNER_TIMEOUT   сколько ждать агента, прежде чем считать его мёртвым
 //	SDLC_RUNNER_MAX_FAILURES
 //	                      сколько сбоев подряд прогону прощается (по умолчанию
@@ -40,10 +45,12 @@
 //	                      какая модель отвечает рекомендованному уровню
 //	                      (решение 0060): low=haiku,medium=sonnet,high=opus,
 //	                      любую запись можно опустить; значение идёт в
-//	                      {model}. Уровня нет в таблице или он не задан —
-//	                      model_hint роли (устарел, в журнале предупреждение),
-//	                      нет и его — --model снимается. Сервер без уровней
-//	                      — model_hint, как раньше. Опечатка — отказ старта
+//	                      {model}. Уровня нет в таблице — модель уровня из
+//	                      настройки агентов проекта (с усилием в {effort}),
+//	                      затем таблица уровней привязки, затем model_hint
+//	                      роли (устарел, в журнале предупреждение), нет и
+//	                      его — флаг модели снимается. Сервер без уровней —
+//	                      model_hint, как раньше. Опечатка — отказ старта
 //	SDLC_RUNNER_REPOS     каталог с клонами репозиториев проекта; клон ищется
 //	                      по origin. С ним агент работает в git worktree своей
 //	                      задачи, без него — в каталоге раннера, и тогда больше
@@ -62,20 +69,28 @@
 // разрешённых, без наследования: PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
 // TERM, TZ, LANG, LC_*, XDG_*, прокси (HTTP_PROXY, HTTPS_PROXY, NO_PROXY и
 // в нижнем регистре), SSL_CERT_FILE, SSL_CERT_DIR, NODE_EXTRA_CA_CERTS,
-// SSH_AUTH_SOCK, ANTHROPIC_*, CLAUDE_*, плюс SDLC_RUNNER_ENV; SDLC_API_URL,
+// SSH_AUTH_SOCK, плюс поле env привязки (claude — ANTHROPIC_*, CLAUDE_*;
+// codex — OPENAI_*, CODEX_*) и SDLC_RUNNER_ENV; SDLC_API_URL,
 // SDLC_PROJECT, SDLC_TOKEN (токен задачи) и CLAB_CONFIG_DIR задаёт раннер.
-// Команда по умолчанию запускает Claude Code с --strict-mcp-config: агент
-// видит только сервер из mcp.json раннера, не серверы из настроек
-// сотрудника. За свою SDLC_RUNNER_COMMAND отвечает администратор. Сервер
-// без выпуска токена задачи (до v0.11.0) — агент работает токеном раннера,
-// в журнале предупреждение.
+// Сервер без выпуска токена задачи (до v0.11.0) — агент работает токеном
+// раннера, в журнале предупреждение.
+//
+// Агента раннер не знает по имени (CLAB-420, решение 0077): команду, форму
+// стартовой инструкции (слэш-промпт MCP или текст GET …/prompts/work),
+// разбор вывода для учёта стоимости, лимит подписки и перевод tool_policy
+// даёт привязка набора — GET /v1/agent-kit инстанса, а без него встроенный
+// набор. Привязка claude запускает Claude Code с --strict-mcp-config:
+// агент видит только сервер из mcp.json раннера, не серверы из настроек
+// сотрудника. За свою SDLC_RUNNER_COMMAND отвечает администратор.
 package main
 
 import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -93,9 +108,15 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Агент выбирается до очереди: отказ — код 2 и ни одного захвата.
+	if err := prepareAgent(ctx, &cfg, log, exec.LookPath); err != nil {
+		log.Error("агент раннера не выбран", "error", err)
+		os.Exit(2)
+	}
+
 	r := newRunner(cfg, log)
 	log.Info("раннер запущен", "version", version, "project", cfg.Project,
-		"roles", cfg.Roles, "slots", cfg.Slots, "command", cfg.Command,
+		"roles", cfg.Roles, "slots", cfg.Slots, "command", strings.Join(r.template(), " "),
 		"repos", cfg.ReposDir, "worktrees", cfg.WorktreesDir)
 	if cfg.ReposDir == "" {
 		log.Warn("SDLC_RUNNER_REPOS не задан: агент работает в каталоге раннера, без рабочей копии задачи")

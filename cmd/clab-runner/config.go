@@ -9,11 +9,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit"
 )
 
-// Config — настройки раннера. Команда запуска вынесена в переменную
-// намеренно: вместо Claude Code может стоять любой агент, понимающий MCP, и
-// раннер не должен знать, какой именно.
+// Config — настройки раннера. Агента раннер не знает по имени: команду,
+// разбор вывода и окружение даёт привязка набора (CLAB-420), а своя
+// команда в SDLC_RUNNER_COMMAND сильнее команды привязки.
 type Config struct {
 	APIURL  string
 	Token   string
@@ -26,9 +28,17 @@ type Config struct {
 	Interval time.Duration
 	// Сколько ждать агента, прежде чем считать его мёртвым и отпустить задачу.
 	Timeout time.Duration
-	// Шаблон команды. Подстановки: {task}, {role}, {model}, {allowed_tools},
-	// {disallowed_tools}, {mcp_config}, {prompt}, {workdir}.
+	// Своя команда из SDLC_RUNNER_COMMAND; пусто — шаблон run привязки.
+	// Подстановки — agentkit/launch: {task}, {role}, {model}, {effort},
+	// {allowed_tools}, {disallowed_tools}, {mcp_config}, {mcp_url},
+	// {config_dir}, {run_dir}, {prompt}, {workdir}.
 	Command string
+	// Привязка агента и откуда она выбрана (SDLC_RUNNER_COMMAND или PATH):
+	// заполняет main до запуска очереди (prepareAgent), чтобы loadConfig не
+	// зависел от PATH машины. nil — раннер собран в обход main (тесты), и
+	// он запускает Claude Code, как раньше.
+	Agent     *agentkit.Binding
+	AgentFrom string
 	// Забрать одну задачу и выйти: так раннер работает в CI.
 	Once bool
 	// Ничего не запускать, только показывать, что было бы запущено.
@@ -77,15 +87,6 @@ var billings = []string{"api", "subscription"}
 // modelLevels — уровни из решения 0060; других ключей таблица не знает.
 var modelLevels = []string{"low", "medium", "high"}
 
-// Команда по умолчанию — Claude Code: агент получает промпт work_on_task с
-// того же MCP-сервера, к которому подключён, поэтому человек и раннер
-// стартуют одинаково (решение 0025). --strict-mcp-config оставляет агенту
-// только сервер из mcp.json раннера: серверы из настроек Claude Code
-// сотрудника — с его личным токеном (clab mcp install) — не подключаются
-// (CLAB-213). За свою SDLC_RUNNER_COMMAND отвечает администратор.
-const defaultCommand = `claude -p --output-format json --mcp-config {mcp_config} --strict-mcp-config ` +
-	`--model {model} --allowedTools {allowed_tools} {prompt}`
-
 func loadConfig() (Config, error) {
 	c := Config{
 		APIURL:   strings.TrimRight(env("SDLC_API_URL", ""), "/"),
@@ -95,7 +96,7 @@ func loadConfig() (Config, error) {
 		Slots:    1,
 		Interval: 15 * time.Second,
 		Timeout:  30 * time.Minute,
-		Command:  env("SDLC_RUNNER_COMMAND", defaultCommand),
+		Command:  env("SDLC_RUNNER_COMMAND", ""),
 		Once:     env("SDLC_RUNNER_ONCE", "") != "",
 		DryRun:   env("SDLC_RUNNER_DRY_RUN", "") != "",
 

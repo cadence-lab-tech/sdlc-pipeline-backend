@@ -3,10 +3,12 @@
   "kit": null,
   "mcp": null,
   "run": null,
+  "prompt": "text",
   "executor": "process",
   "hook": null,
   "output": null,
   "detect": null,
   "levels": null,
-  "tool_policy": null
+  "tool_policy": null,
+  "env": null
 }

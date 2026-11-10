@@ -45,7 +45,6 @@ func TestParseUsage(t *testing.T) {
 func TestArgvSubstitutions(t *testing.T) {
 	r := newRunner(Config{
 		Project: "SDLC",
-		Command: defaultCommand,
 	}, slog.Default())
 
 	item := queueItem{RoleKey: "developer"}
@@ -62,7 +61,7 @@ func TestArgvSubstitutions(t *testing.T) {
 	}{Key: "developer", ModelHint: &model}
 	claim.Role.ToolPolicy.Allow = []string{"Read", "Grep"}
 
-	argv := strings.Join(r.argv(item, claim, "/tmp/mcp.json", ""), " ")
+	argv := strings.Join(r.argv(item, claim, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
 	if !strings.Contains(argv, "--model claude-sonnet-5") {
 		t.Fatalf("модель роли не подставлена: %s", argv)
 	}
@@ -74,7 +73,7 @@ func TestArgvSubstitutions(t *testing.T) {
 	}
 	// CLAB-214, AC-1: промпт несёт роль и признак режима раннера — агент не
 	// отчитывается о стоимости, это делает раннер.
-	if got := r.argv(item, claim, "/tmp/mcp.json", ""); !slices.Contains(got, "/mcp__sdlc__work_on_task SDLC-42 developer runner") {
+	if got := r.argv(item, claim, runSlots{mcpConfig: "/tmp/mcp.json"}); !slices.Contains(got, "/mcp__sdlc__work_on_task SDLC-42 developer runner") {
 		t.Fatalf("промпт без роли или признака режима раннера: %q", got)
 	}
 	// Без роли признак не передать: аргументы позиционные.
@@ -84,14 +83,14 @@ func TestArgvSubstitutions(t *testing.T) {
 
 	// Роль без подсказки модели — законный случай: флаг уходит целиком.
 	claim.Role.ModelHint = nil
-	argv = strings.Join(r.argv(item, claim, "/tmp/mcp.json", ""), " ")
+	argv = strings.Join(r.argv(item, claim, runSlots{mcpConfig: "/tmp/mcp.json"}), " ")
 	if strings.Contains(argv, "--model") {
 		t.Fatalf("пустая модель обязана убрать флаг: %s", argv)
 	}
 
 	// Каталог копии доступен агенту, которому его надо передать флагом.
 	r.cfg.Command = "agent --dir {workdir} {prompt}"
-	argv = strings.Join(r.argv(item, claim, "/tmp/mcp.json", "/w/SDLC-42/backend"), " ")
+	argv = strings.Join(r.argv(item, claim, runSlots{mcpConfig: "/tmp/mcp.json", workdir: "/w/SDLC-42/backend"}), " ")
 	if !strings.Contains(argv, "--dir /w/SDLC-42/backend") {
 		t.Fatalf("каталог копии не подставлен: %s", argv)
 	}

@@ -14,12 +14,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/agentkit/launch"
 )
 
 type runner struct {
 	cfg Config
 	log *slog.Logger
 	api *client
+	// Привязка агента (CLAB-420): команда, форма инструкции, разбор вывода,
+	// окружение; в тестах подменяется.
+	agent agentkit.Binding
 	// Рабочие копии задач; nil — раннер без клонов, агент в его каталоге.
 	ws *workspaces
 	// Окружение раннера, из которого собирается окружение агента; в тестах
@@ -61,6 +67,11 @@ func newRunner(cfg Config, log *slog.Logger) *runner {
 		now: time.Now, fails: newFailures(cfg.MaxFailures, cfg.RetryDelay, cfg.RetryDelayMax)}
 	if cfg.ReposDir != "" {
 		r.ws = newWorkspaces(cfg.ReposDir, cfg.WorktreesDir, log)
+	}
+	if cfg.Agent != nil {
+		r.agent = *cfg.Agent
+	} else {
+		r.agent = defaultAgent()
 	}
 	return r
 }
@@ -325,13 +336,48 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 		log.Warn("model_hint устарел, задайте SDLC_RUNNER_MODEL_LEVELS: модель взята из model_hint роли",
 			"model_level", choice.level, "model_level_source", choice.source, "model", choice.model)
 	}
+	template := r.template()
+	if len(template) == 0 {
+		// generic без своей команды: выбор агента такого не даёт, но раннер,
+		// собранный в обход main, мог бы.
+		log.Error("команда агента не задана: у привязки нет шаблона run", "agent", r.agent.Name)
+		r.fail(ctx, log, item, "у привязки "+r.agent.Name+" нет команды запуска: задайте SDLC_RUNNER_COMMAND")
+		return
+	}
+	// Модель, которую агент получит на самом деле: своя команда без {model}
+	// её не передаёт, и назвать её в отчёте значило бы приписать прогон
+	// чужой модели.
+	model := choice.model
+	if model != "" && !launch.Uses(template, launch.SlotModel) {
+		log.Warn("модель не передана: в команде нет {model} — агент возьмёт свою модель по умолчанию", "model", model)
+		model = ""
+	}
+	// Отчитается ли раннер, решается до запуска: от этого зависит текст
+	// инструкции (usage=runner), и строка учёта за прогон одна.
+	reports := runnerReports(output(r.agent), model)
+	start, reason, ok := r.instruction(ctx, log, item, claim, reports)
+	if !ok {
+		r.fail(ctx, log, item, reason)
+		return
+	}
+	for _, warn := range launch.PolicyWarnings(r.agent.Name, r.agent.ToolPolicy != nil, template,
+		claim.allowTools(), claim.denyTools()) {
+		log.Warn(warn)
+	}
+	if hookPlacement(r.agent) == "launch" {
+		// Хук привязки крепится к запуску, а раннер его не крепит: граница —
+		// окружение и токен задачи (решение 0049), как у clab exec без хука.
+		log.Info("хук-страховка не крепится: изоляция окружением", "agent", r.agent.Name)
+	}
 
 	if r.cfg.DryRun {
 		// Токен задачи в сухом прогоне не выпускается: он гас бы через
 		// секунду вместе с отпущенной арендой, а след в ленте остался бы.
-		argv := r.argv(item, claim, "<mcp.json>", workdir)
+		argv := r.argv(item, claim, runSlots{mcpConfig: "<mcp.json>", runDir: "<каталог агента>",
+			configDir: "<каталог агента>/clab", workdir: workdir, text: start})
 		log.Info("сухой прогон: агент получил бы токен задачи и окружение по списку",
-			append([]any{"argv", strings.Join(argv, " "), "workdir", workdir}, choice.logAttrs()...)...)
+			append([]any{"argv", r.displayArgv(argv, start), "workdir", workdir, "agent", r.agent.Name,
+				"instruction", r.instructionHow(template, start)}, choice.logAttrs()...)...)
 		r.releaseQuietly(ctx, item.Task.Key, "сухой прогон раннера")
 		return
 	}
@@ -351,15 +397,10 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	}
 	defer home.cleanup()
 
-	if claim.roleKey(item.RoleKey) == "" {
-		// Признак режима раннера — позиционный аргумент после роли: без роли
-		// его не передать, и агент отчитается о стоимости сам, рядом с
-		// отчётом раннера.
-		log.Warn("роль этапа неизвестна: промпт без режима раннера, стоимость прогона может посчитаться дважды")
-	}
-	argv := r.argv(item, claim, home.mcpConfig, workdir)
+	argv := r.argv(item, claim, runSlots{mcpConfig: home.mcpConfig, runDir: home.root, configDir: home.clabDir,
+		workdir: workdir, text: start})
 	log.Info("запуск агента", append(choice.logAttrs(), "command", argv[0], "workdir", workdir,
-		"credentials", creds.kind())...)
+		"credentials", creds.kind(), "agent", r.agent.Name, "instruction", r.instructionHow(template, start))...)
 
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
@@ -369,27 +410,44 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 	cmd.Dir = workdir
 	cmd.Env = r.agentEnv(creds, home)
 	cmd.Stderr = os.Stderr
+	if !launch.Uses(template, launch.SlotPrompt) {
+		// Команда без {prompt} получает инструкцию на stdin, как у clab exec.
+		cmd.Stdin = strings.NewReader(r.promptValue(item, claim, start))
+	}
 	out, err := cmd.Output()
 	stop()
 
 	// Под раннером о стоимости отчитывается только он (CLAB-214): агенту
-	// промпт это запрещает, поэтому отчёт идёт и за упавшего агента — Claude
-	// Code печатает JSON и при ненулевом коде выхода.
-	report := parseUsage(out)
-	// Лимит подписки проверяется при любом коде выхода и в счётчик сбоев не
-	// идёт: задача в нём не виновата, а раннер встаёт целиком.
-	if lim, hit := detectLimit(out, r.now()); hit {
-		log.Warn("агент упёрся в лимит подписки", "exit_error", err)
-		r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
-		resume := r.pauseForLimit(log, lim)
-		r.releaseQuietly(ctx, item.Task.Key, limitNote(resume, !lim.resetAt.IsZero()))
-		return
+	// инструкция это запрещает, поэтому отчёт идёт и за упавшего агента —
+	// Claude Code печатает JSON и при ненулевом коде выхода, Codex — события
+	// до сбоя.
+	report := parseOutput(output(r.agent), out, model)
+	usage := func() bool {
+		if !reports {
+			log.Info("о стоимости отчитывается агент: у привязки нет разбора вывода или модель не выбрана",
+				"agent", r.agent.Name, "output", dashOf(r.agent.Output))
+			return false
+		}
+		return r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
+	}
+	// Лимит подписки — признак вывода Claude Code (claude-json); проверяется
+	// при любом коде выхода и в счётчик сбоев не идёт: задача в нём не
+	// виновата, а раннер встаёт целиком. У других привязок лимита нет:
+	// ненулевой код — обычный сбой прогона.
+	if output(r.agent) == outputClaudeJSON {
+		if lim, hit := detectLimit(out, r.now()); hit {
+			log.Warn("агент упёрся в лимит подписки", "exit_error", err)
+			usage()
+			resume := r.pauseForLimit(log, lim)
+			r.releaseQuietly(ctx, item.Task.Key, limitNote(resume, !lim.resetAt.IsZero()))
+			return
+		}
 	}
 	if err != nil {
 		log.Error("агент завершился с ошибкой", "error", err)
 		// Сначала учёт, потом release: отпуск снимает аренду, и без истории
 		// захвата отчёт после него отбился бы.
-		r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report)
+		usage()
 		// Агент умер — аренда протухнет сама, но отпустить задачу сразу
 		// честнее: следующий слот возьмёт её после паузы, не дожидаясь
 		// протухания.
@@ -397,9 +455,63 @@ func (r *runner) work(ctx context.Context, item queueItem, claim claimResult) {
 		return
 	}
 	r.fails.reset(runKey(item))
-	if r.reportUsage(ctx, log, item.Task.Key, claim.StageRunID, report) {
+	if usage() {
 		log.Info("агент отработал", "cost_usd", report["cost_usd"], "model", report["model"])
 	}
+}
+
+// instruction — стартовая инструкция прогона в форме привязки (поле
+// prompt): слэш-командой промпта MCP work_on_task или текстом ручки
+// prompts/work. reports — usage=runner в инструкции. Отказ — причина для
+// release через учёт сбоев.
+func (r *runner) instruction(ctx context.Context, log *slog.Logger, item queueItem, claim claimResult, reports bool) (string, string, bool) {
+	role := claim.roleKey(item.RoleKey)
+	if r.agent.Prompt == promptSlash {
+		if role == "" {
+			// Признак режима раннера — позиционный аргумент после роли: без
+			// роли его не передать, и агент отчитается о стоимости сам, рядом
+			// с отчётом раннера.
+			log.Warn("роль этапа неизвестна: промпт без режима раннера, стоимость прогона может посчитаться дважды")
+		}
+		return prompt(item.Task.Key, role), "", true
+	}
+	text, err := r.api.workPrompt(ctx, item.Task.Key, role, reports)
+	switch {
+	case err == nil:
+		return text, "", true
+	case noRoute(err):
+		log.Error("сервер не отдаёт стартовую инструкцию текстом (нужен v0.28.0 или новее): агент не запущен", "agent", r.agent.Name)
+		return "", "сервер прежней версии: нет стартовой инструкции", false
+	default:
+		log.Error("стартовая инструкция не получена, агент не запущен", "error", err)
+		return "", "раннер не получил стартовую инструкцию: " + errCode(err), false
+	}
+}
+
+// instructionHow — как инструкция дойдёт до агента, для журнала.
+func (r *runner) instructionHow(template []string, start string) string {
+	how := "аргументом {prompt}"
+	if !launch.Uses(template, launch.SlotPrompt) {
+		how = "на stdin"
+	}
+	form := "текстом"
+	if r.agent.Prompt == promptSlash {
+		form = "слэш-командой MCP"
+	}
+	return fmt.Sprintf("%s %s, %d байт", form, how, len(start))
+}
+
+// displayArgv — argv для журнала: текст инструкции — размером, слэш-промпт
+// — как есть (его читают глазами, он короткий).
+func (r *runner) displayArgv(argv []string, start string) string {
+	words := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if r.agent.Prompt != promptSlash && start != "" && a == start {
+			a = fmt.Sprintf("<инструкция: %d байт>", len(start))
+		}
+		words = append(words, a)
+	}
+	return strings.Join(words, " ")
 }
 
 // reportUsage отправляет разобранный вывод агента своим токеном раннера и
@@ -415,6 +527,14 @@ func (r *runner) reportUsage(ctx context.Context, log *slog.Logger, task, runID 
 	if r.cfg.Billing != "" {
 		report["billing"] = r.cfg.Billing
 	}
+	// Какой привязкой разобран вывод — рядом с reported_by: строки разных
+	// агентов сравнимы по прайсу, но различимы в учёте.
+	details, _ := report["details"].(map[string]any)
+	if details == nil {
+		details = map[string]any{"reported_by": "clab-runner"}
+	}
+	details["agent"] = r.agent.Name
+	report["details"] = details
 	// Отчёт переживает остановку раннера так же, как release после него.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
@@ -542,42 +662,56 @@ func (r *runner) releaseQuietly(ctx context.Context, task, note string) {
 	}
 }
 
-// argv собирает команду запуска из шаблона. Инструменты приезжают из версии
-// роли, модель — по рекомендованному уровню и таблице раннера (chooseModel):
-// уровень рекомендует сервер, а какая модель ему отвечает, знает раннер.
-func (r *runner) argv(item queueItem, claim claimResult, mcpConfig, workdir string) []string {
-	replacer := strings.NewReplacer(
-		"{task}", item.Task.Key,
-		"{workdir}", workdir,
-		"{role}", claim.roleKey(item.RoleKey),
-		"{model}", r.chooseModel(claim).model,
-		"{allowed_tools}", strings.Join(claim.allowTools(), ","),
-		"{disallowed_tools}", strings.Join(claim.denyTools(), ","),
-		"{mcp_config}", mcpConfig,
-		"{prompt}", prompt(item.Task.Key, claim.roleKey(item.RoleKey)),
-	)
-
-	fields := strings.Fields(r.cfg.Command)
-	argv := make([]string, 0, len(fields))
-	for _, f := range fields {
-		value := replacer.Replace(f)
-		// Пустая подстановка убирает флаг целиком: `--model ` без значения
-		// сломал бы запуск, а роль без подсказки модели — законный случай.
-		if value == "" {
-			argv = trimDanglingFlag(argv)
-			continue
-		}
-		argv = append(argv, value)
-	}
-	return argv
+// runSlots — значения подстановок, которые даёт прогон: файлы и каталоги
+// агента, рабочая копия и текст стартовой инструкции.
+type runSlots struct {
+	mcpConfig, runDir, configDir, workdir string
+	// text — инструкция текстом для привязки с prompt=text; слэш-промпт
+	// раннер собирает сам.
+	text string
 }
 
-// trimDanglingFlag снимает флаг, значение которого оказалось пустым.
-func trimDanglingFlag(argv []string) []string {
-	if n := len(argv); n > 0 && strings.HasPrefix(argv[n-1], "--") {
-		return argv[:n-1]
+// template — слова команды: своя команда SDLC_RUNNER_COMMAND (режется по
+// пробелам, кавычек нет), иначе шаблон run привязки.
+func (r *runner) template() []string {
+	if r.cfg.Command != "" {
+		return strings.Fields(r.cfg.Command)
 	}
-	return argv
+	return r.agent.Run
+}
+
+// argv собирает команду запуска из шаблона общим кодом подстановок
+// (agentkit/launch, тот же, что у clab exec). Инструменты приезжают из
+// версии роли, модель — по рекомендованному уровню (chooseModel). Пустая
+// подстановка снимает слово вместе с флагом при нём: «--model », «-m » и
+// «-c k=""» без значения сломали бы запуск, а роль без модели — законный
+// случай. Токена задачи в подстановках нет: он в окружении и mcp.json.
+func (r *runner) argv(item queueItem, claim claimResult, s runSlots) []string {
+	choice := r.chooseModel(claim)
+	values := map[string]string{
+		launch.SlotTask:            item.Task.Key,
+		launch.SlotWorkdir:         s.workdir,
+		launch.SlotRole:            claim.roleKey(item.RoleKey),
+		launch.SlotModel:           choice.model,
+		launch.SlotEffort:          choice.effort,
+		launch.SlotAllowedTools:    strings.Join(claim.allowTools(), ","),
+		launch.SlotDisallowedTools: strings.Join(claim.denyTools(), ","),
+		launch.SlotMCPConfig:       s.mcpConfig,
+		launch.SlotMCPURL:          r.cfg.mcpURL(),
+		launch.SlotConfigDir:       s.configDir,
+		launch.SlotRunDir:          s.runDir,
+		launch.SlotPrompt:          r.promptValue(item, claim, s.text),
+	}
+	return launch.Expand(r.template(), values)
+}
+
+// promptValue — значение {prompt}: слэш-промпт у привязки mcp_slash, иначе
+// текст инструкции.
+func (r *runner) promptValue(item queueItem, claim claimResult, text string) string {
+	if r.agent.Prompt == promptSlash {
+		return prompt(item.Task.Key, claim.roleKey(item.RoleKey))
+	}
+	return text
 }
 
 // prompt — единая точка старта работы: тот же промпт, которым пользуется
@@ -691,7 +825,11 @@ func (r *runner) agentEnv(creds agentCreds, home agentDir) []string {
 	if creds.token == "" {
 		set["SDLC_ACTOR"] = creds.actor
 	}
-	return agentEnv(r.environ(), r.cfg.AgentEnv, set)
+	// Учётные данные и настройки самого агента — поле env привязки
+	// (claude — ANTHROPIC_*, CLAUDE_*; codex — OPENAI_*, CODEX_*), затем
+	// SDLC_RUNNER_ENV администратора.
+	extra := append(append([]string{}, r.agent.Env...), r.cfg.AgentEnv...)
+	return agentEnv(r.environ(), extra, set)
 }
 
 func (c claimResult) roleKey(fallback string) string {
@@ -709,10 +847,14 @@ func (c claimResult) modelHint() string {
 }
 
 // Откуда взята модель запуска — значения поля model_from в журнале.
+// Прежние table, model_hint и none не меняются: по ним настроены разборы
+// журналов; agent_settings и binding — шаги 0077 п. 7 (CLAB-420).
 const (
-	modelFromTable = "table"
-	modelFromHint  = "model_hint"
-	modelFromNone  = "none"
+	modelFromTable    = "table"
+	modelFromSettings = "agent_settings"
+	modelFromBinding  = "binding"
+	modelFromHint     = "model_hint"
+	modelFromNone     = "none"
 )
 
 // modelChoice — модель запуска и как она выбрана. Один результат идёт в
@@ -722,31 +864,69 @@ type modelChoice struct {
 	source string // источник уровня; absent — сервер без execution
 	model  string // пусто — флаг --model снимается
 	from   string
+	// Усилие и номер версии настройки агентов — только у модели из
+	// настройки (agent_settings): у других шагов их нет.
+	effort          string
+	settingsVersion string
 	// Модель взята из устаревшего model_hint у сервера, который уже
 	// рекомендует уровень, — повод предупредить владельца раннера.
 	hintDeprecated bool
 }
 
 func (m modelChoice) logAttrs() []any {
-	return []any{"model_level", m.level, "model_level_source", m.source, "model", m.model, "model_from", m.from}
+	attrs := []any{"model_level", m.level, "model_level_source", m.source, "model", m.model, "model_from", m.from,
+		"model_source", m.pickSource()}
+	if m.effort != "" {
+		attrs = append(attrs, "effort", m.effort)
+	}
+	if m.settingsVersion != "" {
+		attrs = append(attrs, "agent_settings_version", m.settingsVersion)
+	}
+	return attrs
 }
 
-// chooseModel выбирает модель запуска (решение 0060): запись таблицы для
-// рекомендованного уровня, иначе model_hint роли, иначе ничего. Против
+// pickSource — источник модели именами 0077 п. 7 (explicit, agent_settings,
+// binding, model_hint, agent_default): те же, что печатает clab exec.
+func (m modelChoice) pickSource() string {
+	switch m.from {
+	case modelFromTable:
+		return launch.SourceExplicit
+	case modelFromNone:
+		return launch.SourceAgentDefault
+	}
+	return m.from
+}
+
+// chooseModel выбирает модель запуска (решения 0060, 0077 п. 7):
+// SDLC_RUNNER_MODEL_LEVELS для рекомендованного уровня, запись версии-
+// снимка настройки агентов для своей привязки, таблица уровней привязки
+// (общий launch.PickModel), иначе model_hint роли, иначе ничего. Против
 // сервера без execution — сразу model_hint и без предупреждения: так вёл
-// себя раннер прежней версии, и обновлённый раннер у необновлённого сервера
-// собирает тот же argv.
+// себя раннер прежней версии, и обновлённый раннер у необновлённого
+// сервера собирает тот же argv.
 func (r *runner) chooseModel(c claimResult) modelChoice {
 	choice := modelChoice{level: "none", source: "absent", from: modelFromNone}
+	level := ""
+	var models map[string]launch.ModelChoice
 	if c.Execution != nil {
 		choice.source = c.Execution.ModelLevelSource
-		if level := ptrString(c.Execution.ModelLevel); level != "" {
+		models = c.Execution.Models
+		if level = ptrString(c.Execution.ModelLevel); level != "" {
 			choice.level = level
 			if model, ok := r.cfg.ModelLevels[level]; ok {
 				choice.model, choice.from = model, modelFromTable
 				return choice
 			}
 		}
+	}
+	switch p := launch.PickModel(level, r.agent.Name, models, levelsOf(r.agent)); p.Source {
+	case launch.SourceAgentSettings:
+		choice.model, choice.effort, choice.from = p.Model, p.Effort, modelFromSettings
+		choice.settingsVersion = c.Execution.settingsVersion()
+		return choice
+	case launch.SourceBinding:
+		choice.model, choice.from = p.Model, modelFromBinding
+		return choice
 	}
 	if hint := c.modelHint(); hint != "" {
 		choice.model, choice.from = hint, modelFromHint
@@ -774,82 +954,4 @@ func (c claimResult) denyTools() []string {
 		return nil
 	}
 	return c.Role.ToolPolicy.Deny
-}
-
-// parseUsage достаёт стоимость из вывода агента.
-//
-// Формат — тот, что отдаёт Claude Code с --output-format json. Чужой агент
-// отдаст что-то другое, и это не ошибка: неразобранный вывод означает
-// «стоимость неизвестна», а не «ноль» (решение 0026).
-func parseUsage(out []byte) map[string]any {
-	var result struct {
-		TotalCostUSD *float64 `json:"total_cost_usd"`
-		DurationMS   *int64   `json:"duration_ms"`
-		Model        string   `json:"model"`
-		Usage        struct {
-			InputTokens              *int64 `json:"input_tokens"`
-			OutputTokens             *int64 `json:"output_tokens"`
-			CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
-			CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
-		ModelUsage map[string]struct {
-			InputTokens  *int64   `json:"inputTokens"`
-			OutputTokens *int64   `json:"outputTokens"`
-			CostUSD      *float64 `json:"costUSD"`
-		} `json:"modelUsage"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil
-	}
-
-	model := result.Model
-	if model == "" {
-		// Разрез по моделям — map, и порядок обхода у неё случайный: та же
-		// выдача агента записывалась бы то одной моделью, то другой.
-		// Основная модель запуска — та, что стоила больше всего; при
-		// равенстве — та, что больше написала, затем по имени.
-		// Несообщённое число — ниже любого сообщённого, нуля тоже.
-		bestCost, bestOut := float64(-1), int64(-1)
-		for name, u := range result.ModelUsage {
-			cost, out := float64(-1), int64(-1)
-			if u.CostUSD != nil {
-				cost = *u.CostUSD
-			}
-			if u.OutputTokens != nil {
-				out = *u.OutputTokens
-			}
-			better := model == "" || cost > bestCost ||
-				(cost == bestCost && (out > bestOut || (out == bestOut && name < model)))
-			if better {
-				model, bestCost, bestOut = name, cost, out
-			}
-		}
-	}
-	if model == "" {
-		// Без модели отчёт не с чем сравнивать, а сравнение моделей — весь
-		// смысл учёта; такой вывод честнее не записывать.
-		return nil
-	}
-
-	report := map[string]any{"model": model}
-	if result.TotalCostUSD != nil {
-		report["cost_usd"] = *result.TotalCostUSD
-	}
-	if result.DurationMS != nil {
-		report["duration_ms"] = *result.DurationMS
-	}
-	if v := result.Usage.InputTokens; v != nil {
-		report["input_tokens"] = *v
-	}
-	if v := result.Usage.OutputTokens; v != nil {
-		report["output_tokens"] = *v
-	}
-	if v := result.Usage.CacheReadInputTokens; v != nil {
-		report["cache_read_tokens"] = *v
-	}
-	if v := result.Usage.CacheCreationInputTokens; v != nil {
-		report["cache_write_tokens"] = *v
-	}
-	report["details"] = map[string]any{"reported_by": "clab-runner"}
-	return report
 }
