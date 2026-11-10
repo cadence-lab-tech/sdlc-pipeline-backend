@@ -48,16 +48,6 @@ import (
 // оболочки.
 const execRefused = 125
 
-// Привязки, которые clab exec узнаёт по имени программы команды (0077 п. 8):
-// остальное — generic. Имена свои, а не agentClaude и соседи из
-// setup_agents.go параллельной CLAB-418: одно имя в пакете дважды не
-// собирается; кто сливается вторым, сводит их в одни константы.
-const (
-	bindingClaude  = "claude"
-	bindingCodex   = "codex"
-	bindingGeneric = "generic"
-)
-
 // knownAgentEnv — признаки агентов, которые clab знает сам (builtinBindings):
 // дочерний агент ставит свои, унаследованные дали бы «агент не узнан».
 var knownAgentEnv = []string{"AI_AGENT", "CLAUDECODE", "CODEX_THREAD_ID"}
@@ -578,7 +568,7 @@ func chooseAgent(flagAgent string, command []string, bindings []agentBinding) (a
 		names = append(names, b.Name)
 	}
 	if bindings == nil {
-		names = []string{bindingClaude, bindingCodex, bindingGeneric}
+		names = []string{agentClaude, agentCodex, agentGeneric}
 	}
 	if flagAgent != "" {
 		if !slices.Contains(names, flagAgent) {
@@ -588,12 +578,12 @@ func chooseAgent(flagAgent string, command []string, bindings []agentBinding) (a
 	}
 	if len(command) > 0 {
 		prog := strings.ToLower(strings.TrimSuffix(filepath.Base(command[0]), ".exe"))
-		for _, name := range []string{bindingClaude, bindingCodex} {
+		for _, name := range []string{agentClaude, agentCodex} {
 			if prog == name && slices.Contains(names, name) {
 				return name, "имя программы " + prog, nil
 			}
 		}
-		return bindingGeneric, "программа " + prog + " — не claude и не codex", nil
+		return agentGeneric, "программа " + prog + " — не claude и не codex", nil
 	}
 	found := detectAgent(agentEnv, bindings)
 	if len(found) == 1 {
