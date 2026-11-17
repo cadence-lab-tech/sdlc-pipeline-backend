@@ -75,22 +75,48 @@ const tokenSelect = `
 	SELECT t.id, t.principal_id, p.handle, p.kind, t.kind, t.project_id, pr.key,
 	       t.name, t.token_prefix, t.role_keys, t.created_at,
 	       t.expires_at, t.last_used_at, t.revoked_at,
-	       t.stage_run_id, sr.task_id, tk.key
+	       t.stage_run_id, sr.task_id, tk.key,
+	       og.id, og.client_name, og.redirect_host
 	FROM agent_tokens t
 	JOIN principals p ON p.id = t.principal_id
 	LEFT JOIN projects pr ON pr.id = t.project_id
 	LEFT JOIN stage_runs sr ON sr.id = t.stage_run_id
-	LEFT JOIN tasks tk ON tk.id = sr.task_id`
+	LEFT JOIN tasks tk ON tk.id = sr.task_id
+	LEFT JOIN oauth_grants og ON og.token_id = t.id`
+
+// grantLink — колонки ссылки на выдачу OAuth (решение 0079): у прочих
+// токенов они NULL.
+type grantLink struct {
+	ID           *uuid.UUID
+	ClientName   *string
+	RedirectHost *string
+}
+
+func (g grantLink) apply(t *domain.AccessToken) {
+	if g.ID == nil {
+		return
+	}
+	t.OAuthGrant = &domain.TokenOAuthGrant{ID: *g.ID}
+	if g.ClientName != nil {
+		t.OAuthGrant.ClientName = *g.ClientName
+	}
+	if g.RedirectHost != nil {
+		t.OAuthGrant.RedirectHost = *g.RedirectHost
+	}
+}
 
 func scanToken(row interface{ Scan(...any) error }) (domain.AccessToken, error) {
 	var t domain.AccessToken
+	var g grantLink
 	err := row.Scan(&t.ID, &t.PrincipalID, &t.Handle, &t.Kind, &t.TokenKind, &t.ProjectID, &t.ProjectKey,
 		&t.Name, &t.Prefix, &t.RoleKeys, &t.CreatedAt,
 		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt,
-		&t.StageRunID, &t.TaskID, &t.TaskKey)
+		&t.StageRunID, &t.TaskID, &t.TaskKey,
+		&g.ID, &g.ClientName, &g.RedirectHost)
 	if t.RoleKeys == nil {
 		t.RoleKeys = []string{}
 	}
+	g.apply(&t)
 	return t, err
 }
 
@@ -149,6 +175,7 @@ func (s *Store) GetToken(ctx context.Context, q Querier, id uuid.UUID) (domain.A
 func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain.AccessToken, domain.Principal, error) {
 	var t domain.AccessToken
 	var p domain.Principal
+	var g grantLink
 	var run struct {
 		State        *string
 		FinishedAt   *time.Time
@@ -162,12 +189,14 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 		       t.expires_at, t.last_used_at, t.revoked_at,
 		       t.stage_run_id, sr.task_id, tk.key,
 		       sr.state, sr.finished_at, sr.claimed_by, sr.lease_expires_at, now(),
-		       p.id, p.kind, p.handle, p.display_name, p.email, p.is_admin, p.created_at
+		       p.id, p.kind, p.handle, p.display_name, p.email, p.is_admin, p.created_at,
+		       og.id, og.client_name, og.redirect_host
 		FROM agent_tokens t
 		JOIN principals p ON p.id = t.principal_id
 		LEFT JOIN projects pr ON pr.id = t.project_id
 		LEFT JOIN stage_runs sr ON sr.id = t.stage_run_id
 		LEFT JOIN tasks tk ON tk.id = sr.task_id
+		LEFT JOIN oauth_grants og ON og.token_id = t.id
 		WHERE t.token_hash = $1
 		  AND (t.kind = 'task' OR t.revoked_at IS NULL)
 		  AND (t.expires_at IS NULL OR t.expires_at > now())
@@ -177,7 +206,9 @@ func (s *Store) TokenByHash(ctx context.Context, q Querier, hash string) (domain
 		&t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt,
 		&t.StageRunID, &t.TaskID, &t.TaskKey,
 		&run.State, &run.FinishedAt, &run.ClaimedBy, &run.LeaseExpires, &run.Now,
-		&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.IsAdmin, &p.CreatedAt)
+		&p.ID, &p.Kind, &p.Handle, &p.DisplayName, &p.Email, &p.IsAdmin, &p.CreatedAt,
+		&g.ID, &g.ClientName, &g.RedirectHost)
+	g.apply(&t)
 	if err != nil {
 		if isNoRows(err) {
 			return t, p, apperr.New(apperr.CodeUnauthenticated, "токен недействителен")

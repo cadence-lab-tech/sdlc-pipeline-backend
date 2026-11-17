@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/blobstore"
+	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/oauth"
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/secrets"
 )
 
@@ -155,6 +156,19 @@ type Config struct {
 	// Актор по умолчанию в режиме header, если заголовка нет.
 	DefaultActor string
 
+	// Сервер авторизации OAuth 2.1 для удалённых MCP-клиентов (решение 0079,
+	// п. 11). Действует только в режиме токенов: в режиме заголовка токенов
+	// нет, и выключатель там ничего не включает. Включён по умолчанию —
+	// выдача невозможна без входа и согласия человека.
+	OAuthEnabled     bool
+	OAuthDCREnabled  bool
+	OAuthCIMDEnabled bool
+	OAuthAccessTTL   time.Duration
+	OAuthRefreshTTL  time.Duration
+	// Публичный адрес инстанса (схема и хост): issuer и адреса метаданных.
+	// Пусто — из Host и X-Forwarded-Proto запроса (п. 10).
+	PublicURL string
+
 	// Вынос крупного содержимого из базы. Пустой BlobDir — всё лежит inline,
 	// а содержимое больше min(blobstore.InlineMaxBytes, BlobMaxBytes)
 	// отбивается. Соотношение пределов — checkBlobLimits.
@@ -279,6 +293,11 @@ func Load() (Config, error) {
 		OIDCGroupsClaim:       env("SDLC_OIDC_GROUPS_CLAIM", "groups"),
 		SessionTTL:            12 * time.Hour,
 		DefaultActor:          env("SDLC_DEFAULT_ACTOR", "anonymous"),
+		OAuthEnabled:          true,
+		OAuthDCREnabled:       true,
+		OAuthCIMDEnabled:      true,
+		OAuthAccessTTL:        time.Hour,
+		OAuthRefreshTTL:       720 * time.Hour,
 		BlobDir:               env("SDLC_BLOB_DIR", ""),
 		BlobS3: blobstore.S3Config{
 			Endpoint:     env("SDLC_BLOB_S3_ENDPOINT", ""),
@@ -487,6 +506,9 @@ func Load() (Config, error) {
 	default:
 		return c, fmt.Errorf("SDLC_TENANCY: %q — не shared или single", c.Tenancy)
 	}
+	if err := loadOAuth(&c); err != nil {
+		return c, err
+	}
 	if c.AuthMode == "token" && c.AdminToken == "" {
 		if c.Env == "development" {
 			fmt.Fprintln(os.Stderr, "SDLC_AUTH_MODE=token без SDLC_ADMIN_TOKEN: первого администратора завести некому")
@@ -554,6 +576,31 @@ func Load() (Config, error) {
 	}
 
 	return c, nil
+}
+
+// loadOAuth читает выключатели и сроки OAuth и публичный адрес (решение
+// 0079, п. 10–11). Ошибка называет переменную: администратор ищет её в .env.
+func loadOAuth(c *Config) error {
+	var err error
+	if c.OAuthEnabled, err = envBool("SDLC_OAUTH_ENABLED", c.OAuthEnabled); err != nil {
+		return err
+	}
+	if c.OAuthDCREnabled, err = envBool("SDLC_OAUTH_DCR_ENABLED", c.OAuthDCREnabled); err != nil {
+		return err
+	}
+	if c.OAuthCIMDEnabled, err = envBool("SDLC_OAUTH_CIMD_ENABLED", c.OAuthCIMDEnabled); err != nil {
+		return err
+	}
+	if c.OAuthAccessTTL, err = envPositiveDuration("SDLC_OAUTH_ACCESS_TTL", c.OAuthAccessTTL); err != nil {
+		return err
+	}
+	if c.OAuthRefreshTTL, err = envPositiveDuration("SDLC_OAUTH_REFRESH_TTL", c.OAuthRefreshTTL); err != nil {
+		return err
+	}
+	if c.PublicURL, err = oauth.ParsePublicURL(env("SDLC_PUBLIC_URL", "")); err != nil {
+		return fmt.Errorf("SDLC_PUBLIC_URL: %v", err)
+	}
+	return nil
 }
 
 // Адреса и модели эмбеддингов по умолчанию.

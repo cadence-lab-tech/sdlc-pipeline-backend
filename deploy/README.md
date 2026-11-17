@@ -18,7 +18,11 @@
 
 Наружу торчит только Caddy. Один домен на всё: интерфейс ходит в `/v1` того
 же origin, агенты — в `/mcp/projects/<KEY>`, GitHub — в `/webhooks/github`.
-Второго списка адресов нет — нет и CORS.
+Второго списка адресов нет — нет и CORS. Метаданные сервера авторизации OAuth
+(`/.well-known/oauth-authorization-server` и
+`/.well-known/oauth-protected-resource/…`, решение 0079) Caddy тоже отдаёт в
+api, остальной `/.well-known` — интерфейсу; `issuer` — `SDLC_PUBLIC_URL` из
+`SDLC_DOMAIN`.
 
 ## Файлы
 

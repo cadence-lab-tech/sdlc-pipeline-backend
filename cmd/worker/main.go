@@ -151,6 +151,15 @@ func run() error {
 		"embedding_cache_gc_dry_run", cfg.EmbeddingCacheGCDryRun,
 		"audit_retention_days", cfg.AuditRetentionDays)
 
+	// Сервер авторизации OAuth (решение 0079): воркеру он нужен только ради
+	// прохода oauth_gc — запросы, refresh и клиенты DCR чистятся здесь, а
+	// не в api, где каждая реплика погнала бы своё расписание.
+	oauthSvc := workflow.NewOAuth(store, workflow.NewAuth(store, log, cfg.AuthMode),
+		workflow.NewAudit(store, log), log, workflow.OAuthOptions{
+			Enabled: cfg.OAuthEnabled, DCR: cfg.OAuthDCREnabled, CIMD: cfg.OAuthCIMDEnabled,
+			AccessTTL: cfg.OAuthAccessTTL, RefreshTTL: cfg.OAuthRefreshTTL,
+		})
+
 	plan := newSchedule(cfg, provider.HasApp())
 	leaseTick, stopLease := plan.ticker(plan.LeaseSweep)
 	defer stopLease()
@@ -181,6 +190,8 @@ func run() error {
 	// Уборка журнала действий по сроку (CLAB-210).
 	auditGC, stopAuditGC := plan.ticker(plan.AuditGC)
 	defer stopAuditGC()
+	oauthGC, stopOAuthGC := plan.ticker(plan.OAuthGC)
+	defer stopOAuthGC()
 
 	sweepLeases(ctx, engine, log, system.ID, m)
 	refreshState(ctx, store, log, m)
@@ -216,6 +227,8 @@ func run() error {
 			evictEmbeddings(ctx, store, log, cfg, m)
 		case <-auditGC:
 			purgeAudit(ctx, store, log, cfg.AuditRetentionDays, m)
+		case <-oauthGC:
+			sweepOAuth(ctx, oauthSvc, log, m)
 		}
 	}
 }
@@ -232,6 +245,7 @@ type schedule struct {
 	BlobGC           time.Duration
 	EmbedCacheGC     time.Duration
 	AuditGC          time.Duration
+	OAuthGC          time.Duration
 }
 
 // newSchedule решает, какие задания идут и с каким периодом. Выключенная
@@ -239,7 +253,10 @@ type schedule struct {
 // теми же учётными данными, что индексация (так было и до CLAB-395). Опрос
 // установок от индексации не зависит — его включает приложение.
 func newSchedule(cfg config.Config, appConfigured bool) schedule {
-	s := schedule{LeaseSweep: cfg.LeaseSweepInterval}
+	// Уборка OAuth идёт и при выключенном выключателе: просроченные запросы
+	// и refresh от этого не становятся нужнее, а истёкшие выдачи —
+	// живее.
+	s := schedule{LeaseSweep: cfg.LeaseSweepInterval, OAuthGC: oauthGCInterval}
 	if cfg.IndexEnabled {
 		s.Index, s.Queue, s.RepoRefSync = cfg.IndexInterval, cfg.IndexPollInterval, cfg.RepoRefSyncInterval
 	}
@@ -389,6 +406,29 @@ const (
 	auditGCBatch      = 10_000
 	auditGCMaxBatches = 20
 )
+
+// oauthGCInterval — период уборки OAuth: сроки запросов — минуты, refresh —
+// недели, а пределы DCR считаются по базе, поэтому чаще незачем.
+const oauthGCInterval = 10 * time.Minute
+
+// sweepOAuth — проход уборки OAuth (CLAB-481). Сбой прохода выдаче токенов
+// не мешает: задание независимо от api.
+func sweepOAuth(ctx context.Context, o *workflow.OAuth, log *slog.Logger, m *metrics.Worker) {
+	var st workflow.OAuthSweepStats
+	err := m.Job(ctx, jobOAuthGC, func() error {
+		var err error
+		st, err = o.Sweep(ctx)
+		return err
+	})
+	if err != nil {
+		logJobError(ctx, log, "уборка OAuth", err)
+		return
+	}
+	if st.Requests+st.Refresh+st.Clients > 0 || st.Expired > 0 {
+		log.Info("уборка OAuth", "requests", st.Requests, "expired_grants", st.Expired,
+			"refresh", st.Refresh, "clients", st.Clients)
+	}
+}
 
 // purgeAudit удаляет записи журнала действий старше срока хранения.
 // Первого прохода на старте нет — тот же довод, что у блобов: место
@@ -629,13 +669,15 @@ const (
 	jobEmbedCacheGC = "embed_cache_gc"
 	jobOpsState     = "ops_state"
 	jobAuditGC      = "audit_gc"
+	// jobOAuthGC — уборка OAuth (CLAB-481).
+	jobOAuthGC = "oauth_gc"
 	// jobInstallationSync — опрос установок GitHub App (CLAB-395).
 	jobInstallationSync = "installation_sync"
 )
 
 var workerJobs = []string{jobLeaseSweep, jobIndexEnqueue, jobIndexRun, jobDrift,
 	jobIndexPrune, jobRepoRefSync, jobKnowledge, jobEmbedRefresh, jobOverlaps,
-	jobBlobGC, jobEmbedCacheGC, jobOpsState, jobAuditGC, jobInstallationSync}
+	jobBlobGC, jobEmbedCacheGC, jobOpsState, jobAuditGC, jobInstallationSync, jobOAuthGC}
 
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo

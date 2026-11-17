@@ -243,6 +243,10 @@ type AccessToken struct {
 	StageRunID *uuid.UUID `json:"stage_run_id,omitempty"`
 	TaskID     *uuid.UUID `json:"task_id,omitempty"`
 	TaskKey    *string    `json:"task_key,omitempty"`
+	// Токен выдачи OAuth (решение 0079, п. 2): какой клиент подключён этим
+	// токеном. У прочих токенов пусто. Вид токена при этом api — права от
+	// выдачи не зависят, ссылка нужна интерфейсу и признаку «OAuth действует».
+	OAuthGrant *TokenOAuthGrant `json:"oauth_grant,omitempty"`
 }
 
 type Project struct {

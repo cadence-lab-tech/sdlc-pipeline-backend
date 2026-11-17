@@ -78,6 +78,9 @@ services:
       SDLC_STRICT_GATES: "true"
       # Только токены и сессии: режим header — для отладки цикла у себя.
       SDLC_AUTH_MODE: token
+      # Публичный адрес — issuer и адреса метаданных OAuth (решение 0079,
+      # п. 10): фиксирован доменом, а не выводится из заголовков прокси.
+      SDLC_PUBLIC_URL: https://${SDLC_DOMAIN}
       SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
       SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN}
       SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}

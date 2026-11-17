@@ -77,6 +77,10 @@ type Auth struct {
 	// Профиль поставки (решение 0033): shared — квоты тарифа считаются,
 	// single — выделенный инстанс, пределы задаёт договор.
 	tenancy string
+	// Сервер авторизации OAuth (решение 0079): выключатели ставит NewOAuth.
+	// Выключенный или не заведённый — токены выдач не принимаются.
+	oauthEnabled, oauthDCR, oauthCIMD bool
+	oauth                             *OAuth
 }
 
 func NewAuth(store *postgres.Store, log *slog.Logger, mode string) *Auth {
@@ -140,6 +144,13 @@ func (a *Auth) Authenticate(ctx context.Context, token string) (Identity, error)
 	t, p, err := a.store.TokenByHash(ctx, q, HashToken(token))
 	if err != nil {
 		return Identity{}, err
+	}
+	// Токен выдачи OAuth действует, только пока действует OAuth: выключатель
+	// отключает подключённых клиентов, а режим заголовка не даёт токену силы
+	// без проверки прав. Ответ — тот же, что у неизвестного токена; выдача
+	// в базе цела, и включение возвращает её (CLAB-481).
+	if t.OAuthGrant != nil && !a.OAuthActive() {
+		return Identity{}, apperr.New(apperr.CodeUnauthenticated, "токен недействителен")
 	}
 	if err := a.store.TouchToken(ctx, q, t.ID); err != nil {
 		// Отметка использования — удобство, а не безопасность; её сбой не
@@ -344,7 +355,20 @@ func (a *Auth) RevokeToken(ctx context.Context, id Identity, tokenID uuid.UUID) 
 	default:
 		return apperr.Forbidden("чужой токен отзывает только его владелец или администратор")
 	}
-	return a.store.RevokeToken(ctx, q, tokenID)
+	if err := a.store.RevokeToken(ctx, q, tokenID); err != nil {
+		return err
+	}
+	// Токен выдачи OAuth: отзыв токена и есть отзыв выдачи (решение 0079,
+	// п. 4) — та же причина и тот же след, что у «Отключить».
+	if t.OAuthGrant != nil {
+		if err := a.store.MarkGrantRevokedByToken(ctx, q, tokenID, domain.OAuthRevokedByUser); err != nil {
+			return err
+		}
+		if a.oauth != nil {
+			a.oauth.recordTokenRevoked(ctx, t.OAuthGrant.ID)
+		}
+	}
+	return nil
 }
 
 // ── права ───────────────────────────────────────────────────────────────────

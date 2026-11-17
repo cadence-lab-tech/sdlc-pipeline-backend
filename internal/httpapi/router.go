@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,10 @@ type Server struct {
 	// Будильник долгого опроса событий (CLAB-323): один на процесс, иначе
 	// каждый Handler() заводил бы свой такт.
 	feed *feedHub
+	// Сервер авторизации OAuth (решение 0079) и предупреждение о публичном
+	// адресе по http — одно на процесс.
+	oauth        *workflow.OAuth
+	insecureOnce sync.Once
 }
 
 func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engine *workflow.Engine, authoring *workflow.Authoring, auth *workflow.Auth, mcpServer *mcp.Server) *Server {
@@ -56,6 +61,12 @@ func NewServer(cfg config.Config, log *slog.Logger, store *postgres.Store, engin
 	}
 	if mcpServer != nil {
 		mcpServer.UseAudit(s.audit)
+	}
+	if auth != nil {
+		s.oauth = workflow.NewOAuth(store, auth, s.audit, log, workflow.OAuthOptions{
+			Enabled: cfg.OAuthEnabled, DCR: cfg.OAuthDCREnabled, CIMD: cfg.OAuthCIMDEnabled,
+			AccessTTL: cfg.OAuthAccessTTL, RefreshTTL: cfg.OAuthRefreshTTL,
+		})
 	}
 	return s
 }
@@ -98,6 +109,9 @@ func (s *Server) Handler() http.Handler {
 	// Набор агента (CLAB-232, решение 0050): скилы и саб-агент той же версии,
 	// что сервер, для clab setup и страницы /docs. Открытая, как /instance.
 	r.GET("/v1/agent-kit", s.agentKit)
+	// Сервер авторизации OAuth для удалённых MCP-клиентов (решение 0079):
+	// метаданные, authorize, token, регистрация, отзыв, страница согласия.
+	s.registerOAuth(r)
 
 	viewer := s.guard(domain.MemberViewer)
 	agent := s.guard(domain.MemberAgent)
@@ -112,7 +126,7 @@ func (s *Server) Handler() http.Handler {
 	// Отказ 413 по заявленной длине тела — сразу после журнала: он тоже
 	// отклонённый запрос и пишется туда как обычный, а до аутентификации —
 	// потому что ни база, ни права для него не нужны.
-	v1 := r.Group("/v1", s.auditREST(), s.rejectTooLarge(), s.authenticate(domain.PrincipalUser), s.executorOnly())
+	v1 := r.Group("/v1", s.auditREST(), s.rejectTooLarge(), s.authenticate(domain.PrincipalUser, false), s.executorOnly())
 	{
 		// Кто я, токены. Права на выдачу проверяет сам сервис: токен себе
 		// может любой, другому — администратор проекта или системы.
@@ -392,7 +406,7 @@ func (s *Server) Handler() http.Handler {
 		// SDK читает через тот же предел и сам отвечает 413.
 		handler := s.mcp.Handler(s.bodyLimit())
 		// Вызовы тулов пишет обёртка тулов; здесь — только отказ 401 до тула.
-		group := r.Group("/mcp/projects/:projectKey", s.rejectTooLarge(), s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent))
+		group := r.Group("/mcp/projects/:projectKey", s.rejectTooLarge(), s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent, true))
 		group.Any("", s.serveMCP(handler))
 		group.Any("/*rest", s.serveMCP(handler))
 	}
