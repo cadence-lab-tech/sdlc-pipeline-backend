@@ -47,9 +47,33 @@ clab assign ABC-3 --to agent:runner
   rank, moved with `clab rank` (section "Put it in place"); `clab backlog
   --next` skips tasks that still have open blockers. The order of creation
   means nothing.
+- Nesting is one level: `--parent` is a task without a parent of its own
+  (an epic of the top level, for example). A child under a child is refused
+  with `invalid_input`; create it under the top-level task instead.
 - Write long descriptions to a file and pass them with `$(cat …)`.
 - Keys are issued by the server. Tasks are not deleted — an unneeded one
   is taken off with the `cancel` transition.
+
+## Move it to another parent
+
+When the breakdown changes, move the existing task instead of creating it
+again and cancelling the original — the key, the history, the artifacts and
+the links stay with it:
+
+```bash
+clab edit ABC-12 --parent ABC-9    # under another parent; prints the old and the new parent
+clab edit ABC-12 --parent ""       # take it off its parent: top level
+```
+
+The task goes to the end of the new parent's group. The new parent must be
+a task without a parent, and a task with children of its own is not put
+under a parent (`invalid_input` names the tasks); taking a task off its
+parent always works. Moving to another parent is a person's action: a bot
+and a task token are refused with `human_action`, and a stage executor
+writes the wanted move into its artifact and report. Over MCP the same is
+`sdlc_set_task_parent` (`task_key`, `parent`; empty `parent` — top level).
+A server older than this command answers "the server does not support
+changing the parent": pass it to the human.
 
 ## Put it in place
 

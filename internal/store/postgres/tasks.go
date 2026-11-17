@@ -559,15 +559,17 @@ func (s *Store) CreateTask(ctx context.Context, tx pgx.Tx, in CreateTaskInput) (
 		return domain.Task{}, err
 	}
 
+	// Родитель читается после строки проекта (UPDATE выше): перенос задачи
+	// берёт ту же строку (ReparentTask), поэтому «у родителя нет родителя»
+	// видно в зафиксированном состоянии, а не до встречного переноса.
 	var parentID *uuid.UUID
 	if in.ParentKey != "" {
-		parent, err := s.GetTaskByKey(ctx, tx, in.ParentKey)
+		parent, err := s.ParentInProject(ctx, tx, in.ProjectID, in.ParentKey)
 		if err != nil {
 			return domain.Task{}, err
 		}
-		if parent.ProjectID != in.ProjectID {
-			return domain.Task{}, apperr.InvalidInput(
-				"родительская задача %q из другого проекта", in.ParentKey)
+		if err := TopLevelParent(parent); err != nil {
+			return domain.Task{}, err
 		}
 		parentID = &parent.ID
 	}

@@ -124,9 +124,11 @@ func TestMCPRankRightsAndAudit(t *testing.T) {
 		}
 	}
 
+	// Вложенность — один уровень (CLAB-196): own с детьми — на верхнем
+	// уровне, брат — её сосед там же.
 	epic := f.create("MCP права эпик", map[string]any{"type": "epic"})
-	own := f.create("MCP права своя", map[string]any{"parent_key": epic})
-	brother := f.create("MCP права брат", map[string]any{"parent_key": epic})
+	own := f.create("MCP права своя", nil)
+	brother := f.create("MCP права брат", nil)
 	c1 := f.create("MCP права ребёнок 1", map[string]any{"parent_key": own})
 	c2 := f.create("MCP права ребёнок 2", map[string]any{"parent_key": own})
 	f.move(own, "start", f.root)

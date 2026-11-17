@@ -84,6 +84,9 @@ const (
 	// Перевод в любой статус версии цикла вне переходов (CLAB-408, MoveTask):
 	// действие человека — сотрудника или сопровождающего.
 	ActMove TaskAct = "move"
+	// Перенос к другому родителю и снятие с родителя (CLAB-196,
+	// ReparentTask): действие человека, как перевод в статус.
+	ActReparent TaskAct = "reparent"
 )
 
 // Коды причины отказа права на задачу в details.reason, рядом с кодами права
@@ -170,6 +173,8 @@ func taskTokenRight(b *TaskBinding, act TaskAct, f TaskFacts) error {
 		return executorRefused(b, "область задачи и её свойства — решение человека")
 	case ActMove:
 		return executorRefused(b, "перевод задачи в статус — решение человека")
+	case ActReparent:
+		return withHumanAction(executorRefused(b, "смена родителя задачи — решение человека, не агента этапа"))
 	}
 	return executorRefused(b, string(act))
 }
@@ -217,8 +222,26 @@ func botRight(act TaskAct, f TaskFacts) error {
 			"переводить задачу в статус может человек — сопровождающий или сотрудник проекта уровня agent: " +
 				"перевод обходит гейты цикла, это решение человека, не агента").
 			WithDetails(map[string]any{"reason": DenyHumanAction})
+	case ActReparent:
+		// Аренда не в счёт, как у перевода: нарезку пересматривает человек.
+		return apperr.Forbidden(
+			"смена родителя — решение человека: переносить задачу к другому родителю или снимать с " +
+				"родителя может сопровождающий или сотрудник проекта уровня agent, не агент").
+			WithDetails(map[string]any{"reason": DenyHumanAction})
 	}
 	return nil
+}
+
+// withHumanAction — отказ токену задачи в действии человека несёт и причину
+// human_action: по ней клиент узнаёт решение человека тем же кодом, что у
+// бота (CLAB-196, смена родителя).
+func withHumanAction(err *apperr.Error) *apperr.Error {
+	details, _ := err.Details.(map[string]any)
+	if details == nil {
+		details = map[string]any{}
+	}
+	details["reason"] = DenyHumanAction
+	return err.WithDetails(details)
 }
 
 // closedStageChoice — отказ выбора этапов закрытой задачи (решение 0066,
@@ -320,7 +343,8 @@ func (e *Engine) mayTask(ctx context.Context, q postgres.Querier, a Actor, act T
 
 // TaskRights — право актора на задачу для карточки (actor_rights): булевы
 // поля и у каждого false — отказ тем же видом, что у переходов. Move —
-// перевод в статус (CLAB-408).
+// перевод в статус (CLAB-408), Reparent — смена родителя (CLAB-196): только
+// право, правило одного уровня — о данных, его решает запрос.
 type TaskRights struct {
 	Edit        bool                    `json:"edit"`
 	StageChoice bool                    `json:"stage_choice"`
@@ -329,6 +353,7 @@ type TaskRights struct {
 	Link        bool                    `json:"link"`
 	Scope       bool                    `json:"scope"`
 	Move        bool                    `json:"move"`
+	Reparent    bool                    `json:"reparent"`
 	ActorDeny   map[string]*ActorDenial `json:"actor_deny,omitempty"`
 }
 
@@ -347,7 +372,7 @@ func (e *Engine) TaskRightsQ(ctx context.Context, q postgres.Querier, task domai
 	}{
 		{ActEdit, &out.Edit}, {ActStageChoice, &out.StageChoice}, {ActCreateChild, &out.CreateChild},
 		{ActAssign, &out.Assign}, {ActLink, &out.Link}, {ActScope, &out.Scope},
-		{ActMove, &out.Move},
+		{ActMove, &out.Move}, {ActReparent, &out.Reparent},
 	} {
 		err := TaskRight(a, r.act, f)
 		*r.dst = err == nil
@@ -385,10 +410,10 @@ func TaskWorkOf(a Actor) TaskWork {
 	switch c {
 	case ClassUnchecked, ClassMaintainer:
 		w.Summary = "любая задача проекта: постановка и выбор этапов, заведение, назначение, связи, область, " +
-			"перевод в статус"
+			"перевод в статус, смена родителя"
 	case ClassEmployee:
 		w.Summary = "любая задача проекта без аренды: постановка и выбор этапов, заведение (и без родителя), " +
-			"назначение, связи, область, перевод в статус"
+			"назначение, связи, область, перевод в статус, смена родителя"
 	case ClassBot:
 		w.Summary = "постановка и дочерние задачи — там, где держите этап по аренде, в области родителя; " +
 			"назначение и связи; область — решение человека"

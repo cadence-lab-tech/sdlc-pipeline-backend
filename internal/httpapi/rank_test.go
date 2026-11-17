@@ -435,10 +435,12 @@ func TestRankRights(t *testing.T) {
 		}
 	}
 
-	// К-11: токен задачи своей задачи own (ребёнок эпика), дети own.
+	// К-11: токен задачи своей задачи own, дети own. Вложенность — один
+	// уровень (CLAB-196): у own детей, значит own сама на верхнем уровне, а
+	// брат — её сосед там же.
 	epic := f.create("Права эпик", map[string]any{"type": "epic"})
-	own := f.create("Права своя", map[string]any{"parent_key": epic})
-	brother := f.create("Права брат", map[string]any{"parent_key": epic})
+	own := f.create("Права своя", nil)
+	brother := f.create("Права брат", nil)
 	c1 := f.create("Права ребёнок 1", map[string]any{"parent_key": own})
 	c2 := f.create("Права ребёнок 2", map[string]any{"parent_key": own})
 	c3 := f.create("Права ребёнок 3", map[string]any{"parent_key": own})
