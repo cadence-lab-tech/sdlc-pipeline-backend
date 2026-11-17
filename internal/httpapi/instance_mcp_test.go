@@ -491,3 +491,93 @@ func TestInstanceMCPTransport(t *testing.T) {
 		t.Fatalf("/mcp/: %d %v", rec.Code, rec.Header())
 	}
 }
+
+// dummyArgs — минимальный вход по схеме тула: обязательные поля заполнены
+// значениями нужного типа; ключи задач — key, идентификаторы — UUID. Нужен,
+// чтобы вызов дошёл до проверки прав, а не упал на схеме.
+func dummyArgs(schema map[string]any, key string) map[string]any {
+	props, _ := schema["properties"].(map[string]any)
+	args := map[string]any{}
+	required, _ := schema["required"].([]any)
+	for _, r := range required {
+		name := r.(string)
+		args[name] = dummyValue(name, props[name].(map[string]any), key)
+	}
+	return args
+}
+
+func dummyValue(name string, sch map[string]any, key string) any {
+	if enum, ok := sch["enum"].([]any); ok && len(enum) > 0 {
+		return enum[0]
+	}
+	typ, _ := sch["type"].(string)
+	if list, ok := sch["type"].([]any); ok {
+		for _, it := range list {
+			if s := it.(string); s != "null" {
+				typ = s
+			}
+		}
+	}
+	switch typ {
+	case "object":
+		return dummyArgs(sch, key)
+	case "array":
+		return []any{}
+	case "integer", "number":
+		return 1
+	case "boolean":
+		return false
+	}
+	switch {
+	case slices.Contains([]string{"task_key", "task", "from", "to", "parent", "before", "after"}, name):
+		return key
+	case name == "id" || strings.HasSuffix(name, "_id"):
+		return uuid.NewString()
+	}
+	return "x"
+}
+
+// Граница проектов у каждого тула: человек, который не участник проекта, и
+// токен с привязкой к другому проекту не получают ни одного результата ни
+// по аргументу project, ни по ключу задачи чужого проекта. Перечень — из
+// tools/list, поэтому новый тул без проверки прав на инстансовом адресе (где
+// путь больше не ограничивает проект) валит тест.
+func TestInstanceMCPEveryToolChecksProject(t *testing.T) {
+	f := newInstanceFixture(t)
+	_, out := rpc(f.srv.Handler(), "/mcp", f.alice, "tools/list", map[string]any{})
+	tools, _ := out["result"].(map[string]any)["tools"].([]any)
+	if len(tools) < 40 {
+		t.Fatalf("tools/list: %d тулов", len(tools))
+	}
+	cases := []struct{ who, token, project, key string }{
+		{"не участник ZETA", f.alice, "ZETA", f.z1},
+		{"токен привязан к ACME, проект BOLT", f.aliceBound, "BOLT", f.b1},
+	}
+	for _, it := range tools {
+		tool := it.(map[string]any)
+		name := tool["name"].(string)
+		if name == "sdlc_list_projects" {
+			continue
+		}
+		schema, _ := tool["inputSchema"].(map[string]any)
+		for _, c := range cases {
+			variants := []map[string]any{}
+			args := dummyArgs(schema, c.key)
+			withProject := map[string]any{"project": c.project}
+			for k, v := range args {
+				withProject[k] = v
+			}
+			variants = append(variants, withProject)
+			// Проект — только из ключа задачи, без аргумента project.
+			if args["task_key"] != nil || args["task"] != nil || args["from"] != nil {
+				variants = append(variants, args)
+			}
+			for _, in := range variants {
+				got, isErr := f.call("/mcp", c.token, name, in)
+				if code, msg := mcpErr(got); !isErr || code != "forbidden" {
+					t.Errorf("%s: %s %v: ждали forbidden, получили %v %q %q", name, c.who, in, isErr, code, msg)
+				}
+			}
+		}
+	}
+}
