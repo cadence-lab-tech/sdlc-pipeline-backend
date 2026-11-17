@@ -353,7 +353,7 @@ func TestToolSetHasNoFileContentTools(t *testing.T) {
 		"sdlc_move_task", "sdlc_propose_role_version", "sdlc_put_agent_settings_draft", "sdlc_put_document",
 		"sdlc_put_instruction", "sdlc_put_role", "sdlc_rank_task", "sdlc_reject_role_proposal",
 		"sdlc_release", "sdlc_report_usage", "sdlc_request_transition", "sdlc_resolve_drift",
-		"sdlc_search_context", "sdlc_submit_artifact", "sdlc_update_task",
+		"sdlc_search_context", "sdlc_set_task_parent", "sdlc_submit_artifact", "sdlc_update_task",
 		"sdlc_update_task_scope", "sdlc_whoami", "sdlc_withdraw_role_proposal",
 	}
 	if strings.Join(names, " ") != strings.Join(want, " ") {

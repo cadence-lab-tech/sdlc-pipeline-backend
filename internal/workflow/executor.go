@@ -148,7 +148,18 @@ func (a *Auth) ExecutorMay(id Identity, action string) error {
 	if b == nil || executorActions[action] {
 		return nil
 	}
+	if humanActions[action] {
+		return withHumanAction(executorRefused(b, action))
+	}
 	return executorRefused(b, action)
+}
+
+// humanActions — действия вне перечня, отказ в которых несёт причину
+// human_action (CLAB-196): смена родителя — решение человека, и клиент
+// узнаёт его тем же кодом причины, что у отказа боту в движке.
+var humanActions = map[string]bool{
+	RESTAction("PUT", "/v1/tasks/:taskKey/parent"): true,
+	"sdlc_set_task_parent":                         true,
 }
 
 // inWriteCircle — своя задача токена или её прямой ребёнок.

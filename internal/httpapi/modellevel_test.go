@@ -121,6 +121,8 @@ func TestRoleModelLevelOverREST(t *testing.T) {
 // журнале, execution одинаковый в REST и MCP.
 func TestModelLevelOverRESTAndMCP(t *testing.T) {
 	f := newAuditFixture(t)
+	// Своя задача токена заводит детей — она на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, f.pool, "SDLC-1")
 	for _, path := range []string{"/v1/tasks/SDLC-1/transitions/start", "/v1/tasks/SDLC-1/claim"} {
 		if code, body := f.json("POST", path, f.root, map[string]any{}); code != http.StatusOK {
 			t.Fatalf("%s: %d %v", path, code, body)
@@ -159,12 +161,13 @@ func TestModelLevelOverRESTAndMCP(t *testing.T) {
 		t.Fatalf("уровень ребёнка: %d %v", code, body)
 	}
 
-	// Вне круга записи: внук, сосед по эпику, чужая задача — 403 и запись в
-	// журнал. Читает их токен все (CLAB-305), поэтому отбивает каждую круг
-	// записи текстом ExecutorRefusal.
-	code, grand := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Внук", "parent_key": childKey})
+	// Вне круга записи: ребёнок другой задачи, бывший сосед по эпику, чужая
+	// задача — 403 и запись в журнал. Внука с CLAB-196 нет: вложенность —
+	// один уровень. Читает их токен все (CLAB-305), поэтому отбивает каждую
+	// круг записи текстом ExecutorRefusal.
+	code, grand := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Ребёнок другой", "parent_key": "SDLC-4"})
 	if code != http.StatusCreated {
-		t.Fatalf("внук: %d %v", code, grand)
+		t.Fatalf("ребёнок другой задачи: %d %v", code, grand)
 	}
 	code, alien := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Чужая"})
 	if code != http.StatusCreated {

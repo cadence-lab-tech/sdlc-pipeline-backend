@@ -679,6 +679,8 @@ func TestAttachmentPermissions(t *testing.T) {
 	}
 
 	// Токен задачи: своя задача и её прямой ребёнок — да, чужая — нет.
+	// Своя задача с ребёнком — на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, f.pool, "SDLC-1")
 	want(t, f.jsonAs(f.root, http.MethodPost, "/v1/tasks/SDLC-1/transitions/start", nil), http.StatusOK, "start")
 	want(t, f.jsonAs(f.root, http.MethodPost, "/v1/tasks/SDLC-1/claim", nil), http.StatusOK, "claim")
 	rec = f.jsonAs(f.root, http.MethodPost, "/v1/projects/SDLC/tasks", map[string]any{"title": "ребёнок", "parent_key": "SDLC-1"})

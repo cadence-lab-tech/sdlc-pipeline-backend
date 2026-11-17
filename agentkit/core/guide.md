@@ -188,7 +188,7 @@ Do not guess who may do what: `clab gates <key>` and `clab show <key>` print
 what the server answers for the current actor — whether the transition may
 be requested, which verdicts the actor may give on each gate, and the reason
 for a refusal; `clab show <key> --json` carries `actor_rights` (edit, stage
-choice, child, assign, link, scope, move) and `clab whoami` names the
+choice, child, assign, link, scope, move, reparent) and `clab whoami` names the
 actor's class. When the actor may not, the reason says whom to turn to: an
 employee of the project or a maintainer. Report that and stop; do not look
 for another transition or another token.
@@ -202,6 +202,19 @@ current status is one more pass of the stage, and a closed task reopens
 this way instead of being copied. A stage switched off for the task is
 refused with `stage_disabled` — switch it on first (`clab edit <key>
 --stage <status>=on`). An agent moves a task only when the human asks.
+
+**Moving a task to another parent.** When the breakdown is revised, an
+employee or a maintainer moves the task itself instead of creating it again
+and cancelling the original: `clab edit <key> --parent <new parent>`, or
+`clab edit <key> --parent ""` to make it top-level (MCP
+`sdlc_set_task_parent`). The key, the history, the artifacts, the links and
+the scope stay with the task; it goes to the end of the new parent's
+backlog group. Nesting is one level: a parent is a task without a parent,
+and a task that has children of its own cannot be put under a parent
+(`invalid_input` names the tasks); taking a task off its parent always
+works. The same rule holds for `clab create --parent`. A bot and a task
+token may not move a task to another parent (`human_action`): an agent
+does it only when the human asks, with the human's own credentials.
 
 **Merging is work, not a status.** Moving a task to `done` merges nothing:
 a pull request is merged and a tag is set only by the stage executor of the
@@ -228,7 +241,7 @@ claimed: `clab token task <key> --config-dir <dir>`. The token lives as a
 (agent `clab-stage`) runs every command as `env -u SDLC_TOKEN -u
 SDLC_API_URL CLAB_CONFIG_DIR=<dir> clab …`. A task token opens only the
 role's work on its own task: no rules, no scope changes, no tokens, no
-approvals, no moves to a status, no tasks outside its own; of gate
+approvals, no moves to a status or to another parent, no tasks outside its own; of gate
 decisions only `passed` on a checklist of its own transition — the one
 decision a task token has. The frame holds at any level of the human who
 issued the token. Asked for something closed, an executor does not do it:
@@ -296,10 +309,11 @@ clab usage ABC-12 --model <full model id> --input N --output N --cost X
 clab gates ABC-12 [--transition <transition>]
 clab transition ABC-12 --to <transition> [--summary "…"] [--reason "…"]
 clab release ABC-12 --note "…"               # drop the stage unfinished
-clab create --title "…" [--type epic] [--parent ABC-2] [--repos owner/name]
+clab create --title "…" [--type epic] [--parent ABC-2] [--repos owner/name]   # parent: a top-level task
             [--model-level medium] [--model-level-for <status>=low ...]
 clab edit ABC-12 [--model-level high | --model-level ""]
                  [--model-level-for <status>=high | --model-level-for <status>=]
+clab edit ABC-12 --parent ABC-9 | --parent ""  # another parent or top-level (a person only)
 clab relate ABC-3 --to ABC-4 --rel blocks    # ABC-4 waits for ABC-3 (not a place in the backlog)
 clab rank ABC-12 --before ABC-15 | --after ABC-15 | --top | --bottom   # exactly one place
 clab backlog [--parent ABC-2] [--limit 50] [--next] [--json]   # the backlog in server order

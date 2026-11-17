@@ -280,6 +280,10 @@ func (s *Server) Handler() http.Handler {
 		v1.PATCH("/tasks/:taskKey/scope", agent, s.updateScope)
 		v1.POST("/tasks/:taskKey/links", agent, s.linkTasks)
 		v1.PUT("/tasks/:taskKey/assignee", agent, s.assignTask)
+		// Родитель задачи (CLAB-196): перенос и снятие — действие человека,
+		// право — TaskRight движка (бот — 403 human_action). Токену задачи
+		// маршрут закрыт белым списком.
+		v1.PUT("/tasks/:taskKey/parent", agent, s.setTaskParent)
 		// Место в бэклоге (решение 0075): уровень agent, как у постановки;
 		// рамку токена задачи и правила места держат Auth и движок.
 		v1.POST("/tasks/:taskKey/rank", agent, s.rankTask)

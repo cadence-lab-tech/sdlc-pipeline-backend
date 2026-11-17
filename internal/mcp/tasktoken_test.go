@@ -42,6 +42,8 @@ func TestTaskTokenOverMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Своя задача заводит ребёнка — она на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, store, "SDLC-1")
 	for _, key := range []string{"SDLC-1", "SDLC-3"} {
 		if _, err := engine.Execute(ctx, key, "start", root.Principal.ID, ""); err != nil {
 			t.Fatal(err)

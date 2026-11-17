@@ -211,11 +211,13 @@ func TestExecutorWriteCircle(t *testing.T) {
 		}
 		return task
 	}
+	// Вложенность — один уровень (CLAB-196): своя C с детьми — на верхнем
+	// уровне, E — соседняя задача, G — ребёнок чужой Z.
 	e := create("E", "")
-	c := create("C", e.Key)
+	c := create("C", "")
 	d, d2 := create("D", c.Key), create("D2", c.Key)
-	g := create("G", d.Key)
 	z := create("Z", "")
+	g := create("G", z.Key)
 	for _, key := range []string{c.Key, z.Key} {
 		if _, err := w.engine.Execute(ctx, key, "start", w.admin.Principal.ID, ""); err != nil {
 			t.Fatal(err)
