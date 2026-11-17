@@ -31,7 +31,8 @@ func (s *Server) registerOrchestrationTools() {
 			"stage_settings — уровни этапов: {\"development\": {\"model_level\": \"high\"}}, "+
 			"ключи — статусы цикла задачи с ролью-исполнителем. "+
 			"Агент вправе создавать только дочерние задачи той, которую держит, и только "+
-			"внутри её области репозиториев.",
+			"внутри её области репозиториев. Вложенность — один уровень: parent — только задача "+
+			"без родителя, иначе invalid_input с ключами родителя и его родителя.",
 		s.createTask)
 	add(s, "sdlc_update_task",
 		"Поправить постановку задачи: заголовок, описание, приоритет, метки, ссылку на "+
@@ -42,8 +43,20 @@ func (s *Server) registerOrchestrationTools() {
 			"уточняет нарезку эпика, когда код ушёл вперёд её описания. Агент вправе править "+
 			"задачу, которую держит, и её дочерние. Не переданное поле не меняется, пустое "+
 			"описание очищает его, метки и external_ref заменяются целиком ({} снимает ссылки). Тип, статус, родитель, "+
-			"область и исполнитель этой ручкой не меняются — у каждого своя.",
+			"область и исполнитель этой ручкой не меняются: родитель — sdlc_set_task_parent, статус — "+
+			"sdlc_move_task, область — sdlc_update_task_scope, исполнитель — sdlc_assign_task.",
 		s.updateTask)
+	add(s, "sdlc_set_task_parent",
+		"Перенести задачу к другому родителю или снять с родителя: parent — ключ нового родителя, "+
+			"пусто — задача уходит на верхний уровень. Меняются только родитель и место в бэклоге (конец "+
+			"группы нового родителя); тип, цикл, статус, прогоны, артефакты, связи и область прежние. "+
+			"Вложенность — один уровень: родитель — задача без родителя, задачу с детьми под родителя не "+
+			"кладут (invalid_input), снять родителя можно всегда. Ответ — task, from и to (ключи прежнего "+
+			"и нового родителя или null), changed (false — родитель уже этот, ничего не менялось). Право — "+
+			"actor_rights.reparent в sdlc_get_task: сотрудник уровня agent и сопровождающий; агенту и "+
+			"токену задачи тул закрыт (forbidden, reason human_action). Те же коды, что у clab edit "+
+			"--parent и PUT /v1/tasks/<ключ>/parent.",
+		s.setTaskParent)
 	add(s, "sdlc_link_tasks",
 		"Связать задачи: blocks задаёт порядок (его читает гейт dependencies_closed), "+
 			"relates_to, duplicates, shares_surface и split_from — контекст. remove=true снимает связь.",
@@ -356,6 +369,31 @@ func (s *Server) assignTask(ctx context.Context, in assignTaskInput) (*sdk.CallT
 		return fail(err)
 	}
 	return ok(map[string]any{"key": task.Key, "assignee": task.AssigneeHandle})
+}
+
+type setTaskParentInput struct {
+	TaskKey string `json:"task_key" jsonschema:"ключ задачи"`
+	Parent  string `json:"parent,omitempty" jsonschema:"ключ нового родителя; пусто — снять родителя"`
+}
+
+// setTaskParent — паритет PUT /v1/tasks/:key/parent (CLAB-196): тот же
+// ReparentTask движка.
+func (s *Server) setTaskParent(ctx context.Context, in setTaskParentInput) (*sdk.CallToolResult, any, error) {
+	if err := s.allow(ctx, domain.MemberAgent); err != nil {
+		return fail(err)
+	}
+	if err := s.inProject(ctx, in.TaskKey); err != nil {
+		return fail(err)
+	}
+	who, err := s.stageActor(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	out, err := s.engine.ReparentTask(ctx, in.TaskKey, in.Parent, who)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(out)
 }
 
 // registerWorkPrompt объявляет единую точку старта работы над задачей.

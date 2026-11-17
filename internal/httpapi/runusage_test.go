@@ -257,7 +257,9 @@ func TestRunUsageInTaskCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	// AC-12: прогон дочерней задачи (её прогон на начальном статусе) в
-	// stage_runs родителя не попадает.
+	// stage_runs родителя не попадает. Родитель с ребёнком — на верхнем
+	// уровне (CLAB-196).
+	liftToTopLevel(t, f.pool, "SDLC-1")
 	code, child := f.json("POST", "/v1/projects/SDLC/tasks", f.root, map[string]any{"title": "Ребёнок", "parent_key": "SDLC-1"})
 	if code != http.StatusCreated {
 		t.Fatalf("ребёнок: %d %v", code, child)

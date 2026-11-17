@@ -137,3 +137,23 @@ the move tell the human the new status and the attempt number.
   the human and do not look for a workaround such as a copy of the task or
   another token.
 - Over MCP — `sdlc_move_task` with `task_key`, `to`, `reason`.
+
+## Moving a task to another parent
+
+A task that belongs under another parent is moved there, not created again
+and cancelled — again only when the human asks:
+
+```bash
+clab edit ABC-12 --parent ABC-9    # under ABC-9
+clab edit ABC-12 --parent ""       # off its parent, to the top level
+```
+
+The right is `actor_rights.reparent` in `clab show ABC-12 --json`: an
+employee or a maintainer; a bot and a task token are refused with
+`human_action`. Only the parent and the place in the backlog change (the
+task goes to the end of the new parent's group); status, runs, artifacts,
+links and scope stay. Nesting is one level: the new parent must have no
+parent itself, and a task with children is not put under a parent — the
+`invalid_input` refusal names the tasks; taking a task off its parent always
+works. Tell the human the old and the new parent the CLI printed. Over MCP —
+`sdlc_set_task_parent` with `task_key` and `parent`.

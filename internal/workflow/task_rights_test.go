@@ -109,6 +109,13 @@ func TestTaskRightTable(t *testing.T) {
 		{"viewer правит", viewer, ActEdit, TaskFacts{Task: foreign}, forbidden},
 		{"viewer: свойства", viewer, ActProperties, TaskFacts{}, forbidden},
 		{"без уровня: всё", Actor{}, ActScope, TaskFacts{}, yes},
+		// Смена родителя (CLAB-196) — действие человека, аренда не в счёт.
+		{"сотрудник: родитель", employee, ActReparent, TaskFacts{Task: foreign}, yes},
+		{"сопровождающий: родитель", maintainer, ActReparent, TaskFacts{Task: foreign}, yes},
+		{"бот с арендой: родитель", bot, ActReparent, TaskFacts{Task: foreign, Held: true, ParentHeld: true}, forbidden},
+		{"токен: родитель своей", token, ActReparent, TaskFacts{Task: own}, forbidden},
+		{"токен: родитель ребёнка", token, ActReparent, TaskFacts{Task: kid}, forbidden},
+		{"viewer: родитель", viewer, ActReparent, TaskFacts{Task: foreign}, forbidden},
 	} {
 		err := TaskRight(c.a, c.act, c.f)
 		if c.want == yes {
@@ -154,6 +161,8 @@ func TestEngineTaskRightsBoundaries(t *testing.T) {
 		t.Fatalf("связь сотрудником: %v", err)
 	}
 
+	// Своя задача с детьми — на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, store, "SDLC-1")
 	own, err := store.GetTaskByKey(ctx, store.DB(), "SDLC-1")
 	if err != nil {
 		t.Fatal(err)

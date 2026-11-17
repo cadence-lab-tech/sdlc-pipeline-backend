@@ -85,6 +85,8 @@ func TestTaskTokenOverREST(t *testing.T) {
 		return body["token"].(string)
 	}
 	pool, other := personal("pool"), personal("other")
+	// Своя задача токена заводит ребёнка — она на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, store.DB(), "SDLC-1")
 	for _, key := range []string{"SDLC-1", "SDLC-3"} {
 		if code, body := call("POST", "/v1/tasks/"+key+"/transitions/start", rootToken, nil); code != http.StatusOK {
 			t.Fatalf("старт %s: %d %v", key, code, body)

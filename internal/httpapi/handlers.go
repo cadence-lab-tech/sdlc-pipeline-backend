@@ -576,6 +576,46 @@ func (s *Server) assignTask(c *gin.Context) {
 	c.JSON(http.StatusOK, task)
 }
 
+// setTaskParent переносит задачу к другому родителю или снимает с родителя
+// (CLAB-196). Тело — {"parent_key": "<ключ>"} или {"parent_key": null}; поле
+// обязательно: пустое тело — не «снять», а ошибка вызывающего. Право,
+// родитель и правило одного уровня — в движке, те же коды и тексты, что у
+// sdlc_set_task_parent.
+func (s *Server) setTaskParent(c *gin.Context) {
+	var req map[string]json.RawMessage
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, s.log, apperr.InvalidInput(parentBodyHint))
+		return
+	}
+	raw, present := req["parent_key"]
+	if !present {
+		fail(c, s.log, apperr.InvalidInput(parentBodyHint))
+		return
+	}
+	var parent *string
+	if err := json.Unmarshal(raw, &parent); err != nil {
+		fail(c, s.log, apperr.InvalidInput(parentBodyHint))
+		return
+	}
+	who, err := s.stageActor(c)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	key := ""
+	if parent != nil {
+		key = *parent
+	}
+	res, err := s.engine.ReparentTask(c.Request.Context(), c.Param("taskKey"), key, who)
+	if err != nil {
+		fail(c, s.log, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+const parentBodyHint = `тело запроса: {"parent_key": "<ключ родителя>"} или {"parent_key": null} — снять родителя`
+
 type reportUsageRequest struct {
 	Model            string          `json:"model" binding:"required"`
 	InputTokens      *int64          `json:"input_tokens"`

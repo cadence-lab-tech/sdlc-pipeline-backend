@@ -12,6 +12,8 @@ import (
 // задача без детей отдаёт children: [].
 func TestGetTaskChildrenFields(t *testing.T) {
 	f := newAuditFixture(t)
+	// Родитель с детьми — на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, f.pool, "SDLC-1")
 	create := func(body map[string]any) string {
 		t.Helper()
 		code, task := f.json(http.MethodPost, "/v1/projects/SDLC/tasks", f.root, body)

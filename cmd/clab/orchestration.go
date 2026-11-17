@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -121,12 +123,13 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 // очищает описание, а отсутствие флага его не трогает. Поэтому тело запроса
 // собирается по fs.Visit, а не по непустым значениям.
 func cmdEdit(ctx context.Context, c *Client, args []string) error {
-	var title, description, descriptionFile, priority, labels, modelLevel string
+	var title, description, descriptionFile, priority, labels, modelLevel, parent string
 	var external externalRefFlag
 	var stageLevels stageLevelFlag
 	var stages optionalStageFlag
 	task, rest := popTask(args)
 	fs, err := flags("edit", rest, func(fs *flag.FlagSet) {
+		fs.StringVar(&parent, "parent", "", "ключ нового родителя; \"\" снимает родителя (вложенность — один уровень)")
 		fs.StringVar(&title, "title", "", "новый заголовок, не длиннее 80 символов")
 		fs.StringVar(&description, "description", "", "новое описание; \"\" очищает, - читает со stdin")
 		fs.StringVar(&descriptionFile, "description-file", "", "файл с описанием")
@@ -185,10 +188,25 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 	}
 	levels := addModelLevels(body, passed, modelLevel, &stageLevels)
 	chosen := addOptionalStages(body, passed, &stages)
-	if len(body) == 0 {
+	if len(body) == 0 && !passed["parent"] {
 		fs.Usage()
 		return fmt.Errorf("нечего менять: укажите --title, --description, --description-file, --priority, " +
-			"--labels, --external-ref, --model-level, --model-level-for или --stage")
+			"--labels, --external-ref, --model-level, --model-level-for, --stage или --parent")
+	}
+
+	// Родитель — первым и отдельной ручкой (CLAB-196): отказ переноса
+	// (право, вложенность) не оставляет полуприменённой правки постановки.
+	if passed["parent"] {
+		res, err := setParent(ctx, c, task, parent)
+		if err != nil {
+			return err
+		}
+		if len(body) == 0 {
+			return emit(res.Task, func() error { res.print(task); return nil })
+		}
+		if !jsonOut {
+			res.print(task)
+		}
 	}
 
 	var out json.RawMessage
@@ -205,6 +223,55 @@ func cmdEdit(ctx context.Context, c *Client, args []string) error {
 		return optionalStagesNotStored("остальная правка " + task + " применена")
 	}
 	return nil
+}
+
+// errParentOldServer — у сервера нет ручки родителя: он старше CLAB-196.
+var errParentOldServer = errors.New("сервер не поддерживает смену родителя, обновите сервер (версия сервера — clab version)")
+
+// parentResult — ответ PUT /tasks/:key/parent; задача — сырым JSON для --json.
+type parentResult struct {
+	Task    json.RawMessage `json:"task"`
+	From    *string         `json:"from"`
+	To      *string         `json:"to"`
+	Changed bool            `json:"changed"`
+}
+
+// setParent переносит задачу к родителю parent ("" — снимает родителя).
+func setParent(ctx context.Context, c *Client, task, parent string) (parentResult, error) {
+	var key any
+	if p := strings.TrimSpace(parent); p != "" {
+		key = p
+	}
+	var res parentResult
+	if err := c.do(ctx, "PUT", "/tasks/"+url.PathEscape(task)+"/parent",
+		map[string]any{"parent_key": key}, &res); err != nil {
+		var apiErr *APIError
+		// Plain-text 404 без кода — маршрута нет: сервер прежней версии.
+		// «Задачи нет» приходит конвертом с кодом not_found.
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound && apiErr.Code == "" {
+			return res, errParentOldServer
+		}
+		return res, withDenialHint(err)
+	}
+	return res, nil
+}
+
+// print — строка человеку: откуда и куда, «—» — верхний уровень.
+func (r parentResult) print(task string) {
+	name := func(p *string) string {
+		if p == nil {
+			return "—"
+		}
+		return *p
+	}
+	switch {
+	case r.Changed:
+		fmt.Printf("%s: родитель %s → %s\n", task, name(r.From), name(r.To))
+	case r.To == nil:
+		fmt.Printf("%s: родителя и так нет\n", task)
+	default:
+		fmt.Printf("%s: уже в %s\n", task, *r.To)
+	}
 }
 
 func cmdRelate(ctx context.Context, c *Client, args []string) error {

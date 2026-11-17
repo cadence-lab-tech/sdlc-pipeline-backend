@@ -382,9 +382,11 @@ func TestTaskTokenBindingAndProjectRead(t *testing.T) {
 		t.Fatalf("захват задачи B прогоном задачи A: %v", err)
 	}
 
-	// Прежний круг SDLC-1 (родитель SDLC-4, ребёнок D, blocks SDLC-1→SDLC-2,
-	// relates_to Y→SDLC-1) и задачи вне него (Z, SDLC-3 пула) читаются
-	// одинаково; задача другого проекта — нет.
+	// Прежний круг SDLC-1 (ребёнок D, blocks SDLC-1→SDLC-2, relates_to
+	// Y→SDLC-1), бывший родитель SDLC-4 и задачи вне круга (Z, SDLC-3 пула)
+	// читаются одинаково; задача другого проекта — нет. SDLC-1 с ребёнком —
+	// на верхнем уровне (CLAB-196).
+	liftToTopLevel(t, w.store, "SDLC-1")
 	child, err := w.engine.CreateTask(ctx, "SDLC", w.admin.Principal.ID, CreateTaskInput{
 		CreateTaskInput: postgres.CreateTaskInput{Title: "D", ParentKey: "SDLC-1"},
 	})
