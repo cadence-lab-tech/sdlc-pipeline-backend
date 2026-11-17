@@ -63,7 +63,7 @@ RUN mkdir -p /out/license && if [ -f LICENSE ]; then cp LICENSE /out/license/; f
 # DLA-4792-1 и ca-certificates DLA-4845-1; static-debian13 их не имеет
 # (trivy, 2026-10-21). uid/gid nonroot — те же 65532, том /blobs прежних
 # установок остаётся доступен.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
 WORKDIR /
 COPY --from=build /out/api /api
