@@ -3,9 +3,10 @@
 # миграциями в compose не нужен и не может разъехаться с версией сервиса.
 # Go 1.26: не ниже 1.25 требует MCP SDK (github.com/modelcontextprotocol/go-sdk),
 # 1.26 — golang.org/x/net и x/crypto с исправлениями безопасности (CLAB-169),
-# патч не ниже go1.26.10 — crypto/x509, GO-2026-6809 (CLAB-224). Строка
-# toolchain в go.mod здесь не действует (образ ставит GOTOOLCHAIN=local): Go
-# берётся из базового образа.
+# патч не ниже go1.26.11 — net/http, GO-2026-6859 (CLAB-475; до него
+# go1.26.10 — crypto/x509, GO-2026-6809, CLAB-224). Строка toolchain в go.mod
+# здесь не действует (образ ставит GOTOOLCHAIN=local): Go берётся из базового
+# образа, и поднимать их надо вместе.
 #
 # Базовые образы закреплены по digest (CLAB-203, решение 0051): тег — для
 # человека, Docker тянет по digest, поэтому сборка локально, в CI и в релизе
@@ -20,7 +21,7 @@
 # arm64-половина сборки на amd64-раннере шла бы через QEMU, которого в CI
 # нет, и падала. Обычный `docker build` (make image, deploy.yml) ничего не
 # замечает: BuildKit подставляет в TARGETOS/TARGETARCH платформу хоста.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
 
 WORKDIR /src
 
