@@ -299,17 +299,22 @@ func (s *Store) PurgeAudit(ctx context.Context, q Querier, before time.Time, lim
 func (s *Store) TokenByHashAny(ctx context.Context, q Querier, hash string) (domain.AccessToken, domain.Principal, error) {
 	var t domain.AccessToken
 	var p domain.Principal
+	var grant *uuid.UUID
 	err := q.QueryRow(ctx, `
 		SELECT t.id, t.principal_id, t.kind, t.name, t.token_prefix,
-		       p.id, p.kind, p.handle
+		       p.id, p.kind, p.handle, og.id
 		FROM agent_tokens t
 		JOIN principals p ON p.id = t.principal_id
+		LEFT JOIN oauth_grants og ON og.token_id = t.id
 		WHERE t.token_hash = $1`, hash,
-	).Scan(&t.ID, &t.PrincipalID, &t.TokenKind, &t.Name, &t.Prefix, &p.ID, &p.Kind, &p.Handle)
+	).Scan(&t.ID, &t.PrincipalID, &t.TokenKind, &t.Name, &t.Prefix, &p.ID, &p.Kind, &p.Handle, &grant)
 	if err != nil {
 		return t, p, notFound(err, "токен не найден")
 	}
 	t.Handle, t.Kind = p.Handle, p.Kind
+	if grant != nil {
+		t.OAuthGrant = &domain.TokenOAuthGrant{ID: *grant}
+	}
 	return t, p, nil
 }
 

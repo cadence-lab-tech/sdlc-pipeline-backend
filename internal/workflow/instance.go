@@ -37,6 +37,18 @@ type Instance struct {
 	// Пределы, которые клиент сверяет до отправки (решение 0064). Нет поля —
 	// сервер прежней версии.
 	Limits *InstanceLimits `json:"limits,omitempty"`
+	// Сервер авторизации OAuth (решение 0079, п. 11): по нему интерфейс и
+	// clab решают, показывать ли подключённые клиенты. Нет поля — сервер
+	// прежней версии.
+	OAuth InstanceOAuth `json:"oauth"`
+}
+
+// InstanceOAuth — enabled — «OAuth действует» (выключатель и режим
+// токенов), dcr и cimd — выключатели способов регистрации.
+type InstanceOAuth struct {
+	Enabled bool `json:"enabled"`
+	DCR     bool `json:"dcr"`
+	CIMD    bool `json:"cimd"`
 }
 
 // InstanceLimits — действующие пределы инстанса.
@@ -87,6 +99,7 @@ func (a *Auth) Instance(ctx context.Context, version string) Instance {
 	out := Instance{
 		Version: version, Tenancy: tenancy, ProjectCreation: creation,
 		Login: InstanceLogin{Methods: []string{}},
+		OAuth: InstanceOAuth{Enabled: a.OAuthActive(), DCR: a.oauthDCR, CIMD: a.oauthCIMD},
 	}
 	if a.Enforced() {
 		out.Login.Methods = append(out.Login.Methods, LoginToken)

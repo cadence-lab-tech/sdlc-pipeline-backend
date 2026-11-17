@@ -1081,3 +1081,49 @@ func TestCheckAPIGitHubClientPair(t *testing.T) {
 		})
 	}
 }
+
+// AC-31 (CLAB-481): умолчания OAuth, отказ старта с именем переменной, все
+// шесть переменных — в таблице dev/README.md.
+func TestOAuthConfig(t *testing.T) {
+	t.Setenv("SDLC_DATABASE_URL", "postgres://clab:clab@localhost:55432/clab")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.OAuthEnabled || !c.OAuthDCREnabled || !c.OAuthCIMDEnabled || c.OAuthAccessTTL != time.Hour ||
+		c.OAuthRefreshTTL != 720*time.Hour || c.PublicURL != "" {
+		t.Fatalf("умолчания: %+v", c)
+	}
+	t.Setenv("SDLC_PUBLIC_URL", "https://cadence.example/")
+	t.Setenv("SDLC_OAUTH_DCR_ENABLED", "false")
+	t.Setenv("SDLC_OAUTH_ACCESS_TTL", "15m")
+	if c, err = Load(); err != nil || c.PublicURL != "https://cadence.example" || c.OAuthDCREnabled || c.OAuthAccessTTL != 15*time.Minute {
+		t.Fatalf("из окружения: %+v %v", c, err)
+	}
+	for key, bad := range map[string][]string{
+		"SDLC_OAUTH_ENABLED":      {"yes please"},
+		"SDLC_OAUTH_CIMD_ENABLED": {"maybe"},
+		"SDLC_OAUTH_ACCESS_TTL":   {"0s", "-1h", "час"},
+		"SDLC_OAUTH_REFRESH_TTL":  {"0", "x"},
+		"SDLC_PUBLIC_URL":         {"https://cadence.example/path", "cadence.example", "ftp://cadence.example"},
+	} {
+		for _, v := range bad {
+			t.Run(key+"="+v, func(t *testing.T) {
+				t.Setenv(key, v)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("%s=%q: %v", key, v, err)
+				}
+			})
+		}
+	}
+	readme, err := os.ReadFile("../../dev/README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"SDLC_OAUTH_ENABLED", "SDLC_OAUTH_DCR_ENABLED", "SDLC_OAUTH_CIMD_ENABLED",
+		"SDLC_OAUTH_ACCESS_TTL", "SDLC_OAUTH_REFRESH_TTL", "SDLC_PUBLIC_URL"} {
+		if !strings.Contains(string(readme), "| `"+key+"` |") {
+			t.Errorf("%s нет в таблице dev/README.md", key)
+		}
+	}
+}

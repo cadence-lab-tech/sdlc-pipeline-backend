@@ -183,6 +183,16 @@ func run() error {
 		log.Warn("SDLC_AUTH_MODE=header: актор берётся из заголовка, права не " +
 			"проверяются — режим отладки цикла, не для продакшена")
 	}
+	switch {
+	case !cfg.OAuthEnabled:
+		log.Info("OAuth для удалённых MCP-клиентов выключен (SDLC_OAUTH_ENABLED=false)")
+	case !auth.Enforced():
+		log.Info("OAuth для удалённых MCP-клиентов не действует в режиме заголовка")
+	default:
+		log.Info("OAuth для удалённых MCP-клиентов включён", "dcr", cfg.OAuthDCREnabled,
+			"cimd", cfg.OAuthCIMDEnabled, "access_ttl", cfg.OAuthAccessTTL,
+			"refresh_ttl", cfg.OAuthRefreshTTL, "public_url", cfg.PublicURL)
+	}
 	if cfg.GitHubWebhookSecret != "" {
 		log.Info("вебхуки GitHub включены", "path", "/webhooks/github")
 	}

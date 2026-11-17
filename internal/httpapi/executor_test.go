@@ -23,6 +23,11 @@ var publicV1 = map[string]bool{
 	"GET /v1/auth/github": true, "POST /v1/auth/github/login": true,
 	"POST /v1/auth/cli": true, "POST /v1/auth/cli/poll": true,
 	"GET /v1/instance": true, "GET /v1/agent-kit": true,
+	// Сервер авторизации OAuth (CLAB-481): протокол открыт клиентам, у
+	// которых токена ещё нет.
+	"GET /v1/oauth/authorize": true, "POST /v1/oauth/token": true, "OPTIONS /v1/oauth/token": true,
+	"POST /v1/oauth/register": true, "OPTIONS /v1/oauth/register": true,
+	"POST /v1/oauth/revoke": true, "OPTIONS /v1/oauth/revoke": true,
 }
 
 func executorRefused(body map[string]any) bool {
