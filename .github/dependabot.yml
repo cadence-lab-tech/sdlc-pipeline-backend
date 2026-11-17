@@ -9,8 +9,17 @@
 # distroless тег nonroot версии не несёт — обновляется только digest;
 # следующий debian — другое имя образа, его Dependabot не предложит.
 #
-# Кроме образов — только actions workflow'ов (CLAB-142, ниже); gomod — не в
-# этой политике.
+# Кроме образов — только actions workflow'ов (CLAB-142, ниже).
+#
+# Политика целиком — решение 0051 («Уточнено CLAB-374»). Version updates (PR
+# по расписанию) ведутся только для docker / и github-actions /. gomod
+# (go.mod сервиса) — без version updates: его покрывают алерты и security
+# updates Dependabot (включены в настройках репозитория), они сами открывают
+# PR с исправлением. Алерт, у которого исправления нет, разбирается по
+# достижимости: если сканер клиента его видит — утверждение в
+# .github/release/openvex.json и строка «Known scanner findings» в
+# docs/admin.md пакета self-hosted, затем dismiss tolerable_risk с
+# комментарием; если нет — dismiss с причиной.
 version: 2
 updates:
   - package-ecosystem: docker
