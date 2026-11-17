@@ -110,12 +110,17 @@ func (s *Server) auditMCPDenials() gin.HandlerFunc {
 		if !denied(status) || (status == http.StatusUnauthorized && !hasBearer(c)) {
 			return
 		}
+		// Инстансовый адрес: проекта до вызова тула нет — запись без проекта.
+		params := map[string]any{"path": map[string]any{}}
+		if key := c.Param("projectKey"); key != "" {
+			params["path"] = map[string]any{"projectKey": key}
+		}
 		s.audit.Record(c.Request.Context(), workflow.AuditEntry{
 			Target:     postgres.AuditTarget{ProjectKey: c.Param("projectKey")},
 			Identity:   s.auditIdentity(c),
 			Channel:    workflow.AuditMCP,
 			Action:     workflow.AuditMCP,
-			Params:     map[string]any{"path": map[string]any{"projectKey": c.Param("projectKey")}},
+			Params:     params,
 			Outcome:    restOutcome(c, status),
 			HTTPStatus: status,
 			RequestID:  c.GetString(ctxRequestID),

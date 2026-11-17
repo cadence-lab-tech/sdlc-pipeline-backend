@@ -430,7 +430,8 @@ func TestOAuthMetadataAndChallenge(t *testing.T) {
 		}
 	}
 
-	// AC-3: метаданные ресурса — для любого ключа; инстансовый адрес — 404.
+	// AC-3: метаданные ресурса — для любого ключа; инстансовый адрес (/mcp и
+	// корень) — с CLAB-483, TestInstanceResourceMetadata.
 	for _, key := range []string{"SDLC", "NOPE"} {
 		rec := f.get("/.well-known/oauth-protected-resource/mcp/projects/"+key, nil)
 		var m oauth.ResourceMetadata
@@ -440,8 +441,7 @@ func TestOAuthMetadataAndChallenge(t *testing.T) {
 			t.Fatalf("AC-3 %s: %d %s", key, rec.Code, rec.Body)
 		}
 	}
-	for _, p := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
-		"/.well-known/oauth-protected-resource/mcp/projects/", "/.well-known/openid-configuration"} {
+	for _, p := range []string{"/.well-known/oauth-protected-resource/mcp/projects/", "/.well-known/openid-configuration"} {
 		if rec := f.get(p, nil); rec.Code != http.StatusNotFound {
 			t.Errorf("AC-3/AC-4 %s: %d", p, rec.Code)
 		}

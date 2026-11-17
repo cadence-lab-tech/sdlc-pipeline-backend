@@ -185,18 +185,21 @@ func TestBodyLimitRejects(t *testing.T) {
 		})
 	}
 
-	// MCP: заявленная длина отбивается до SDK — ответом сервиса.
-	req := f.request(http.MethodPost, "/mcp/projects/SDLC", over, false)
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	wantTooLarge(t, f.serve(req), limit)
+	// MCP: заявленная длина отбивается до SDK — ответом сервиса. Инстансовый
+	// адрес (CLAB-483) — тот же предел и тот же ответ.
+	for _, path := range []string{"/mcp/projects/SDLC", "/mcp"} {
+		req := f.request(http.MethodPost, path, over, false)
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		wantTooLarge(t, f.serve(req), limit)
 
-	// Без заявленной длины тело читает SDK через тот же предел и отвечает
-	// 413 сам — статусом, а не ошибкой JSON-RPC.
-	req = f.request(http.MethodPost, "/mcp/projects/SDLC", over, true)
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	rec := f.serve(req)
-	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), strconv.FormatInt(limit, 10)) {
-		t.Fatalf("MCP chunked: %d %s", rec.Code, rec.Body)
+		// Без заявленной длины тело читает SDK через тот же предел и отвечает
+		// 413 сам — статусом, а не ошибкой JSON-RPC.
+		req = f.request(http.MethodPost, path, over, true)
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		rec := f.serve(req)
+		if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), strconv.FormatInt(limit, 10)) {
+			t.Fatalf("MCP chunked %s: %d %s", path, rec.Code, rec.Body)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/cadence-lab-tech/sdlc-pipeline-backend/internal/apperr"
@@ -148,20 +149,48 @@ const filesNote = "Байты файлов через MCP не идут: ска�
 	"картинку и текст агент открывает своим инструментом чтения файлов после скачивания."
 
 // add регистрирует тул. Через неё проходит каждый вызов, дошедший до тула:
-// здесь стоит белый список токена задачи (CLAB-208) — тул, которого нет в
-// перечне workflow, токену задачи закрыт, даже если о нём забыли подумать, —
-// и здесь же вызов пишется в журнал действий (CLAB-210), отказ тоже: новый
-// тул без проверки и записи завести нельзя.
+// здесь выбирается проект вызова (CLAB-483: на инстансовом адресе — по
+// аргументу project, ключу задачи или привязке токена, на адресе проекта —
+// сверка аргумента с путём), здесь стоит белый список токена задачи
+// (CLAB-208) — тул, которого нет в перечне workflow, токену задачи закрыт,
+// даже если о нём забыли подумать, — и здесь же вызов пишется в журнал
+// действий (CLAB-210), отказ тоже: новый тул без выбора проекта, проверки и
+// записи завести нельзя.
 func add[In any](s *Server, name, description string, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
-	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Description: description},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
+	register(s, name, description, true, h)
+}
+
+// addUnscoped — тул вне проекта (UnscopedTools): без поля project и без
+// выбора проекта, с тем же белым списком и журналом.
+func addUnscoped[In any](s *Server, name, description string, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
+	if !UnscopedTools[name] {
+		panic("тул " + name + " вне проекта не объявлен в UnscopedTools")
+	}
+	register(s, name, description, false, h)
+}
+
+func register[In any](s *Server, name, description string, scoped bool, h func(context.Context, In) (*sdk.CallToolResult, any, error)) {
+	tool := &sdk.Tool{Name: name, Description: description}
+	keys := taskKeyFields[In]()
+	if scoped {
+		tool.InputSchema = inputSchema[In]()
+	}
+	sdk.AddTool(s.mcp, tool,
+		func(ctx context.Context, req *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
 			var (
 				res *sdk.CallToolResult
 				out any
 				err error
 			)
 			ctx = withAuditSlot(ctx)
-			if denied := s.executorMay(ctx, name); denied != nil {
+			var denied error
+			if scoped {
+				ctx, denied = s.selectProject(ctx, projectArgOf(req), taskKeyOf(in, keys))
+			}
+			if denied == nil {
+				denied = s.executorMay(ctx, name)
+			}
+			if denied != nil {
 				res, out, err = fail(denied)
 			} else {
 				res, out, err = h(ctx, in)
@@ -171,11 +200,22 @@ func add[In any](s *Server, name, description string, h func(context.Context, In
 		})
 }
 
-// addPrompt регистрирует промпт с тем же белым списком, что у тулов.
+// addPrompt регистрирует промпт с тем же белым списком, что у тулов, и тем
+// же выбором проекта по аргументу project (кроме UnscopedPrompts).
 func (s *Server) addPrompt(p *sdk.Prompt, h sdk.PromptHandler) {
 	s.mcp.AddPrompt(p, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
 		if err := s.executorMay(ctx, workflow.PromptAction(p.Name)); err != nil {
 			return nil, err
+		}
+		if !UnscopedPrompts[p.Name] {
+			arg := ""
+			if req.Params != nil {
+				arg = strings.TrimSpace(req.Params.Arguments[ProjectArg])
+			}
+			var err error
+			if ctx, err = selectPromptProject(ctx, arg); err != nil {
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: apperr.As(err).Message}
+			}
 		}
 		return h(ctx, req)
 	})
@@ -296,7 +336,7 @@ type listTasksInput struct {
 	Status    string `json:"status,omitempty" jsonschema:"ключ статуса, например analysis"`
 	Role      string `json:"role,omitempty" jsonschema:"ключ роли: оставить только работу для неё"`
 	Claimable bool   `json:"claimable,omitempty" jsonschema:"только то, что можно забрать прямо сейчас"`
-	Parent    string `json:"parent,omitempty" jsonschema:"ключ родительской задачи: нарезка этого эпика"`
+	Parent    string `json:"parent,omitempty" jsonschema:"ключ родительской задачи: нарезка этого эпика" mcp:"task_key"`
 	Type      string `json:"type,omitempty" jsonschema:"тип задачи, например epic"`
 	External  string `json:"external,omitempty" jsonschema:"ключ тикета основного трекера (PROJ-12) или система:ключ (jira:PROJ-12)"`
 	Limit     int    `json:"limit,omitempty"`

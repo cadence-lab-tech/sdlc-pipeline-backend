@@ -46,6 +46,9 @@ func init() {
 		// Чтение — весь свой проект (решение 0065).
 		"sdlc_whoami", "sdlc_list_tasks", "sdlc_get_task", "sdlc_get_artifact",
 		"sdlc_get_drift", "sdlc_search_context",
+		// Проекты участия — у токена задачи только проект своей задачи, как
+		// GET /v1/projects (CLAB-483).
+		"sdlc_list_projects",
 		// Чтение правил.
 		"sdlc_get_role", "sdlc_list_documents", "sdlc_get_document",
 		"sdlc_list_instructions", "sdlc_get_instruction",

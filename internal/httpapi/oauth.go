@@ -43,6 +43,7 @@ func (s *Server) registerOAuth(r *gin.Engine) {
 	open.GET(oauth.PathAuthServerMetadata, s.authServerMetadata)
 	open.OPTIONS(oauth.PathAuthServerMetadata, preflight)
 	open.GET(oauth.PathResourceMetadata, s.resourceMetadata)
+	open.OPTIONS(oauth.PathResourceMetadata, preflight)
 	open.GET(oauth.PathResourceMetadata+"/*mcpPath", s.resourceMetadata)
 	open.OPTIONS(oauth.PathResourceMetadata+"/*mcpPath", preflight)
 	open.POST(oauth.PathToken, s.oauthToken)
@@ -118,14 +119,15 @@ func (s *Server) authServerMetadata(c *gin.Context) {
 	c.JSON(http.StatusOK, oauth.ServerFor(s.issuer(c), s.oauth.DCR(), s.oauth.CIMD()))
 }
 
-// resourceMetadata — метаданные ресурса адреса проекта. Путь берётся в том
-// виде, в каком пришёл, — resource побайтно равен адресу, который ввёл
-// человек. Существование проекта не проверяется: ручка открыта и проекты не
-// перечисляет. Инстансовый адрес (/mcp и корень) — до CLAB-483 404.
+// resourceMetadata — метаданные ресурса MCP. Адрес проекта — путь в том
+// виде, в каком пришёл: resource побайтно равен адресу, который ввёл
+// человек; существование проекта не проверяется — ручка открыта и проекты
+// не перечисляет. Инстансовый адрес (CLAB-483) — путь /mcp и корень
+// well-known: клиент, который ищет метаданные без пути, получает ресурс
+// /mcp, а не корень инстанса. Прочие пути — 404.
 func (s *Server) resourceMetadata(c *gin.Context) {
-	mcpPath := strings.TrimPrefix(c.Request.URL.EscapedPath(), oauth.PathResourceMetadata)
-	key, ok := strings.CutPrefix(mcpPath, "/mcp/projects/")
-	if !ok || key == "" || strings.Contains(key, "/") {
+	mcpPath, ok := metadataResource(strings.TrimPrefix(c.Request.URL.EscapedPath(), oauth.PathResourceMetadata))
+	if !ok {
 		fail(c, s.log, apperr.NotFound("метаданные ресурса для этого пути не отдаются"))
 		return
 	}
@@ -133,18 +135,35 @@ func (s *Server) resourceMetadata(c *gin.Context) {
 	c.JSON(http.StatusOK, oauth.ResourceFor(s.issuer(c), mcpPath))
 }
 
+// instanceMCPPath — инстансовый адрес MCP.
+const instanceMCPPath = "/mcp"
+
+// metadataResource — путь ресурса MCP по хвосту адреса метаданных.
+func metadataResource(tail string) (string, bool) {
+	switch tail {
+	case "", "/", instanceMCPPath:
+		return instanceMCPPath, true
+	}
+	key, ok := strings.CutPrefix(tail, "/mcp/projects/")
+	if !ok || key == "" || strings.Contains(key, "/") {
+		return "", false
+	}
+	return tail, true
+}
+
 // mcpChallenge — WWW-Authenticate у 401 на MCP (RFC 9728, §5.1): где искать
-// метаданные ресурса этого пути. Только пока OAuth действует: иначе клиенту
-// незачем идти туда, где 404.
+// метаданные ресурса этого пути — адреса проекта (первые три сегмента, и для
+// подпутей транспорта) или инстансового /mcp. Только пока OAuth действует:
+// иначе клиенту незачем идти туда, где 404.
 func (s *Server) mcpChallenge(c *gin.Context, tokenPresented bool) {
 	if s.oauth == nil || !s.oauth.Active() {
 		return
 	}
+	mcpPath := instanceMCPPath
 	parts := strings.SplitN(strings.TrimPrefix(c.Request.URL.EscapedPath(), "/"), "/", 4)
-	if len(parts) < 3 {
-		return
+	if len(parts) >= 3 {
+		mcpPath = "/" + parts[0] + "/" + parts[1] + "/" + parts[2]
 	}
-	mcpPath := "/" + parts[0] + "/" + parts[1] + "/" + parts[2]
 	value := `Bearer resource_metadata="` + oauth.ResourceMetadataURL(s.issuer(c), mcpPath) + `"`
 	if tokenPresented {
 		value += `, error="invalid_token"`

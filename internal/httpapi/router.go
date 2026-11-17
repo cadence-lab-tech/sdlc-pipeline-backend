@@ -397,9 +397,10 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	// MCP-сервер живёт в том же процессе и на тех же сервисах: REST и MCP —
-	// два транспорта над одним ядром (решение 0011). Привязка к проекту — в
-	// пути, поэтому агент физически не может обратиться к чужому проекту.
-	// Уровень прав каждый тул проверяет сам: у них он разный.
+	// два транспорта над одним ядром (решение 0011). Адресов два: адрес
+	// проекта (привязка — в пути) и инстансовый /mcp (CLAB-483), где проект
+	// выбирается на вызове аргументом project или ключом задачи. Уровень
+	// прав каждый тул проверяет сам: у них он разный, и от адреса не зависит.
 	if s.mcp != nil {
 		// Предел тела у MCP тот же, что у /v1: отдельного нет (CLAB-295).
 		// Заявленную длину отбивает rejectTooLarge до SDK; тело без длины
@@ -409,6 +410,10 @@ func (s *Server) Handler() http.Handler {
 		group := r.Group("/mcp/projects/:projectKey", s.rejectTooLarge(), s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent, true))
 		group.Any("", s.serveMCP(handler))
 		group.Any("/*rest", s.serveMCP(handler))
+		// Инстансовый адрес — один путь без подпутей: streamable HTTP живёт
+		// на одном адресе, а «/mcp/*rest» спорил бы в gin с адресом проекта.
+		// Канонический — без косой черты: «/mcp/» gin переадресует сюда.
+		r.Any("/mcp", s.rejectTooLarge(), s.auditMCPDenials(), s.authenticate(domain.PrincipalAgent, true), s.serveMCP(handler))
 	}
 
 	return r
@@ -418,7 +423,10 @@ func (s *Server) Handler() http.Handler {
 // потому что MCP-сессия stateless и своего состояния не держит.
 func (s *Server) serveMCP(h http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx := mcp.WithProject(c.Request.Context(), c.Param("projectKey"))
+		ctx := c.Request.Context()
+		if key := c.Param("projectKey"); key != "" {
+			ctx = mcp.WithProject(ctx, key)
+		}
 		ctx = mcp.WithIdentity(ctx, identity(c))
 		ctx = mcp.WithRequestID(ctx, c.GetString(ctxRequestID))
 		h.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
