@@ -2,7 +2,8 @@ package main
 
 // Подключение локального агента к MCP-серверу проекта тем же токеном, что у
 // clab. «install» зовёт claude mcp add, «config» печатает JSON для любого
-// другого агента, понимающего MCP.
+// другого агента, понимающего MCP. С --instance — инстансовый адрес /mcp
+// (CLAB-483): один сервер на все проекты участия, проект не определяется.
 
 import (
 	"context"
@@ -18,9 +19,11 @@ import (
 func cmdMCP(ctx context.Context, c *Client, args []string) error {
 	sub, rest := popTask(args)
 	var projectFlag, name, scope, agent string
+	var instance bool
 	_, err := flags("mcp", rest, func(fs *flag.FlagSet) {
 		fs.StringVar(&projectFlag, "project", "", "ключ проекта")
-		fs.StringVar(&name, "name", "", "имя MCP-сервера у агента (по умолчанию sdlc; у codex sdlc-<ключ проекта>); промпт work_on_task будет /mcp__<имя>__work_on_task")
+		fs.BoolVar(&instance, "instance", false, "инстансовый адрес <хост>/mcp: один сервер на все проекты, где вы участник; проект не определяется, с --project несовместим")
+		fs.StringVar(&name, "name", "", "имя MCP-сервера у агента (по умолчанию sdlc; у codex sdlc-<ключ проекта>; с --instance — "+instanceMCPName+"); промпт work_on_task будет /mcp__<имя>__work_on_task")
 		fs.StringVar(&scope, "scope", "", "у claude mcp add: local (этот каталог, по умолчанию), user (везде), project (.mcp.json в репозитории); у codex: user (по умолчанию, ~/.codex/config.toml) или project (.codex/config.toml корня проекта)")
 		fs.StringVar(&agent, "agent", "auto", "auto — каждый найденный в PATH агент (claude, codex); claude, codex — только он; generic — напечатать конфигурацию MCP для любого другого агента")
 	})
@@ -42,14 +45,24 @@ func cmdMCP(ctx context.Context, c *Client, args []string) error {
 			return err
 		}
 	}
-	key, err := c.project(ctx, projectFlag)
-	if err != nil {
+	if instance && projectFlag != "" {
+		return usageError{"--instance и --project несовместимы: инстансовый адрес не привязан к проекту"}
+	}
+	var key string
+	if !instance {
+		if key, err = c.project(ctx, projectFlag); err != nil {
+			return err
+		}
+	} else if err := c.requireHost(); err != nil {
 		return err
 	}
 	mcpURL, headerName, headerValue := c.mcpEndpoint(key)
 	cfgName := name
 	if cfgName == "" {
 		cfgName = "sdlc"
+		if instance {
+			cfgName = instanceMCPName
+		}
 	}
 	config := mcpConfig(cfgName, mcpURL, headerName, headerValue)
 
@@ -59,6 +72,9 @@ func cmdMCP(ctx context.Context, c *Client, args []string) error {
 		return nil
 	case "config", "":
 		return print(config)
+	}
+	if instance && name == "" {
+		name = instanceMCPName
 	}
 	return installMCP(ctx, c, agent, key, name, scope, mcpURL, headerName, headerValue)
 }
@@ -122,9 +138,17 @@ func installMCP(ctx context.Context, c *Client, agent, key, nameFlag, scopeFlag,
 		done = append(done, res)
 	}
 	if len(done) > 0 {
-		var out any = map[string]any{"project": key, "url": mcpURL, "agents": done}
+		// Инстансовый адрес (пустой ключ) — признак instance вместо проекта.
+		target := map[string]any{"project": key}
+		if key == "" {
+			target = map[string]any{"instance": true}
+		}
+		out := map[string]any{"url": mcpURL, "agents": done}
 		if len(done) == 1 && done[0].Agent == agentClaude {
-			out = map[string]any{"name": done[0].Name, "url": mcpURL, "scope": done[0].Scope, "project": key}
+			out = map[string]any{"name": done[0].Name, "url": mcpURL, "scope": done[0].Scope}
+		}
+		for k, v := range target {
+			out[k] = v
 		}
 		if err := emit(out, func() error {
 			for _, r := range done {
@@ -156,18 +180,26 @@ func installClaudeMCP(ctx context.Context, c *Client, claude string, res *mcpIns
 }
 
 func printMCPInstalled(r mcpInstalled, key string) {
+	target := "к проекту " + key
+	if key == "" {
+		target = "к инстансу (все проекты, где вы участник)"
+	}
 	switch r.Agent {
 	case agentClaude:
-		fmt.Printf("MCP-сервер %s подключён к проекту %s (%s).\n", r.Name, key, r.Scope)
+		fmt.Printf("MCP-сервер %s подключён %s (%s).\n", r.Name, target, r.Scope)
 		fmt.Printf("В агенте: /mcp__%s__work_on_task <ключ задачи>\n", strings.ReplaceAll(r.Name, "-", "_"))
 	case agentCodex:
 		state := map[string]string{mcpAdded: "подключён", mcpUnchanged: "уже подключён", mcpReplaced: "заменён (был " + r.Previous + ")",
 			mcpManual: "не изменён: запись с другим адресом (" + r.Previous + ") — поправьте вручную"}[r.MCP]
-		fmt.Printf("MCP-сервер %s %s к проекту %s в Codex (%s).\n", r.Name, state, key, r.Scope)
+		fmt.Printf("MCP-сервер %s %s %s в Codex (%s).\n", r.Name, state, target, r.Scope)
 		fmt.Printf("Токен Codex читает из переменной %s: export %s=\"$(clab auth token)\". В Codex: $clab-work <ключ задачи> (скилы — clab setup).\n", codexTokenEnv, codexTokenEnv)
 	default:
 		raw, _ := json.MarshalIndent(r.Config, "", "  ")
-		fmt.Printf("Конфигурация MCP проекта %s для вашего агента (токен — в переменной окружения %s):\n%s\n", key, codexTokenEnv, raw)
+		what := "проекта " + key
+		if key == "" {
+			what = "инстанса"
+		}
+		fmt.Printf("Конфигурация MCP %s для вашего агента (токен — в переменной окружения %s):\n%s\n", what, codexTokenEnv, raw)
 		fmt.Println("инструкции: clab guide")
 	}
 }
@@ -177,10 +209,18 @@ func printMCPInstalled(r mcpInstalled, key string) {
 // setup.
 var errProjectScopeToken = errors.New("--scope project положил бы токен в .mcp.json репозитория; используйте local или user, либо clab mcp config и ${SDLC_TOKEN} в заголовке")
 
+// instanceMCPName — имя инстансового сервера у агента по умолчанию: не sdlc,
+// чтобы подключение инстансового адреса не заменило проектное.
+const instanceMCPName = "cadence"
+
 // mcpEndpoint — адрес MCP-сервера проекта и заголовок, которым агент
-// предъявляет себя: токен clab, а без него — актор заголовка.
+// предъявляет себя: токен clab, а без него — актор заголовка. Пустой ключ —
+// инстансовый адрес /mcp.
 func (c *Client) mcpEndpoint(key string) (mcpURL, headerName, headerValue string) {
 	mcpURL = c.origin + "/mcp/projects/" + key
+	if key == "" {
+		mcpURL = c.origin + "/mcp"
+	}
 	headerName, headerValue = "X-SDLC-Actor", c.actor
 	if c.token != "" {
 		headerName, headerValue = "Authorization", "Bearer "+c.token

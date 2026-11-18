@@ -161,6 +161,11 @@ func notFound(err error, format string, args ...any) error {
 	return translate(err)
 }
 
+// TaskProjectKey — ключ проекта из ключа задачи разбором строки, без базы:
+// инстансовый адрес MCP (CLAB-483) выбирает по нему проект вызова до
+// проверки прав.
+func TaskProjectKey(taskKey string) (string, error) { return splitTaskKey(taskKey) }
+
 // splitTaskKey разбирает SDLC-42 на ключ проекта и ключ задачи. Ключ задачи
 // уникален только внутри проекта, а в URL приезжает один — префикс и есть
 // проект, потому что ключи выдаются как <PROJECT>-<seq>.

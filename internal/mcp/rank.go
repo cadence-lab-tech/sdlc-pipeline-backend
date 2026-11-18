@@ -14,7 +14,7 @@ import (
 // задачи, правила места в движке. Ключ места считает только сервер.
 
 type rankTaskInput struct {
-	Task     string `json:"task" jsonschema:"ключ задачи, которую двигаем, например SDLC-42"`
+	Task     string `json:"task" jsonschema:"ключ задачи, которую двигаем, например SDLC-42" mcp:"task_key"`
 	Before   string `json:"before,omitempty" jsonschema:"ключ соседа: поставить над ним (он станет соседом ниже)"`
 	After    string `json:"after,omitempty" jsonschema:"ключ соседа: поставить под ним (он станет соседом выше)"`
 	Position string `json:"position,omitempty" jsonschema:"top или bottom: край группы"`

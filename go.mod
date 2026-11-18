@@ -7,6 +7,7 @@ toolchain go1.26.11
 require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-logr/logr v1.4.4
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
@@ -36,7 +37,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.20.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

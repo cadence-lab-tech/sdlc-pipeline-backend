@@ -10,12 +10,13 @@
 	encode zstd gzip
 
 	# То, что обслуживает сервис. Список префиксов — это роутер httpapi:
-	# /v1 — REST, /mcp — агенты, /webhooks — GitHub, /healthz и /readyz —
-	# пробы, /.well-known/oauth-* — метаданные сервера авторизации OAuth
-	# для удалённых MCP-клиентов (RFC 8414, RFC 9728; решение 0079). Только
-	# эти два документа: остальное в /.well-known — интерфейса. Всё
-	# остальное — интерфейс.
-	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
+	# /v1 — REST, /mcp и /mcp/* — агенты (/mcp без косой черты —
+	# инстансовый адрес, CLAB-483: шаблон /mcp/* его не ловит), /webhooks —
+	# GitHub, /healthz и /readyz — пробы, /.well-known/oauth-* — метаданные
+	# сервера авторизации OAuth для удалённых MCP-клиентов (RFC 8414,
+	# RFC 9728; решение 0079). Только эти два документа: остальное в
+	# /.well-known — интерфейса. Всё остальное — интерфейс.
+	@backend path /v1/* /mcp /mcp/* /webhooks/* /healthz /readyz /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
 	handle @backend {
 		# MCP отвечает потоком (SSE): буферизация ответа сломала бы его.
 		reverse_proxy api:8080 {

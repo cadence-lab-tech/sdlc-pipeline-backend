@@ -90,7 +90,7 @@ type createTaskInput struct {
 	Title string `json:"title" jsonschema:"заголовок задачи"`
 	// Тип определяет цикл: task, epic — что заведено в проекте.
 	Type         string          `json:"type,omitempty" jsonschema:"тип задачи: по нему выбирается цикл"`
-	Parent       string          `json:"parent,omitempty" jsonschema:"ключ родительской задачи, например SDLC-42"`
+	Parent       string          `json:"parent,omitempty" jsonschema:"ключ родительской задачи, например SDLC-42" mcp:"task_key"`
 	Description  string          `json:"description,omitempty"`
 	Priority     string          `json:"priority,omitempty" jsonschema:"low, normal, high, urgent"`
 	Assignee     string          `json:"assignee,omitempty" jsonschema:"хэндл принципала-исполнителя"`
@@ -257,8 +257,8 @@ func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallT
 }
 
 type linkTasksInput struct {
-	From   string `json:"from" jsonschema:"ключ задачи, от которой идёт связь"`
-	To     string `json:"to" jsonschema:"ключ задачи на другом конце"`
+	From   string `json:"from" jsonschema:"ключ задачи, от которой идёт связь" mcp:"task_key"`
+	To     string `json:"to" jsonschema:"ключ задачи на другом конце" mcp:"task_key"`
 	Rel    string `json:"rel,omitempty" jsonschema:"blocks (по умолчанию), relates_to, duplicates, shares_surface, split_from"`
 	Note   string `json:"note,omitempty"`
 	Remove bool   `json:"remove,omitempty" jsonschema:"снять связь вместо заведения"`
@@ -373,7 +373,7 @@ func (s *Server) assignTask(ctx context.Context, in assignTaskInput) (*sdk.CallT
 
 type setTaskParentInput struct {
 	TaskKey string `json:"task_key" jsonschema:"ключ задачи"`
-	Parent  string `json:"parent,omitempty" jsonschema:"ключ нового родителя; пусто — снять родителя"`
+	Parent  string `json:"parent,omitempty" jsonschema:"ключ нового родителя; пусто — снять родителя" mcp:"task_key"`
 }
 
 // setTaskParent — паритет PUT /v1/tasks/:key/parent (CLAB-196): тот же
