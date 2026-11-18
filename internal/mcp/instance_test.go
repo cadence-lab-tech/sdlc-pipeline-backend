@@ -173,13 +173,14 @@ func TestSelectProject(t *testing.T) {
 }
 
 // R8: import_rules на инстансовом адресе называет проект из аргумента; без
-// него — проект этого сервера, как раньше.
+// него велит выбрать проект и передавать project (CLAB-484, AC-18.5).
 func TestImportRulesProjectArg(t *testing.T) {
 	cs := connectPrompts(t)
 	if text := promptText(t, cs, "import_rules", map[string]string{ProjectArg: "ACME"}); !strings.Contains(text, "в проект ACME") {
 		t.Fatalf("project не назван: %q", text[:80])
 	}
-	if text := promptText(t, cs, "import_rules", nil); !strings.Contains(text, "в проект этого сервера MCP") {
-		t.Fatalf("без project: %q", text[:80])
+	if text := promptText(t, cs, "import_rules", nil); !strings.Contains(text, "sdlc_list_projects") ||
+		!strings.Contains(text, "аргументом project") || strings.Contains(text, "этого сервера") {
+		t.Fatalf("без project: %q", text[:200])
 	}
 }

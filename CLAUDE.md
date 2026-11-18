@@ -75,7 +75,11 @@ internal/
   store/postgres/   запросы поверх pgx, миграции, blobs
   mcp/              MCP-сервер: тулы поверх тех же сервисов;
                     orchestration.go — нарезка эпика, связи, стоимость, промпт
-                    work_on_task
+                    work_on_task; serverinstructions.go — instructions в
+                    initialize для чата без скилов (один текст на оба адреса),
+                    annotations.go — title и подсказки каждого тула: новый тул
+                    без записи в таблице не регистрируется; тексты для клиента
+                    без ключей настройки и имён провайдеров (texts_test.go)
   httpapi/          роутер Gin, middleware (аутентификация, guard прав), хендлеры
   github/           чтение репозиториев: дерево, файлы, PR, проверки;
                     app.go — GitHub App, токены установок и выбор учётных

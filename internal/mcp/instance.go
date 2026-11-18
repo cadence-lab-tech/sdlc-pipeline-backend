@@ -159,7 +159,7 @@ func (s *Server) selectProject(ctx context.Context, arg, taskKey string) (contex
 
 // selectPromptProject — выбор проекта промпта: тот же порядок, что у тулов,
 // но без ключа задачи и без ошибки на инстансовом адресе — промпт без
-// проекта говорит «в проект этого сервера MCP».
+// проекта велит выбрать его (sdlc_list_projects) и передавать project.
 func selectPromptProject(ctx context.Context, arg string) (context.Context, error) {
 	if path := pathProject(ctx); path != "" {
 		if arg != "" && arg != path {

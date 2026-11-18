@@ -42,7 +42,7 @@ func (s *Server) registerCatalogTools() {
 			"dry_run=true отдаёт отчёт, ничего не меняя.",
 		s.importBundle)
 	add(s, "sdlc_add_repository",
-		"Привязать к проекту репозиторий GitHub (owner/name или URL) с подсказкой роли: "+
+		"Привязать к проекту репозиторий (owner/name или URL) с подсказкой роли: "+
 			"backend, frontend, docs.",
 		s.addRepository)
 	add(s, "sdlc_put_role",
@@ -85,11 +85,11 @@ func (s *Server) registerCatalogTools() {
 func (s *Server) registerPrompts() {
 	s.addPrompt(&sdk.Prompt{
 		Name: "import_rules",
-		Description: "Перенести правила команды из локального репозитория в проект этого сервера MCP: " +
-			"роли, документы, репозитории.",
+		Description: "Перенести правила команды из локального репозитория в проект: " +
+			"роли, документы, репозитории. Нужен доступ к файлам репозитория.",
 		Arguments: []*sdk.PromptArgument{
 			{Name: "path", Description: "корень репозитория с правилами; по умолчанию текущий каталог"},
-			{Name: "repository", Description: "owner/name этого репозитория на GitHub, если известен"},
+			{Name: "repository", Description: "owner/name этого репозитория, если известен"},
 			{Name: ProjectArg, Description: "ключ проекта, куда переносить правила; на инстансовом адресе /mcp — " +
 				"проект из sdlc_list_projects, на адресе проекта не нужен"},
 		},
@@ -102,14 +102,15 @@ func (s *Server) registerPrompts() {
 			}
 			repo = req.Params.Arguments["repository"]
 		}
-		target := "в проект этого сервера MCP"
+		target := "в проект, который сначала нужно выбрать: вызови sdlc_list_projects, выбери проект " +
+			"вместе с человеком и передавай его ключ аргументом project в каждый вызов тулов"
 		if key, err := projectKey(ctx); err == nil {
 			target = "в проект " + key
 		}
 		text := "Перенеси правила команды из репозитория " + path + " " + target + ".\n\n" +
 			ImportGuide
 		if repo != "" {
-			text += "\n\nРепозиторий на GitHub: " + repo + " — добавь его в связку первым."
+			text += "\n\nРепозиторий: " + repo + " — добавь его в связку первым."
 		}
 		return &sdk.GetPromptResult{
 			Description: "перенос правил в проект",
@@ -171,7 +172,7 @@ func (s *Server) importBundle(ctx context.Context, in importInput) (*sdk.CallToo
 }
 
 type addRepositoryInput struct {
-	Repository    string   `json:"repository" jsonschema:"owner/name или URL GitHub"`
+	Repository    string   `json:"repository" jsonschema:"owner/name или URL репозитория"`
 	DefaultBranch string   `json:"default_branch,omitempty"`
 	RoleHint      string   `json:"role_hint,omitempty" jsonschema:"backend | frontend | docs | infra — за что отвечает репозиторий"`
 	WatchBranches []string `json:"watch_branches,omitempty" jsonschema:"ветки под индексацией; по умолчанию default_branch"`
@@ -199,7 +200,7 @@ func (s *Server) addRepository(ctx context.Context, in addRepositoryInput) (*sdk
 }
 
 type putRoleInput struct {
-	Key            string                        `json:"key" jsonschema:"ключ роли: analyst, developer, reviewer"`
+	Key            string                        `json:"key" jsonschema:"ключ роли: по нему роль назначают этапам цикла"`
 	Name           string                        `json:"name,omitempty"`
 	Summary        string                        `json:"summary,omitempty"`
 	Instructions   string                        `json:"instructions,omitempty" jsonschema:"инструкция одной строкой (markdown) — станет документом main.md; либо documents"`
