@@ -131,7 +131,11 @@ func TestFetchClientDocumentRefusals(t *testing.T) {
 	}
 
 	private := []string{"10.1.2.3", "100.64.0.1", "127.0.0.1", "169.254.169.254", "172.16.0.1", "192.168.1.1",
-		"198.18.0.1", "0.0.0.1", "224.0.0.1", "240.0.0.1", "::1", "fc00::1", "fe80::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1", "::"}
+		"198.18.0.1", "0.0.0.1", "224.0.0.1", "240.0.0.1", "::1", "fc00::1", "fe80::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1", "::",
+		// Встроенный IPv4: NAT64 известного префикса с запрещённым IPv4,
+		// локальный NAT64, 6to4, Teredo и IPv4-compatible — любые.
+		"64:ff9b::a00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::7f00:1", "64:ff9b:1::808:808", "2002:808:808::1",
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "::808:808", "fe80::1%eth0"}
 	for _, ip := range private {
 		stub, f, res := newCIMDStub(t)
 		res.answers = [][]netip.Addr{{netip.MustParseAddr(stubPublic), netip.MustParseAddr(ip)}}
@@ -142,10 +146,15 @@ func TestFetchClientDocumentRefusals(t *testing.T) {
 			t.Errorf("%s: %v, соединений %v", ip, err, stub.dialed)
 		}
 	}
-	// Адрес литералом в client_id — та же проверка.
-	if _, f, _ := newCIMDStub(t); true {
-		if _, err := f.Fetch(ctx, "https://10.0.0.1/client.json"); !isCategory(err, CIMDForbidden) {
-			t.Errorf("литерал: %v", err)
+	// Адрес литералом в client_id — та же проверка, и для адресов со
+	// встроенным IPv4 и с зоной (RFC 6874, %25 в URL).
+	for _, lit := range []string{"https://10.0.0.1/client.json", "https://[64:ff9b::a00:1]/c", "https://[64:ff9b::a9fe:a9fe]/c",
+		"https://[64:ff9b:1::808:808]/c", "https://[2002:a00:1::1]/c", "https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/c",
+		"https://[::a00:1]/c", "https://[::1%25lo]/c", "https://[fe80::1%25eth0]/c"} {
+		stub, f, _ := newCIMDStub(t)
+		stub.handler = serveJSON(docJSON(lit, "https://claude.ai/cb"), nil)
+		if _, err := f.Fetch(ctx, lit); !isCategory(err, CIMDForbidden) || len(stub.dialed) != 0 {
+			t.Errorf("литерал %s: %v, соединений %v", lit, err, stub.dialed)
 		}
 	}
 
@@ -233,12 +242,52 @@ func isCategory(err error, category string) bool {
 }
 
 func TestForbiddenAddr(t *testing.T) {
-	for _, ok := range []string{"203.0.113.10", "8.8.8.8", "2001:4860:4860::8888", "160.79.104.1"} {
+	for _, ok := range []string{"203.0.113.10", "8.8.8.8", "2001:4860:4860::8888", "160.79.104.1",
+		// Соседи новых диапазонов и NAT64 известного префикса с публичным IPv4.
+		"2003::1", "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", "2001:4860::1", "2001:1::1", "64:ff9b::808:808",
+		"64:ff9b::cb00:710a", "::1:0:0:0", "::ffff:8.8.8.8"} {
 		if ForbiddenAddr(netip.MustParseAddr(ok)) {
 			t.Errorf("%s запрещён", ok)
 		}
 	}
+	for _, bad := range []string{
+		// NAT64 известного префикса (RFC 6052): встроенный IPv4 из каждого
+		// запрещённого диапазона.
+		"64:ff9b::a00:1", "64:ff9b::6440:1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::ac10:1",
+		"64:ff9b::c0a8:101", "64:ff9b::c612:1", "64:ff9b::1", "64:ff9b::e000:1", "64:ff9b::f000:1",
+		"64:ff9b::", "64:ff9b::ffff:ffff", "64:ff9b::10.0.0.1",
+		// NAT64 локального использования (RFC 8215) — целиком.
+		"64:ff9b:1::a00:1", "64:ff9b:1::808:808", "64:ff9b:1::", "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+		// 6to4 (RFC 3056) — целиком.
+		"2002:a00:1::1", "2002:808:808::1", "2002::", "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+		// Teredo (RFC 4380) и IPv4-compatible (RFC 4291) — целиком.
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff",
+		"::a00:1", "::808:808", "::ffff:ffff",
+		// Зона: Prefix.Contains с ней не совпадает ни с чем.
+		"fe80::1%eth0", "::1%lo", "2001:4860:4860::8888%eth0",
+		// IPv4-mapped от встроенного: запись не открывает путь в обход.
+		"::ffff:10.0.0.1",
+	} {
+		if !ForbiddenAddr(netip.MustParseAddr(bad)) {
+			t.Errorf("%s не запрещён", bad)
+		}
+	}
 	if !ForbiddenAddr(netip.Addr{}) {
 		t.Error("пустой адрес не запрещён")
+	}
+}
+
+// Годный NAT64 известного префикса: соединение идёт на сам IPv6-адрес, а не
+// на встроенный IPv4, и документ загружается как обычно.
+func TestFetchClientDocumentNAT64(t *testing.T) {
+	stub, f, res := newCIMDStub(t)
+	res.answers = [][]netip.Addr{{netip.MustParseAddr("64:ff9b::808:808")}}
+	stub.handler = serveJSON(docJSON(stubClientID, "https://claude.ai/cb"), nil)
+	doc, err := f.Fetch(context.Background(), stubClientID)
+	if err != nil || doc.Name != "Claude" {
+		t.Fatalf("NAT64: %+v %v", doc, err)
+	}
+	if len(stub.dialed) != 1 || stub.dialed[0] != "[64:ff9b::808:808]:443" {
+		t.Fatalf("NAT64: соединения %v", stub.dialed)
 	}
 }
