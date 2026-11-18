@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Дамп базы с ротацией. Ставится в cron рута на сервере (cloud-init делает
-# это сам):
+# Дамп базы и архив тома blobs с ротацией. Ставится в cron рута на сервере
+# (cloud-init делает это сам):
 #
 #   0 3 * * * /opt/sdlc/backup.sh >> /var/log/sdlc-backup.log 2>&1
 #
 # Дампы лежат на той же машине, что и база, — то есть защищают от «уронил
-# миграцией» и «удалил не то», но не от потери самой машины. Содержимое
-# артефактов при этом живёт в S3 и в дамп не входит: в базе лежат адреса.
+# миграцией» и «удалил не то», но не от потери самой машины. Крупное
+# содержимое артефактов в дамп не входит, в базе лежат адреса: без бакета оно
+# живёт в томе blobs и архивируется здесь, с бакетом архив не нужен.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -36,6 +37,15 @@ if [ "$(stat -c%s "$file")" -lt 1024 ]; then
   exit 1
 fi
 
-find "$dir" -name 'sdlc-*.sql.gz' -mtime "+$keep_days" -delete
-
 echo "✓ $(date +%F' '%T) $file ($(du -h "$file" | cut -f1))"
+
+# Том читается отдельным контейнером: в образах api и воркера нет shell и tar.
+# Файлы неизменяемы (имя — sha256), поэтому копия согласована и на живом сервисе.
+if [ -z "${SDLC_BLOB_S3_BUCKET:-}" ]; then
+  blobs="$dir/sdlc-blobs-$(date +%Y%m%d-%H%M%S).tar.gz"
+  docker run --rm -v sdlc_blobs:/blobs:ro caddy:2-alpine tar -C /blobs -czf - . > "$blobs"
+  gzip -t "$blobs"
+  echo "✓ $(date +%F' '%T) $blobs ($(du -h "$blobs" | cut -f1))"
+fi
+
+find "$dir" \( -name 'sdlc-*.sql.gz' -o -name 'sdlc-blobs-*.tar.gz' \) -mtime "+$keep_days" -delete
