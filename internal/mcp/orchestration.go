@@ -28,7 +28,7 @@ func (s *Server) registerOrchestrationTools() {
 			"задачу на эпик, blocks задаёт порядок, assignee адресует её исполнителю, "+
 			"external_ref ссылается на тикет основного трекера. "+
 			"model_level — рекомендованный уровень модели задачи (low, medium, high), "+
-			"stage_settings — уровни этапов: {\"development\": {\"model_level\": \"high\"}}, "+
+			"stage_settings — уровни этапов: {\"<ключ статуса>\": {\"model_level\": \"high\"}}, "+
 			"ключи — статусы цикла задачи с ролью-исполнителем. "+
 			"Агент вправе создавать только дочерние задачи той, которую держит, и только "+
 			"внутри её области репозиториев. Вложенность — один уровень: parent — только задача "+
@@ -100,12 +100,12 @@ type createTaskInput struct {
 	Blocks       []string        `json:"blocks,omitempty" jsonschema:"ключи задач, которые новая блокирует"`
 	// any, а не json.RawMessage: схему тула выводит jsonschema-go, и
 	// RawMessage для него — массив байтов, а не объект.
-	ExternalRef any    `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://jira.example.com/browse/PROJ-12\"}}"`
+	ExternalRef any    `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер: {\"<система>\": {\"key\": \"<ключ тикета>\", \"url\": \"<ссылка на тикет>\"}}"`
 	ModelLevel  string `json:"model_level,omitempty" jsonschema:"рекомендованный уровень модели задачи: low, medium, high"`
 	// any — по той же причине, что external_ref.
-	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов: {\"development\": {\"model_level\": \"high\"}}; ключи — статусы цикла задачи с ролью-исполнителем"`
+	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов: {\"<ключ статуса>\": {\"model_level\": \"high\"}}; ключи — статусы цикла задачи с ролью-исполнителем"`
 	// any — по той же причине, что external_ref.
-	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов: {\"design\": false}; ключи — необязательные статусы цикла (sdlc_whoami, workflows[].optional_stages), не названные берут умолчание цикла"`
+	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов: {\"<ключ статуса>\": false}; ключи — необязательные статусы цикла (sdlc_whoami, workflows[].optional_stages), не названные берут умолчание цикла"`
 }
 
 func (s *Server) createTask(ctx context.Context, in createTaskInput) (*sdk.CallToolResult, any, error) {
@@ -192,12 +192,12 @@ type updateTaskInput struct {
 	Priority    *string   `json:"priority,omitempty" jsonschema:"low, normal, high, urgent"`
 	Labels      *[]string `json:"labels,omitempty" jsonschema:"метки целиком: список заменяет прежний набор"`
 	// nil — не трогать: null и отсутствие поля для агента одно и то же.
-	ExternalRef any     `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер целиком: {\"jira\": {\"key\": \"PROJ-12\", \"url\": \"https://…\"}}; {} снимает ссылки"`
+	ExternalRef any     `json:"external_ref,omitempty" jsonschema:"ссылка на основной трекер целиком: {\"<система>\": {\"key\": \"<ключ тикета>\", \"url\": \"<ссылка на тикет>\"}}; {} снимает ссылки"`
 	ModelLevel  *string `json:"model_level,omitempty" jsonschema:"уровень модели задачи: low, medium, high; пустая строка снимает его"`
 	// any — по той же причине, что external_ref; nil — не трогать.
-	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов, сливаются с прежними: {\"testing\": {\"model_level\": \"low\"}}; {\"testing\": {\"model_level\": \"\"}} снимает уровень этапа"`
+	StageSettings any `json:"stage_settings,omitempty" jsonschema:"уровни этапов, сливаются с прежними: {\"<ключ статуса>\": {\"model_level\": \"low\"}}; {\"<ключ статуса>\": {\"model_level\": \"\"}} снимает уровень этапа"`
 	// any — по той же причине; nil — не трогать.
-	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов, сливается по ключам: {\"design\": true}; своей задаче токеном задачи — нельзя (решение человека), дочерним — можно"`
+	OptionalStages any `json:"optional_stages,omitempty" jsonschema:"выбор необязательных этапов, сливается по ключам: {\"<ключ статуса>\": true}; своей задаче токеном задачи — нельзя (решение человека), дочерним — можно"`
 }
 
 func (s *Server) updateTask(ctx context.Context, in updateTaskInput) (*sdk.CallToolResult, any, error) {

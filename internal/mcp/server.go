@@ -101,7 +101,7 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 		Name:    ServerName,
 		Title:   "Cadence Lab",
 		Version: version,
-	}, nil)
+	}, &sdk.ServerOptions{Instructions: Instructions})
 	s.registerTools()
 	s.registerCatalogTools()
 	s.registerOrchestrationTools()

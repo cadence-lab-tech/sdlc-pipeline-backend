@@ -317,9 +317,22 @@ func TestImportRulesProviderNeutral(t *testing.T) {
 			}
 		}
 	}
-	// Без проекта в контексте (тест без транспорта) — проект этого сервера.
-	if !strings.Contains(head, "в проект этого сервера MCP") {
-		t.Errorf("import_rules: первая строка %q", head)
+	// Без проекта в контексте (общий адрес без аргумента project, CLAB-484) —
+	// выбрать проект, а не «проект этого сервера».
+	for _, want := range []string{"sdlc_list_projects", "аргументом project"} {
+		if !strings.Contains(head, want) {
+			t.Errorf("import_rules без проекта: в первой строке нет %q: %q", want, head)
+		}
+	}
+	for _, banned := range []string{"этого сервера", "сервера MCP"} {
+		if strings.Contains(head, banned) || strings.Contains(desc, banned) {
+			t.Errorf("import_rules: %q в описании или первой строке", banned)
+		}
+	}
+	// С проектом (адрес проекта или аргумент project) — «в проект KEY», как прежде.
+	withProject := promptText(t, cs, "import_rules", map[string]string{"path": ".", "project": "ACME"})
+	if h, _, _ := strings.Cut(withProject, "\n"); !strings.Contains(h, "в проект ACME.") {
+		t.Errorf("import_rules с проектом: первая строка %q", h)
 	}
 	if !strings.Contains(text, ImportGuide) {
 		t.Error("import_rules: текст ImportGuide не целиком")
