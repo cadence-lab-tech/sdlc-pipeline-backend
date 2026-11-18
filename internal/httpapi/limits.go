@@ -49,8 +49,9 @@ func BodyLimit(blobMaxBytes int) int64 {
 }
 
 // limitRequestBody ставит общий предел на тело каждого запроса к /v1 и
-// /mcp. Стоит на движке до групп: открытые маршруты /v1/auth/*,
-// /v1/instance и /v1/agent-kit зарегистрированы вне группы v1, и предел
+// MCP (адрес проекта и инстансовый /mcp). Стоит на движке до групп:
+// открытые маршруты /v1/auth/*, /v1/instance и /v1/agent-kit
+// зарегистрированы вне группы v1, и предел
 // обязан накрыть и их. Стоит и до журнала действий: bodyTap читает тело
 // уже через предел и дочитать сверх него не может.
 //
@@ -67,7 +68,7 @@ func (s *Server) limitRequestBody() gin.HandlerFunc {
 	limit := s.bodyLimit()
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if limit <= 0 || !(path == "/v1" || strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/mcp/")) {
+		if limit <= 0 || !(path == "/v1" || strings.HasPrefix(path, "/v1/") || path == "/mcp" || strings.HasPrefix(path, "/mcp/")) {
 			c.Next()
 			return
 		}

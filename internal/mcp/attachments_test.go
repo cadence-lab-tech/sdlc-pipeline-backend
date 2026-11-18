@@ -349,7 +349,7 @@ func TestToolSetHasNoFileContentTools(t *testing.T) {
 		"sdlc_export_bundle", "sdlc_get_agent_settings", "sdlc_get_artifact", "sdlc_get_document",
 		"sdlc_get_drift", "sdlc_get_instruction", "sdlc_get_role", "sdlc_get_task", "sdlc_heartbeat",
 		"sdlc_import_bundle", "sdlc_import_guide", "sdlc_link_repo_ref", "sdlc_link_tasks",
-		"sdlc_list_agent_settings_versions", "sdlc_list_documents", "sdlc_list_instructions", "sdlc_list_role_proposals", "sdlc_list_tasks",
+		"sdlc_list_agent_settings_versions", "sdlc_list_documents", "sdlc_list_instructions", "sdlc_list_projects", "sdlc_list_role_proposals", "sdlc_list_tasks",
 		"sdlc_move_task", "sdlc_propose_role_version", "sdlc_put_agent_settings_draft", "sdlc_put_document",
 		"sdlc_put_instruction", "sdlc_put_role", "sdlc_rank_task", "sdlc_reject_role_proposal",
 		"sdlc_release", "sdlc_report_usage", "sdlc_request_transition", "sdlc_resolve_drift",

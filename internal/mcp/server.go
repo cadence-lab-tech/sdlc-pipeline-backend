@@ -1,7 +1,8 @@
 // Package mcp — MCP-сервер для локальных агентов.
 //
-// Транспорт — streamable HTTP, привязанный к проекту:
-// /mcp/projects/{PROJECT}. Тулы не содержат логики: они разбирают аргументы,
+// Транспорт — streamable HTTP по двум адресам: адрес проекта
+// /mcp/projects/{PROJECT} и инстансовый /mcp (CLAB-483), где проект
+// выбирается на каждом вызове (instance.go). Тулы не содержат логики: они разбирают аргументы,
 // зовут те же сервисы, что и REST, и сериализуют ответ (решение 0011).
 //
 // Сессии сознательно stateless: каждый POST несёт своего актора заголовком, и
@@ -31,12 +32,16 @@ const (
 	keyProject ctxKey = iota
 	keyIdentity
 	keyRequestID
+	// Проект адреса проекта. Без него вызов пришёл на инстансовый адрес, и
+	// keyProject появится только после выбора проекта на вызове.
+	keyPath
 )
 
-// WithProject кладёт в контекст проект, к которому привязано подключение.
-// Проект приезжает из пути, а не из аргументов тула: агент подключается к
-// конкретному проекту и не должен иметь возможности спутать их.
+// WithProject кладёт в контекст проект адреса проекта /mcp/projects/{KEY}:
+// проект приезжает из пути, и аргумент project вызова обязан с ним совпасть.
+// Инстансовый адрес его не зовёт — проект выбирает обёртка тулов.
 func WithProject(ctx context.Context, projectKey string) context.Context {
+	ctx = context.WithValue(ctx, keyPath, projectKey)
 	return context.WithValue(ctx, keyProject, projectKey)
 }
 
@@ -102,6 +107,7 @@ func NewServer(log *slog.Logger, store *postgres.Store, engine *workflow.Engine,
 	s.registerOrchestrationTools()
 	s.registerPrompts()
 	s.registerWorkPrompt()
+	s.registerInstanceTools()
 	return s
 }
 

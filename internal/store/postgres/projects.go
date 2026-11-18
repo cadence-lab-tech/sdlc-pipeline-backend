@@ -54,6 +54,16 @@ func (s *Store) GetProjectByKey(ctx context.Context, q Querier, key string) (dom
 	return p, nil
 }
 
+// ProjectKeyByID — ключ проекта по id: проект привязки токена на
+// инстансовом адресе MCP (CLAB-483).
+func (s *Store) ProjectKeyByID(ctx context.Context, q Querier, id uuid.UUID) (string, error) {
+	var key string
+	if err := q.QueryRow(ctx, `SELECT key FROM projects WHERE id = $1`, id).Scan(&key); err != nil {
+		return "", notFound(err, "проект токена не найден")
+	}
+	return key, nil
+}
+
 type CreateProjectInput struct {
 	Key         string
 	Name        string

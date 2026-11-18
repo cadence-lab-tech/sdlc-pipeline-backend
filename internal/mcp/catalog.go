@@ -80,8 +80,8 @@ func (s *Server) registerCatalogTools() {
 // registerPrompts объявляет промпт переноса правил: клиент MCP с промптами
 // запускает им сценарий целиком. Агенту без промптов тот же сценарий дают
 // clab import-guide (текст ImportGuide) и clab import --dry-run (решение 0077
-// п. 1: команды у этого промпта нет). Проект — тот, к которому привязан
-// сервер MCP, его ключ берётся из пути, а не вшивается в текст.
+// п. 1: команды у этого промпта нет). Проект — из пути адреса проекта или
+// аргумент project на инстансовом адресе (CLAB-483), а не вшивается в текст.
 func (s *Server) registerPrompts() {
 	s.addPrompt(&sdk.Prompt{
 		Name: "import_rules",
@@ -90,6 +90,8 @@ func (s *Server) registerPrompts() {
 		Arguments: []*sdk.PromptArgument{
 			{Name: "path", Description: "корень репозитория с правилами; по умолчанию текущий каталог"},
 			{Name: "repository", Description: "owner/name этого репозитория на GitHub, если известен"},
+			{Name: ProjectArg, Description: "ключ проекта, куда переносить правила; на инстансовом адресе /mcp — " +
+				"проект из sdlc_list_projects, на адресе проекта не нужен"},
 		},
 	}, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
 		path := "."
