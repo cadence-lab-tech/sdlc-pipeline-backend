@@ -84,7 +84,7 @@ func TestKitFrontmatter(t *testing.T) {
 // английский: кириллицы в наборе нет.
 func TestKitIsGeneric(t *testing.T) {
 	forbidden := []string{
-		"CLAB-", "sdlc.food-cart.ru", "stepankaziatko", "sdlc-pipeline", "stack.sh",
+		"CLAB-", "cadence-lab.ru", "stepankaziatko", "sdlc-pipeline", "stack.sh",
 		"analysis_done", "dev_done", "testing_passed", "merge_ready",
 	}
 	k, err := Load("dev")

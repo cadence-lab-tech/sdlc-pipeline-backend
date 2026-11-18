@@ -110,7 +110,7 @@ func TestNoCycleVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`analysis|development|testing|merge|epic|release|story|incident|CLAB|food-cart`)
+	re := regexp.MustCompile(`analysis|development|testing|merge|epic|release|story|incident|CLAB|cadence-lab\.ru`)
 	for _, f := range files {
 		if strings.HasPrefix(f.Path, "types/") {
 			continue
