@@ -135,7 +135,9 @@ func TestFetchClientDocumentRefusals(t *testing.T) {
 		// Встроенный IPv4: NAT64 известного префикса с запрещённым IPv4,
 		// локальный NAT64, 6to4, Teredo и IPv4-compatible — любые.
 		"64:ff9b::a00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::7f00:1", "64:ff9b:1::808:808", "2002:808:808::1",
-		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "::808:808", "fe80::1%eth0"}
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "::808:808", "fe80::1%eth0",
+		// IPv4-translated SIIT (RFC 2765): частный и публичный встроенный IPv4.
+		"::ffff:0:a00:1", "::ffff:0:808:808"}
 	for _, ip := range private {
 		stub, f, res := newCIMDStub(t)
 		res.answers = [][]netip.Addr{{netip.MustParseAddr(stubPublic), netip.MustParseAddr(ip)}}
@@ -150,7 +152,7 @@ func TestFetchClientDocumentRefusals(t *testing.T) {
 	// встроенным IPv4 и с зоной (RFC 6874, %25 в URL).
 	for _, lit := range []string{"https://10.0.0.1/client.json", "https://[64:ff9b::a00:1]/c", "https://[64:ff9b::a9fe:a9fe]/c",
 		"https://[64:ff9b:1::808:808]/c", "https://[2002:a00:1::1]/c", "https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/c",
-		"https://[::a00:1]/c", "https://[::1%25lo]/c", "https://[fe80::1%25eth0]/c"} {
+		"https://[::a00:1]/c", "https://[::ffff:0:a00:1]/c", "https://[::ffff:0:808:808]/c", "https://[::1%25lo]/c", "https://[fe80::1%25eth0]/c"} {
 		stub, f, _ := newCIMDStub(t)
 		stub.handler = serveJSON(docJSON(lit, "https://claude.ai/cb"), nil)
 		if _, err := f.Fetch(ctx, lit); !isCategory(err, CIMDForbidden) || len(stub.dialed) != 0 {
@@ -245,7 +247,7 @@ func TestForbiddenAddr(t *testing.T) {
 	for _, ok := range []string{"203.0.113.10", "8.8.8.8", "2001:4860:4860::8888", "160.79.104.1",
 		// Соседи новых диапазонов и NAT64 известного префикса с публичным IPv4.
 		"2003::1", "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", "2001:4860::1", "2001:1::1", "64:ff9b::808:808",
-		"64:ff9b::cb00:710a", "::1:0:0:0", "::ffff:8.8.8.8"} {
+		"64:ff9b::cb00:710a", "::1:0:0:0", "::ffff:8.8.8.8", "::fffe:0:808:808", "::ffff:1:0:0"} {
 		if ForbiddenAddr(netip.MustParseAddr(ok)) {
 			t.Errorf("%s запрещён", ok)
 		}
@@ -263,6 +265,10 @@ func TestForbiddenAddr(t *testing.T) {
 		// Teredo (RFC 4380) и IPv4-compatible (RFC 4291) — целиком.
 		"2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff",
 		"::a00:1", "::808:808", "::ffff:ffff",
+		// IPv4-translated SIIT (RFC 2765) — целиком, и частный, и публичный
+		// встроенный IPv4, и границы префикса. Это не IPv4-mapped.
+		"::ffff:0:a00:1", "::ffff:0:10.0.0.1", "::ffff:0:7f00:1", "::ffff:0:a9fe:a9fe", "::ffff:0:808:808",
+		"::ffff:0:0:0", "::ffff:0:ffff:ffff",
 		// Зона: Prefix.Contains с ней не совпадает ни с чем.
 		"fe80::1%eth0", "::1%lo", "2001:4860:4860::8888%eth0",
 		// IPv4-mapped от встроенного: запись не открывает путь в обход.
