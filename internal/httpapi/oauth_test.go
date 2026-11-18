@@ -648,6 +648,14 @@ func TestOAuthCIMD(t *testing.T) {
 			t.Errorf("AC-7 %s: запрос к цели", id)
 		}
 	}
+	// Адреса IPv6 со встроенным частным IPv4 (NAT64, 6to4) — тот же отказ.
+	for _, id := range []string{"https://[64:ff9b::a00:1]/c", "https://[2002:a00:1::1]/c"} {
+		hits := f.cimd.count()
+		bad(id, defaultAuthz(id, redirect, challenge, ""))
+		if f.cimd.count() != hits {
+			t.Errorf("встроенный IPv4 %s: запрос к цели", id)
+		}
+	}
 	f.cimd.mu.Lock()
 	f.cimd.body = `{"client_id":"https://example.com/other.json","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`
 	f.cimd.mu.Unlock()
