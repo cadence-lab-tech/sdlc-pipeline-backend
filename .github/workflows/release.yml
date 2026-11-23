@@ -96,7 +96,7 @@ jobs:
       # v7, как в ci.yml: v5 читает из go.mod только строку go (ставил бы
       # 1.26.0 и докачивал тулчейн сам), v7 берёт строку toolchain и ставит
       # GOTOOLCHAIN=local — сборка идёт ровно на тулчейне из go.mod.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
 
@@ -326,7 +326,7 @@ jobs:
       # Находка вне VEX — предупреждение с ID в сводке прогона, релиз не
       # падает: образ уже опубликован и подписан, а разбор находки — PR
       # (исправление или запись в openvex.json).
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
           cache: false
